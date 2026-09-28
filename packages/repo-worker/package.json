@@ -1,0 +1,19 @@
+{
+  "name": "@agentic-qa/repo-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./runner": "./src/runner.ts",
+    "./config": "./src/config.ts",
+    "./snapshot": "./src/snapshot.ts"
+  },
+  "dependencies": {
+    "fast-glob": "^3.3.3",
+    "micromatch": "^4.0.8",
+    "tar-stream": "^3.2.1",
+    "xml2js": "^0.6.2",
+    "yaml": "^2.8.1",
+    "zod": "^4.6.5"
+  }
+}

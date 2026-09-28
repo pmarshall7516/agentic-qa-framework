@@ -1,0 +1,13 @@
+{
+  "name": "@agentic-qa/domain",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./work-item": "./src/work-item.ts",
+    "./queue": "./src/queue.ts",
+    "./qa-contract": "./src/qa-contract.ts",
+    "./run": "./src/run.ts"
+  },
+  "dependencies": { "zod": "^4.6.5" }
+}

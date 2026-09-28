@@ -39,6 +39,9 @@ tests:
     timeoutSeconds: 600
     resultFormat: junit
     resultPaths: [artifacts/unit-junit.xml]
+    scenarioMappings:
+      - scenarioId: wi-4821-1-abcdef1234-repo
+        testCaseIds: [Search results.title appears]
     network: none
 site:
   baseUrl: https://staging.example.test
@@ -55,12 +58,16 @@ limits:
 ## Validation and execution semantics
 
 - Reject unknown top-level keys, duplicate test IDs, empty executable, scalar shell commands, absolute/out-of-root paths, symlink escapes, environment-variable expansion in command fields, and unsupported result formats. `workingDirectory` and `resultPaths` resolve inside the disposable snapshot only.
-- `setup` and `tests` use executable-plus-arguments arrays passed directly to the process API, with `shell: false`. The executable must match an explicit allowlist in the app's worker policy or be approved as a project-specific exception. The UI shows the exact resolved executable and arguments before execution. The sample assumes `qa:unit` is a project script that emits the listed JUnit file.
+- `setup` and `tests` use executable-plus-arguments arrays passed directly to the Docker CLI, with host shell invocation disabled. The v1 worker image currently allows `node`, `npm` and `npx`; the image and allowlist must be extended before other runtimes are enabled. The UI shows each exact command when reviewing the project config. The sample assumes `qa:unit` is a project script that emits the listed JUnit file.
 - `include` defines files copied from the selected source snapshot. The app also enforces its own exclusion list for credentials, `.git` internals, OS files and private key patterns even if the config tries to include them. Missing files are reported; they are not silently ignored if required by a test.
-- `network` is `none` by default. `approved-registries` requires a separately approved registry-origin list and a network boundary enforced by the worker runtime; if unavailable, the command is blocked. Config cannot grant arbitrary outbound access. Setup runs before tests in the same disposable workspace. Dependency lifecycle scripts remain disabled by default; projects requiring them need a reviewed exception or a prebuilt worker image.
-- `resultFormat` is `junit` or `none` in v1. JUnit testcase identity and assertion failures are parsed into observations. A zero process exit without test cases/criterion mapping does not verify a criterion.
+- `network` is `none` by default. This v1 worker blocks `approved-registries` because it has no allowlisted egress proxy. Config cannot grant arbitrary outbound access. Setup runs before tests in the same disposable workspace. Dependency lifecycle scripts remain disabled by default; projects requiring them need a reviewed exception or a prebuilt worker image.
+- `resultFormat` is `junit` or `none` in v1. A JUnit command maps exact contract `Scenario.id` values to exact `classname.name` testcase identities with `scenarioMappings`. Each mapping must match every listed test identity; extra unrelated testcases cannot verify that Scenario. Empty/missing JUnit output or a missing mapped identity is an error observation. A zero process exit without parsed and explicitly mapped assertions does not verify a criterion. Commands with `resultFormat: none` may provide diagnostic observations but cannot verify a criterion.
 - `site` is optional for repository-only runs. A site-only run may use GUI settings without this file. `baseUrl` and origins are validated before browser launch. `accountSecretRef` names a local secret and never contains its value.
 - Global limits set in the app are ceilings. A repository config can request lower limits, never raise them. The effective limits and config hash are frozen into the run manifest.
+
+## Current v1 worker boundary
+
+The coordinator copies selected regular files into a fresh private temporary snapshot before commands run. It rejects links and hard-linked files, blocks selecting the home directory or filesystem root, and excludes Git internals, dependency folders, environment files, common credential files and private-key patterns regardless of configured globs. The worker mounts only that snapshot into a non-privileged Docker container with networking disabled, read-only root, dropped capabilities, no-new-privileges, process/memory/CPU ceilings and a private tmpfs. It does not mount the Docker socket or host home. Container isolation remains gated on the M0 malicious-fixture tests on both Windows and macOS; do not treat these controls as a passed threat-model gate until exercised on those hosts.
 
 ## Future compatibility
 

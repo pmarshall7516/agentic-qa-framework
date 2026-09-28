@@ -1,0 +1,8 @@
+{
+  "name": "@agentic-qa/reporting",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { "./render": "./src/render.ts" },
+  "dependencies": { "@agentic-qa/domain": "*" }
+}

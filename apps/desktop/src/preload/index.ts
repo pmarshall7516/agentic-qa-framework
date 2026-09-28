@@ -1,0 +1,46 @@
+import { contextBridge, ipcRenderer } from 'electron';
+import type { DesktopApi, DraftPlan, SearchItemsInput, TargetConfig } from '../shared/ipc.js';
+import type { AdoProject } from '@agentic-qa/ado/client';
+
+const api: DesktopApi = Object.freeze({
+  getState: () => ipcRenderer.invoke('qa:get-state'),
+  saveClientId: (clientId: string) => ipcRenderer.invoke('qa:save-client-id', clientId),
+  signIn: () => ipcRenderer.invoke('qa:sign-in'),
+  signOut: (homeAccountId: string) => ipcRenderer.invoke('qa:sign-out', homeAccountId),
+  selectOrganization: (organization: string) => ipcRenderer.invoke('qa:select-organization', organization),
+  listProjects: () => ipcRenderer.invoke('qa:list-projects'),
+  selectProject: (project: AdoProject) => ipcRenderer.invoke('qa:select-project', project),
+  listWorkItemTypes: () => ipcRenderer.invoke('qa:list-work-item-types'),
+  saveWorkItemTypeMapping: (type: string, kind: 'REQUIREMENT' | 'TASK' | 'OTHER') => ipcRenderer.invoke('qa:save-work-item-type-mapping', type, kind),
+  searchItems: (input: SearchItemsInput) => ipcRenderer.invoke('qa:search-items', input),
+  addQueueItem: (workItemId: number) => ipcRenderer.invoke('qa:add-queue-item', workItemId),
+  removeQueueItem: (key: string) => ipcRenderer.invoke('qa:remove-queue-item', key),
+  moveQueueItem: (key: string, direction: 'up' | 'down') => ipcRenderer.invoke('qa:move-queue-item', key, direction),
+  refreshQueue: () => ipcRenderer.invoke('qa:refresh-queue'),
+  chooseRepository: () => ipcRenderer.invoke('qa:choose-repository'),
+  listGitRepositories: () => ipcRenderer.invoke('qa:list-git-repositories'),
+  listGitRefs: (repositoryId: string) => ipcRenderer.invoke('qa:list-git-refs', repositoryId),
+  saveTarget: (target: TargetConfig) => ipcRenderer.invoke('qa:save-target', target),
+  createDraftPlan: (previousRunId?: string) => ipcRenderer.invoke('qa:create-draft-plan', previousRunId),
+  importModelKey: () => ipcRenderer.invoke('qa:import-model-key'),
+  clearModelKey: () => ipcRenderer.invoke('qa:clear-model-key'),
+  saveModelSettings: (input: Parameters<DesktopApi['saveModelSettings']>[0]) => ipcRenderer.invoke('qa:save-model-settings', input),
+  previewModelRequest: (runId: string, includedCriterionIds: string[]) => ipcRenderer.invoke('qa:preview-model-request', runId, includedCriterionIds),
+  generateModelSuggestions: (previewId: string) => ipcRenderer.invoke('qa:generate-model-suggestions', previewId),
+  approvePlan: (plan: DraftPlan) => ipcRenderer.invoke('qa:approve-plan', plan),
+  listRuns: () => ipcRenderer.invoke('qa:list-runs'),
+  getRun: (runId: string) => ipcRenderer.invoke('qa:get-run', runId),
+  getChildren: (parentWorkItemId: number) => ipcRenderer.invoke('qa:get-children', parentWorkItemId),
+  exportReport: (runId: string, format: 'html' | 'markdown' | 'json') => ipcRenderer.invoke('qa:export-report', runId, format),
+  exportArtifact: (runId: string, artifactId: string) => ipcRenderer.invoke('qa:export-artifact', runId, artifactId),
+  classifyFinding: (input: Parameters<DesktopApi['classifyFinding']>[0]) => ipcRenderer.invoke('qa:classify-finding', input),
+  deleteRun: (runId: string) => ipcRenderer.invoke('qa:delete-run', runId),
+  isBrowserInstalled: () => ipcRenderer.invoke('qa:is-browser-installed'),
+  installBrowser: () => ipcRenderer.invoke('qa:install-browser'),
+  isRepoWorkerImageInstalled: () => ipcRenderer.invoke('qa:is-repo-worker-installed'),
+  installRepoWorkerImage: () => ipcRenderer.invoke('qa:install-repo-worker'),
+  startRun: (runId: string) => ipcRenderer.invoke('qa:start-run', runId),
+  cancelRun: (runId: string) => ipcRenderer.invoke('qa:cancel-run', runId),
+});
+
+contextBridge.exposeInMainWorld('qa', api);

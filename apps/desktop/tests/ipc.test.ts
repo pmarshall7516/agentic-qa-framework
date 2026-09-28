@@ -1,0 +1,33 @@
+import { describe, expect, it, vi } from 'vitest';
+import { registerIpcHandlers } from '../src/main/ipc.js';
+
+function fixture() {
+  const handlers = new Map<string, (...args: any[]) => unknown>();
+  const ipc = {
+    handle: vi.fn((channel: string, listener: (...args: any[]) => unknown) => handlers.set(channel, listener)),
+    removeHandler: vi.fn(),
+  };
+  const api = { getState: vi.fn(async () => ({ queue: [] })) } as any;
+  const dispose = registerIpcHandlers(ipc, api, { devServerUrl: 'http://127.0.0.1:5173/' });
+  return { handlers, api, dispose, ipc };
+}
+
+describe('validated desktop IPC', () => {
+  it('rejects untrusted sender origins before dispatch', async () => {
+    const { handlers, api } = fixture();
+    await expect(handlers.get('qa:get-state')!({ senderFrame: { url: 'https://attacker.example/' } })).rejects.toThrow('Untrusted');
+    expect(api.getState).not.toHaveBeenCalled();
+  });
+
+  it('rejects unexpected payload arguments and registers a fixed channel set', async () => {
+    const { handlers, api, ipc } = fixture();
+    await expect(handlers.get('qa:get-state')!({ senderFrame: { url: 'http://127.0.0.1:5173/' } }, 'extra')).rejects.toThrow();
+    expect(api.getState).not.toHaveBeenCalled();
+    expect(ipc.handle).toHaveBeenCalledTimes(38);
+    expect([...handlers.keys()]).toContain('qa:generate-model-suggestions');
+    expect([...handlers.keys()]).toContain('qa:list-git-repositories');
+    expect([...handlers.keys()]).toContain('qa:save-work-item-type-mapping');
+    expect([...handlers.keys()]).toContain('qa:export-artifact');
+    await expect(handlers.get('qa:list-git-refs')!({ senderFrame: { url: 'http://127.0.0.1:5173/' } }, '../invalid')).rejects.toThrow();
+  });
+});

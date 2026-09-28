@@ -36,7 +36,7 @@ Each requirement ID is stable for planning and verification. `M` is required for
 | FR-08 | M | Show provider disclosure preview and enforce configured model budget | User sees fields/files/snippets to be sent, can exclude them, and can stop before transmission; over-budget preflight blocks or asks for new user-set limit |
 | FR-09 | M | Run configured existing repository tests in constrained disposable workspace | Only allowlisted commands from reviewed config execute; exit, stdout/stderr excerpts and test result files are captured; timeout/cancel kill descendants |
 | FR-10 | M | Execute criterion-linked browser checks using Playwright | Browser worker performs repeatable steps and assertions against allowlisted origin; failed checks keep trace/screenshot and assertion output |
-| FR-11 | M | Map observations to criteria and distinguish failure causes | Each criterion shows evidence links and `VERIFIED`, `FAILED`, `UNVERIFIED`, or `BLOCKED`; product/test/environment/ambiguous classifications are explicit |
+| FR-11 | M | Map observations to criteria and distinguish failure causes | Each criterion shows its direct observations and allows restricted encrypted artifacts to be saved through a warning and native file picker; `VERIFIED`, `FAILED`, `UNVERIFIED`, or `BLOCKED` is explicit; product/test/environment/ambiguous classifications are explicit |
 | FR-12 | M | Compute auditable run verdict and export report | `PASS`, `FAIL`, `NEEDS_REVIEW`, `BLOCKED` policy matches [engine spec](03-qa-engine.md); HTML/Markdown/JSON export excludes secrets |
 | FR-13 | M | Cancel/retry runs and inspect history | Cancellation leaves a partial report; retry creates a new manifest linked to prior run; user can delete run and artifacts |
 | FR-14 | L | Generate new tests and bounded exploratory flows | Generated tests stay in disposable workspace until user explicitly exports; no healer silently changes assertions |
@@ -47,7 +47,7 @@ Each requirement ID is stable for planning and verification. `M` is required for
 
 | ID | Requirement | Verification gate |
 |---|---|---|
-| NFR-01 | Windows 11 and supported macOS versions for current Electron release; x64 and arm64 where build chain permits | Signed installer smoke test on clean Windows and macOS VMs; architecture matrix recorded before release |
+| NFR-01 | Windows 11 and supported macOS versions for current Electron release; x64 and arm64 where build chain permits | Launchable Windows `.exe` and macOS app smoke tests on clean hosts; record OS/architecture matrix. Code signing/notarization is outside v1; show users the OS trust warning where applicable. |
 | NFR-02 | No first-party hosted storage or telemetry by default | Network test shows only Microsoft identity/ADO, approved AI provider, approved site, explicitly approved dependency registries and update endpoint traffic; telemetry opt-in only if later added |
 | NFR-03 | Credentials never appear in renderer, prompts, logs, reports or worker environments | Automated secret-canary tests across all outputs plus manual trace inspection |
 | NFR-04 | Runs are reproducible enough to audit | Manifest contains ADO revision, source identity, URL, contract/config/tool/model versions and time; report references manifest |

@@ -36,6 +36,7 @@ The first useful release includes phases 1 and 2. Phase 3 is a quality expansion
 6. [User experience](spec/05-desktop-experience.md)
 7. [Delivery plan and acceptance gates](spec/06-delivery-plan.md)
 8. [Repository configuration](spec/07-repository-config.md)
+
 ## Pilot decisions
 
 The first release is local-first and allows a configured AI provider after a disclosure preview. Organization-specific field mapping, supported repository languages, and distribution channel are pilot decisions with explicit discovery gates in the delivery plan.

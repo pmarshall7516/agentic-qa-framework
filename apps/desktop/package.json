@@ -1,0 +1,88 @@
+{
+  "name": "@agentic-qa/desktop",
+  "version": "1.0.0",
+  "description": "Local-first Azure DevOps quality assurance desktop app",
+  "author": "Agentic QA",
+  "private": true,
+  "type": "module",
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --config vite.config.ts",
+    "build:ui": "vite build --config vite.config.ts",
+    "build:main": "esbuild src/main/index.ts --bundle --platform=node --format=cjs --external:electron --external:better-sqlite3-multiple-ciphers --external:@azure/msal-node --external:playwright --external:playwright-core --external:chromium-bidi --outfile=dist-electron/main.cjs && esbuild src/preload/index.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist-electron/preload.cjs",
+    "build": "npm run build:ui && npm run build:main",
+    "start": "electron .",
+    "package:win": "npm run build && electron-builder --win nsis portable --x64",
+    "package:mac": "npm run build && electron-builder --mac dir dmg --arm64"
+  },
+  "dependencies": {
+    "@agentic-qa/ado": "*",
+    "@agentic-qa/browser-worker": "*",
+    "@agentic-qa/domain": "*",
+    "@agentic-qa/model-adapters": "*",
+    "@agentic-qa/repo-worker": "*",
+    "@agentic-qa/reporting": "*",
+    "@agentic-qa/storage": "*",
+    "@azure/msal-node": "^7.0.0",
+    "better-sqlite3-multiple-ciphers": "^13.0.3",
+    "playwright": "^1.63.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
+    "@types/node": "^22.18.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.0.4",
+    "electron": "44.4.5",
+    "electron-builder": "^26.0.12",
+    "esbuild": "^0.28.2",
+    "jsdom": "^29.1.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.1"
+  },
+  "build": {
+    "appId": "local.agenticqa.desktop",
+    "productName": "Agentic QA",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "npmRebuild": false,
+    "asarUnpack": [
+      "node_modules/better-sqlite3-multiple-ciphers/prebuilds/*.node"
+    ],
+    "mac": {
+      "target": [
+        "dir",
+        "dmg"
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "signAndEditExecutable": false,
+      "signExecutable": false,
+      "artifactName": "Agentic-QA-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "artifactName": "Agentic-QA-Setup-${version}-${arch}.${ext}",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "portable": {
+      "artifactName": "Agentic-QA-Portable-${version}-${arch}.${ext}"
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "@agentic-qa/storage",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./database": "./src/database.ts",
+    "./artifacts": "./src/artifacts.ts"
+  },
+  "dependencies": {
+    "@agentic-qa/domain": "*",
+    "better-sqlite3-multiple-ciphers": "^13.0.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0"
+  }
+}
