@@ -237,7 +237,7 @@ export function App({
 
   useEffect(() => {
     if (initialState) return;
-    void api.getState().then((next) => {
+    void api.getState().then(async (next) => {
       setState(next);
       setOrganization(next.selectedOrganization ?? '');
       setProfileOrganization(next.selectedOrganization ?? '');
@@ -252,6 +252,7 @@ export function App({
       setSelectedGitRef(next.target?.adoRepository ? { name: next.target.adoRepository.refName, objectId: next.target.adoRepository.commit } : undefined);
       setModelId(next.modelId ?? 'gpt-5.6-terra');
       setModelMaxOutputTokens(next.modelMaxOutputTokens ?? 1200);
+      if (next.selectedProject) setWorkItemTypes(await api.listWorkItemTypes());
     }).catch((cause) => setError(errorMessage(cause)));
   }, [api, initialState]);
 

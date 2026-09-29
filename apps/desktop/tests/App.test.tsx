@@ -1,5 +1,7 @@
+// @vitest-environment jsdom
+import { cleanup, render, screen } from '@testing-library/react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/renderer/App.js';
 import type { DesktopApi, DesktopState } from '../src/shared/ipc.js';
 
@@ -12,6 +14,8 @@ const state: DesktopState = {
   selectedProject: undefined,
   queue: [],
 };
+
+afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
 describe('desktop M1 screens', () => {
   it('offers ADO-branded first-run sign-in without asking users to enter a client ID', () => {
@@ -48,5 +52,23 @@ describe('desktop M1 screens', () => {
     expect(connectedMarkup).toContain('contoso');
     expect(connectedMarkup).toContain('Portal');
     expect(connectedMarkup).not.toContain('accessToken');
+  });
+
+  it('loads custom work item types when restoring a saved project on startup', async () => {
+    const restoredState: DesktopState = {
+      azureCliAvailable: true,
+      accounts: [{ homeAccountId: 'account-1', tenantId: 'tenant-1', username: 'qa@example.com' }],
+      selectedAccountId: 'account-1',
+      selectedOrganization: 'contoso',
+      selectedProject: { id: 'project-1', name: 'Portal' },
+      queue: [],
+    };
+    const listWorkItemTypes = vi.fn(async () => ['User Story', 'Task', 'Feature Request']);
+    const testApi = { getState: async () => restoredState, listWorkItemTypes } as unknown as DesktopApi;
+
+    render(<App api={testApi} />);
+
+    expect(await screen.findByLabelText('Map Feature Request')).toBeTruthy();
+    expect(listWorkItemTypes).toHaveBeenCalledOnce();
   });
 });

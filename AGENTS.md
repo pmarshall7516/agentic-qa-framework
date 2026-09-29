@@ -84,6 +84,7 @@ For each delegated task, provide: goal and requirement IDs; exact owned paths; p
 - For ADO, cover Agile, Scrum, Basic, CMMI and custom work-item types; parent/child relations; paging; missing fields; stale/deleted items; and auth, permission and rate-limit failures.
 - For workers, cover timeout, cancellation, child-process cleanup, resource limits, artifact paths, external network attempts, malicious prompt content and host-secret access attempts.
 - For desktop changes, cover IPC sender validation, keyboard flow, persistence/migration, sign-in/out, crash recovery, launchable Windows `.exe` packaging (code signing is out of scope for v1), and OS-specific behavior required by the current milestone. macOS signing/notarization is a separate distribution decision, not a prerequisite for local v1 testing.
+- Keep the Windows and macOS renderer UI in the shared React/CSS source; do not fork screens or styles by platform unless a documented native behavior requires it. For renderer changes, review both platform builds at equivalent CSS viewport size, display scaling, and ADO profile/project data so their appearance and behavior stay aligned.
 - Avoid broad refactors during feature slices. Preserve user edits and avoid destructive Git operations. Do not commit, push, publish or merge unless the user explicitly asks.
 - Prefer focused modules and narrow interfaces. Keep ADO, AI provider, storage, UI and worker code behind adapters so the core domain remains independently testable.
 

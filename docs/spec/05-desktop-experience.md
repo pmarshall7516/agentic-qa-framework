@@ -41,5 +41,6 @@ Errors name the failed operation, whether it affected the run verdict, and a con
 ## Visual and accessibility requirements
 
 - Use a consistent readable type and control scale, clear spacing and hierarchy, and visible keyboard focus across every screen.
+- Windows and macOS use the same renderer and styles. Keep UI changes shared across both platforms and verify them with equivalent viewport size, display scaling and work-item/profile data; document any intentional native-only difference.
 - Support an 800px-wide desktop window without horizontal page scrolling on first-run, organization/project, work-item and queue screens.
 - Keep loading, empty, error and disconnected states clear; every primary flow remains keyboard-operable and screen-reader labeled.
