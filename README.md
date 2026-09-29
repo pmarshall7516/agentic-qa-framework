@@ -2,6 +2,10 @@
 
 Local-first Windows and macOS desktop harness for evidence-backed QA runs against Azure DevOps Requirements, a repository snapshot, a development/staging site, or both.
 
+## Branch workflow
+
+`develop` is the default branch for ongoing development. Create feature and fix branches from `develop`, then merge completed work back into `develop` through pull requests. When `develop` is ready for a packaged release, merge it into `main` through a pull request. Keep `develop` after that merge; build packaged releases from `main`.
+
 ## Build and launch
 
 Requirements: Node.js 22, npm, and Azure CLI for Azure DevOps access. Site-only runs do not need Docker; repository checks do. Azure CLI opens Microsoft sign-in in your system browser and supplies the ADO read token.

@@ -24,6 +24,12 @@ The requirements and security rules constrain the architecture. If docs conflict
 - Implement milestones in the order M0 through M4 in [the delivery plan](docs/spec/06-delivery-plan.md). M0 is a real gate: validate packaging, Azure CLI sign-in/token acquisition, encrypted storage, and worker isolation on macOS and Windows before broad product implementation. M5 and M6 require their own stated gates and are outside the first useful release.
 - Electron is the preferred stack, conditional on M0 evidence. If a probe justifies Tauri or another change, record the trade-off in an ADR and update architecture and implementation docs before dependent work proceeds.
 
+## Branch workflow
+
+- `develop` is the default branch for ongoing development. Start feature and fix branches from `develop` and merge them back into `develop` through pull requests.
+- Merge `develop` into `main` through a pull request when the development branch is ready for a packaged release. Preserve `develop` after release merges.
+- Produce packaged builds from `main`.
+
 ## Implementation workflow
 
 1. Inspect the current branch, working tree, relevant code, package scripts and all applicable `AGENTS.md` files before editing. Keep user changes intact.
