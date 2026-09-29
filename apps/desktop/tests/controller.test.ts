@@ -659,4 +659,48 @@ describe('desktop controller', () => {
       expect(draft.notes.some((note) => note.toLocaleLowerCase('en-US').includes('repository scenario'))).toBe(true);
     } finally { await rm(repositoryPath, { recursive: true, force: true }); }
   });
+
+  it('discovers a repository test command and creates a plan without manual repository configuration', async () => {
+    const { controller, settings, queue, snapshots } = fixture();
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'qa-auto-config-repo-'));
+    try {
+      await writeFile(join(repositoryPath, 'package.json'), JSON.stringify({
+        name: 'fixture-app',
+        packageManager: 'npm@10.0.0',
+        scripts: { test: 'vitest run' },
+      }));
+      await writeFile(join(repositoryPath, 'package-lock.json'), '{}');
+      const requirement = { organization: 'org', projectId: 'project-1', projectName: 'Project One', id: 86, revision: 3, type: 'User Story', kind: 'REQUIREMENT', title: 'Search', state: 'Active', acceptanceCriteria: 'Search results are visible.', url: 'https://dev.azure.com/org/project-1/_workitems/edit/86', retrievedAt: '2026-09-27T12:00:00.000Z' };
+      queue.push({ key: 'org:project-1:86', organization: 'org', projectId: 'project-1', workItemId: 86, queuedAt: '2026-09-27T12:00:00.000Z', stale: false });
+      snapshots.set('org:project-1:86', requirement);
+      settings.set('run.target', { targetKind: 'both', repositorySource: 'local', repositoryPath, siteBaseUrl: 'https://site.example.test', allowedOrigins: ['https://site.example.test'] });
+
+      const draft = await controller.createDraftPlan();
+
+      expect(draft.repositoryCommands).toEqual(expect.arrayContaining([
+        expect.objectContaining({ label: 'Discovered npm test script', executable: 'npm', arguments: ['test'], resultFormat: 'none', scenarioMappings: [] }),
+      ]));
+      expect(draft.contract.scenarios.some(({ layer }) => layer === 'browser')).toBe(true);
+      expect(draft.notes.some((note) => note.includes('added it automatically'))).toBe(true);
+      expect(draft.notes.join(' ')).not.toContain('No repository check configuration is available');
+      await controller.approvePlan({ ...draft, contract: { ...draft.contract, scenarios: draft.contract.scenarios.map((scenario) => ({ ...scenario, approved: true })) } });
+      expect(settings.get(`run.target.${draft.manifest.runId}`)).toMatchObject({ targetKind: 'both', repositoryPath });
+    } finally { await rm(repositoryPath, { recursive: true, force: true }); }
+  });
+
+  it('discovers a root npm test script from an ADO Git repository without a config file', async () => {
+    const { controller, settings, queue, snapshots, ado } = fixture();
+    const commit = 'b'.repeat(40);
+    queue.push({ key: 'org:project-1:87', organization: 'org', projectId: 'project-1', workItemId: 87, queuedAt: '2026-09-27T12:00:00.000Z', stale: false });
+    snapshots.set('org:project-1:87', { organization: 'org', projectId: 'project-1', projectName: 'Project One', id: 87, revision: 2, type: 'User Story', kind: 'REQUIREMENT', title: 'Search', state: 'Active', acceptanceCriteria: 'Search results are visible.', url: 'https://dev.azure.com/org/project-1/_workitems/edit/87', retrievedAt: '2026-09-27T12:00:00.000Z' });
+    settings.set('run.target', { targetKind: 'repository', repositorySource: 'ado-git', adoRepository: { organization: 'org', projectId: 'project-1', id: 'repo-1', name: 'Portal', refName: 'refs/heads/main', commit }, allowedOrigins: [] });
+    settings.set('entra.selectedAccountId', 'account-1');
+    (ado as any).listGitItems = vi.fn(async () => [{ path: '/package.json', isFolder: false }, { path: '/package-lock.json', isFolder: false }, { path: '/src/index.js', isFolder: false }]);
+    (ado as any).getGitItemContent = vi.fn(async (_token: string, _org: string, _repo: string, _commit: string, path: string) => path === '/package.json' ? '{"name":"ado-portal","scripts":{"test":"node --test"}}' : path === '/package-lock.json' ? '{}' : 'export {};');
+
+    const draft = await controller.createDraftPlan();
+
+    expect(draft.repositoryCommands?.[0]).toMatchObject({ label: 'Discovered npm test script', arguments: ['test'] });
+    expect((ado as any).getGitItemContent).toHaveBeenCalledWith('secret-token', 'org', 'repo-1', commit, '/package.json');
+  });
 });

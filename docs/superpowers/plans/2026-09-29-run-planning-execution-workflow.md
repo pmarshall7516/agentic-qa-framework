@@ -205,6 +205,8 @@ Repository execution and configured JUnit-to-scenario mapping continue to use th
 
 Limitations: exact provider-request review, per-command JUnit summary visualization, and native config export are not part of this implementation slice.
 
+Follow-up usability fix: a repository config file is no longer required for the common npm path. When neither a saved config nor root `.agentic-qa.yml` exists, a root `package.json` `scripts.test` creates an automatic `npm test` diagnostic command. The command is shown in the plan and still runs inside the no-network worker. It does not install dependencies or claim Acceptance Criteria coverage without exact JUnit mappings. Advanced JSON remains optional. This fallback is covered for local and ADO Git sources.
+
 ## Task 9: Document changed contracts and verify delivery evidence — implemented; platform gates remain
 
 **Files:**

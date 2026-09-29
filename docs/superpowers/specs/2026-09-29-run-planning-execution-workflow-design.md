@@ -36,14 +36,14 @@ Refreshing a source updates the local queue snapshot only; it performs no ADO wr
 
 Target preflight then checks only applicable layers:
 
-- A local repository path can be read and safely snapshotted; repository configuration is valid; configured scenario IDs have mapped repository tests before the plan can claim repository coverage.
-- ADO Git remains pinned to the selected commit and required configuration.
+- A local repository path can be read and safely snapshotted; an existing validated repository config is honored, otherwise a root npm test script is auto-detected as a diagnostic command.
+- ADO Git remains pinned to the selected commit. When no repo config exists, root `package.json` is read at that commit to discover the same diagnostic command.
 - A site URL is valid and its exact origin is approved. Site-only planning does not require Docker.
 - Chromium, repository worker image and encrypted artifact storage readiness are shown as individual checks, not conflated with source loading.
 
 Each failed check has a stable code, operation, safe user-facing message and relevant settings action. Low-level stacks, response bodies, file contents, secrets and access tokens are not rendered. Diagnostics may log only safe codes and operation names; never include ADO tokens, provider keys, source text or raw provider/ADO payloads.
 
-If `.agentic-qa.yml` is absent, the app offers a **Repository test configuration** builder instead of failing with a hidden-file prerequisite. It may read `package.json` and known test-result files as untrusted text to suggest existing test scripts; it never runs those scripts during discovery. The user selects from supported executable/argument fields, timeouts, JUnit result paths and exact testcase mappings. The UI displays the complete config and commands before saving. GUI-created configuration is stored encrypted in local settings and linked to the selected repository identity and source snapshot hash. It does not write into the working tree. Exporting a `.agentic-qa.yml` to a user-chosen path is a separate explicit file-picker action. Unsupported runtimes or missing JUnit mappings remain visible as blocked/uncovered Repository scenarios.
+If `.agentic-qa.yml` is absent, the app checks the root `package.json` for `scripts.test` and adds a bounded `npm test` diagnostic command automatically. It does not execute the script during discovery. The exact command and the network-disabled/no-install limitation are shown in the reviewed plan. Automatic output is diagnostic only: it cannot verify an Acceptance Criterion without an exact JUnit testcase mapping. Unsupported runtimes or missing mappings remain visible as uncovered Repository scenarios. Advanced users may still edit a validated custom config, stored encrypted in app settings and linked to the repository identity; it does not write into the working tree.
 
 ### 2. Review the plan and source context
 
@@ -114,7 +114,7 @@ Before approval, errors leave no Run Manifest. During execution, environment and
 
 ## Acceptance criteria
 
-1. On Windows and macOS, a site-only plan works without Docker. Repository configuration failures are clearly identified as local repo failures and provide the path/config action; no such failure is labelled ADO.
+1. On Windows and macOS, a site-only plan works without Docker. A repository with root npm `scripts.test` and no custom config can produce a plan without JSON/file setup. Unsupported repository stacks receive a clear local error; no such failure is labelled ADO.
 2. Plan review refreshes all selected ADO sources and shows Requirement Acceptance Criteria and every selected Task Description with correct source ID/revision/field. Network/auth/permission/stale failures are operation-specific and no stale plan can be approved.
 3. Missing Requirement criteria create visible Task-derived candidates and a source-coverage gap. Task-derived observations cannot yield a `PASS` while Requirement criteria remain unresolved.
 4. Plan review displays exact commands, mappings, Browser actions, approved origin, worker assignment, dependencies and budgets before the user approves.

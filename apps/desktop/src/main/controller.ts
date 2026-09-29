@@ -858,6 +858,7 @@ export class DesktopController {
       snapshots.push(snapshot);
     }
     let repositoryConfig: Awaited<ReturnType<typeof readRepositoryConfig>>['config'] | undefined;
+    let repositoryConfigAutoDetected = false;
     const fingerprint = await this.configFingerprint(target);
     let repositorySnapshotHash: string | undefined;
     let localGitState: 'clean' | 'dirty' | 'not-a-git-repository' | 'unavailable' | undefined;
@@ -866,8 +867,10 @@ export class DesktopController {
       const probeSnapshot = await mkdtemp(join(this.scratchRoot, 'agentic-qa-preview-'));
       try {
         const sourcePath = await this.prepareRepositorySource(target, join(probeSnapshot, 'source'));
-        const { config } = await this.loadRepositoryConfig(target, sourcePath);
+        const loadedConfig = await this.loadRepositoryConfig(target, sourcePath);
+        const { config } = loadedConfig;
         repositoryConfig = config;
+        repositoryConfigAutoDetected = loadedConfig.automatic;
         const result = await createRepositorySnapshot({ sourcePath, destinationPath: join(probeSnapshot, 'snapshot'), config });
         repositorySnapshotHash = result.sha256;
         if (target.repositoryPath) localGitState = await this.inspectLocalGitState(target.repositoryPath);
@@ -928,6 +931,7 @@ export class DesktopController {
       const unmapped = scenarios.filter(({ layer }) => layer === 'repo').filter(({ id }) => !mapped.has(id)).map(({ id }) => id);
       if (unmapped.length) notes.push(`Map each Repository Scenario to exact JUnit testcase identities using scenarioMappings in .agentic-qa.yml, then refresh this plan: ${unmapped.join(', ')}`);
     }
+    if (repositoryConfigAutoDetected) notes.push('The app found the repository’s existing npm test script and added it automatically. It will run in Docker with networking disabled; dependencies are not installed automatically. Until exact JUnit testcase mappings exist, this command is diagnostic and does not prove an Acceptance Criterion.');
     const contract: QAContract = QAContractSchema.parse({ schemaVersion: 2, id: randomUUID(), revision: 1, sourceContext, taskCandidates, coverageGaps, criteria, scenarios });
     const startedAt = new Date().toISOString();
     const sourceRefs = snapshots.map((snapshot) => ({
@@ -986,10 +990,10 @@ export class DesktopController {
       try {
         let sourcePath = target.repositoryPath;
         if (!sourcePath) { await mkdir(this.scratchRoot, { recursive: true, mode: 0o700 }); temporary = await mkdtemp(join(this.scratchRoot, 'agentic-qa-config-')); sourcePath = await this.prepareRepositorySource(target, temporary); }
-        const { config } = await this.loadRepositoryConfig(target, sourcePath);
+        const { config, automatic } = await this.loadRepositoryConfig(target, sourcePath);
         const mappings = new Set(config.tests.flatMap(({ scenarioMappings }) => scenarioMappings.map(({ scenarioId }) => scenarioId)));
         const missing = input.contract.scenarios.filter(({ layer }) => layer === 'repo').filter(({ id }) => !mappings.has(id)).map(({ id }) => id);
-        if (missing.length) throw new Error(`Map all Repository Scenarios to JUnit tests in .agentic-qa.yml and refresh the plan before approval: ${missing.join(', ')}`);
+        if (missing.length && !automatic) throw new Error(`Map all Repository Scenarios to JUnit tests in .agentic-qa.yml and refresh the plan before approval: ${missing.join(', ')}`);
       } finally { if (temporary) await rm(temporary, { recursive: true, force: true }).catch(() => undefined); }
     }
     await this.store.createRun(original.manifest, contract);
@@ -1249,11 +1253,11 @@ export class DesktopController {
         await this.progress(runId, 'repo', 'RUNNING', 'repository-checks', 'Repository worker is snapshotting the configured files and running the approved command arrays.');
         try {
           const repositorySourcePath = target.repositoryPath ?? await this.prepareRepositorySource(target, join(scratch, 'ado-source'));
-          const { config } = await this.loadRepositoryConfig(target, repositorySourcePath);
+          const { config, automatic } = await this.loadRepositoryConfig(target, repositorySourcePath);
           const repositoryScenarios = archived.contract.scenarios.filter(({ layer }) => layer === 'repo');
           const mapped = new Set(config.tests.flatMap(({ scenarioMappings }) => scenarioMappings.map(({ scenarioId }) => scenarioId)));
           const unmapped = repositoryScenarios.filter(({ id }) => !mapped.has(id));
-          if (unmapped.length) throw new Error(`Map the following approved repository scenarios to JUnit test commands in .agentic-qa.yml: ${unmapped.map(({ id }) => id).join(', ')}`);
+          if (unmapped.length && !automatic) throw new Error(`Map the following approved repository scenarios to JUnit test commands in .agentic-qa.yml: ${unmapped.map(({ id }) => id).join(', ')}`);
           const result = await runRepositoryChecks({
             runId, repositoryPath: repositorySourcePath, config, snapshotPath: join(scratch, 'repository'),
             artifactDirectory: join(scratch, 'repository-artifacts'),
@@ -1474,16 +1478,32 @@ export class DesktopController {
     return `repository.config.${sha256(identity)}`;
   }
 
-  private async loadRepositoryConfig(target: TargetConfig, sourcePath: string): Promise<{ config: RepositoryConfig; sha256: string }> {
+  private async loadRepositoryConfig(target: TargetConfig, sourcePath: string): Promise<{ config: RepositoryConfig; sha256: string; automatic: boolean }> {
     const saved = await this.rawSetting<unknown>(this.repositoryConfigSettingKey(target));
     if (saved !== undefined) {
       const config = RepositoryConfigSchema.parse(saved);
-      return { config, sha256: sha256(JSON.stringify(config)) };
+      return { config, sha256: sha256(JSON.stringify(config)), automatic: false };
     }
-    try { return await readRepositoryConfig(sourcePath); }
+    try { return { ...(await readRepositoryConfig(sourcePath)), automatic: false }; }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      throw new Error('No repository check configuration is available. Add a valid root .agentic-qa.yml or edit the local configuration JSON in Run setup, then review the plan again.');
+      let packageManifest: { name?: unknown; scripts?: { test?: unknown } };
+      try { packageManifest = JSON.parse(await readFile(join(sourcePath, 'package.json'), 'utf8')); }
+      catch (manifestError) {
+        if ((manifestError as NodeJS.ErrnoException).code === 'ENOENT') throw new Error('Automatic repository checks currently support a root package.json with a test script. This repository has no supported test entry point; choose Browser-only in Run setup or add a repository test script.');
+        throw new Error('The root package.json could not be read for automatic test discovery. Fix the manifest or choose Browser-only in Run setup.');
+      }
+      if (!packageManifest || typeof packageManifest !== 'object' || typeof packageManifest.scripts?.test !== 'string' || !packageManifest.scripts.test.trim()) {
+        throw new Error('The root package.json has no test script for automatic repository checks. Choose Browser-only in Run setup or add a test script.');
+      }
+      const config = RepositoryConfigSchema.parse({
+        schemaVersion: 1,
+        project: { name: typeof packageManifest.name === 'string' && packageManifest.name.trim() ? packageManifest.name.slice(0, 160) : 'QA project' },
+        repository: { include: ['**/*'], exclude: [] },
+        setup: [],
+        tests: [{ id: 'auto-npm-test', label: 'Discovered npm test script', executable: 'npm', arguments: ['test'], workingDirectory: '.', timeoutSeconds: 600, network: 'none', resultFormat: 'none', resultPaths: [], scenarioMappings: [] }],
+      });
+      return { config, sha256: sha256(JSON.stringify(config)), automatic: true };
     }
   }
 
@@ -1499,6 +1519,13 @@ export class DesktopController {
       const configText = await this.ado.getGitItemContent(token, source.organization, source.id, source.commit, configItem.path);
       if (Buffer.byteLength(configText, 'utf8') > 256 * 1024) throw new Error('The repository configuration exceeds the 256 KiB limit.');
       await writeFile(join(destination, '.agentic-qa.yml'), configText, { mode: 0o600, flag: 'wx' });
+    } else {
+      const packageItem = items.find((item) => !item.isFolder && item.path === '/package.json');
+      if (packageItem) {
+        const packageText = await this.ado.getGitItemContent(token, source.organization, source.id, source.commit, packageItem.path);
+        if (Buffer.byteLength(packageText, 'utf8') > 1024 * 1024) throw new Error('The root package.json exceeds the automatic discovery size limit.');
+        await writeFile(join(destination, 'package.json'), packageText, { mode: 0o600, flag: 'wx' });
+      }
     }
     const { config } = await this.loadRepositoryConfig(target, destination);
     const paths = items.filter((item) => !item.isFolder).map((item) => item.path.slice(1)).filter((path) => path && !path.startsWith('/') && !path.split('/').includes('..') && !path.includes('\\'));
@@ -1509,6 +1536,10 @@ export class DesktopController {
     if (selected.length > 10000) throw new Error('The selected repository snapshot contains too many files (limit 10,000).');
     let totalBytes = 0;
     for (const path of selected) {
+      if (!configItem && path === 'package.json') {
+        const preloaded = await readFile(join(destination, 'package.json')).catch(() => undefined);
+        if (preloaded) { totalBytes += preloaded.byteLength; preloaded.fill(0); continue; }
+      }
       const content = await this.ado.getGitItemContent(token, source.organization, source.id, source.commit, `/${path}`);
       const buffer = Buffer.from(content, 'utf8');
       totalBytes += buffer.byteLength;
