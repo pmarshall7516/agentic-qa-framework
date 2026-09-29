@@ -38,7 +38,7 @@ The implementation proceeds with Electron because the selected authentication, d
 
 | Module | Responsibility | Public contract |
 |---|---|---|
-| Desktop renderer | Account/project picker, queue, target setup, plan review, progress, report | Typed commands/events only; no token, filesystem, shell or unrestricted network access |
+| Desktop renderer | ADO-branded onboarding, organization/project picker, Work items, QA Queue, Runs and Settings | Typed commands/events only; no token, filesystem, shell or unrestricted network access |
 | ADO adapter | Sign-in, discover accessible orgs/projects, query/fetch work items and relations, optional linked PR metadata | Normalized `RequirementSnapshot` and `TaskSnapshot` |
 | QA planner | Turn snapshots into reviewable criteria, scenarios and required evidence | Versioned `QAContract`; never executable commands |
 | Run coordinator | Validate preflight, freeze inputs, enforce budgets, dispatch workers, handle cancellation | `RunManifest`, state transitions, `Observation[]` |
@@ -52,7 +52,7 @@ Keep source tracker fields and AI provider messages out of the core QA domain. A
 
 ## Run data flow
 
-1. The user picks an ADO organization/project and queues one or more requirements or tasks.
+1. On first launch, the user selects **Sign in with Azure DevOps**; Azure CLI opens Microsoft sign-in in the system browser. The app uses the CLI's Entra-backed ADO token in the main process. The user chooses or imports a saved organization/project/team/board-column/Story profile, then queues one or more requirements or tasks.
 2. The app fetches current work item revisions, child relations, relevant fields and explicitly selected PR/repo context. The user can reject a stale or ambiguous item.
 3. The user selects `repository`, `site`, or `both`, then configures target-specific permissions and scope.
 4. The app creates a local deterministic draft. If optional scenario suggestions are requested, it shows the exact selected-criteria payload and token limits and waits for a separate approval before calling OpenAI. The model can suggest scenarios only; the user edits and approves the contract. Empty or contradictory criteria remain visible as `NEEDS_REVIEW` candidates.
@@ -65,14 +65,14 @@ Keep source tracker fields and AI provider messages out of the core QA domain. A
 ## Execution boundaries
 
 - The renderer uses `contextIsolation`, sandboxing, disabled Node integration, a restrictive CSP, validated IPC senders and denied unexpected navigation. The app loads only packaged UI content. [Electron security checklist](https://www.electronjs.org/docs/latest/tutorial/security).
-- ADO token caching uses MSAL Node's maintained `ICachePlugin` interface with a main-process file adapter encrypted by Electron `safeStorage`. Provider and target credentials use operating-system-backed encryption; Electron `safeStorage` uses macOS Keychain and Windows DPAPI semantics. Secrets are accessed only in the main process. See [ADR-0001](decisions/ADR-0001-msal-cache-portable-packaging.md), [MSAL Node caching](https://learn.microsoft.com/en-us/entra/msal/javascript/node/caching), and [Electron safeStorage](https://www.electronjs.org/docs/latest/api/safe-storage).
+- Azure CLI owns Microsoft sign-in and its credential cache. The app calls a fixed CLI executable with argument arrays, holds ADO access tokens only in main-process memory, and never passes them to renderer or workers. Account-scoped run profiles are stored in encrypted local settings. Provider and target credentials use operating-system-backed encryption.
 - Repository code, package scripts and generated tests are untrusted. A run uses a disposable copy in a constrained container with no Docker socket, no privileged mode, no host secrets, a non-root user, resource/time limits, a narrow mount set, and explicit network policy. Containers reduce risk but are not a perfect security boundary. [Docker Engine security](https://docs.docker.com/engine/security/).
 - Site QA is restricted to explicitly allowed origins and test accounts. Redirects, downloads, uploads, state-changing flows and external hosts follow the policy in [security and privacy](spec/04-security-privacy.md).
 - The coordinator owns deterministic caps: wall time, browser actions, model calls/tokens, artifact size, retries and concurrent runs. An LLM cannot raise its own limits.
 
 ## Local storage
 
-SQLCipher-backed SQLite stores accounts by opaque ID, selected org/project, queue, target configuration, contracts, run manifests, observations, artifact index and report summary. A random database key is wrapped by an OS-backed facility; SQLite contains only secret references. Evidence is encrypted after collection under an app-owned per-run directory with per-artifact authenticated encryption. Worker scratch may hold plaintext during execution and must be isolated, access-restricted and removed afterward; full-disk encryption is recommended for stronger protection of temporary files. Deleting a run removes its database rows and evidence files. Export requires explicit user action and excludes credentials.
+SQLCipher-backed SQLite stores accounts by opaque ID, validated organizations and run profiles (organization, project, team, board column and Story IDs) per account, selected organization/project, queue, target configuration, contracts, run manifests, observations, artifact index and report summary. A random database key is wrapped by an OS-backed facility; SQLite contains only secret references. Evidence is encrypted after collection under an app-owned per-run directory with per-artifact authenticated encryption. Worker scratch may hold plaintext during execution and must be isolated, access-restricted and removed afterward; full-disk encryption is recommended for stronger protection of temporary files. Deleting a run removes its database rows and evidence files. Export requires explicit user action and excludes credentials.
 
 ## Platform and distribution
 

@@ -114,8 +114,11 @@ describe('encrypted QA store', () => {
     await store.createRun(manifest, contract);
     await store.setSetting('entra.selectedAccountId', 'home-1');
     await store.setSetting('ado.organization', 'contoso');
+    await store.setSetting('ado.organizations.account-1', ['contoso']);
+    await store.setSetting('ado.organization.account-1', 'contoso');
+    await store.setSetting('ado.project.account-1', { id: 'p-1', name: 'Project' });
     await store.setSetting('ado.customTypeMappings.contoso.p-1', { 'User Story': 'REQUIREMENT' });
-    await store.setSetting('entra.clientId', 'kept-client-id');
+    await store.setSetting('entra.clientId', 'legacy-client-id');
     await store.setSetting('model.apiKey', 'kept-model-key');
 
     await store.deleteLocalQaData();
@@ -125,8 +128,11 @@ describe('encrypted QA store', () => {
     await expect(store.listRuns()).resolves.toEqual([]);
     await expect(store.getSetting('entra.selectedAccountId')).resolves.toBeUndefined();
     await expect(store.getSetting('ado.organization')).resolves.toBeUndefined();
+    await expect(store.getSetting('ado.organizations.account-1')).resolves.toBeUndefined();
+    await expect(store.getSetting('ado.organization.account-1')).resolves.toBeUndefined();
+    await expect(store.getSetting('ado.project.account-1')).resolves.toBeUndefined();
     await expect(store.getSetting('ado.customTypeMappings.contoso.p-1')).resolves.toBeUndefined();
-    await expect(store.getSetting('entra.clientId')).resolves.toBe('kept-client-id');
+    await expect(store.getSetting('entra.clientId')).resolves.toBeUndefined();
     await expect(store.getSetting('model.apiKey')).resolves.toBe('kept-model-key');
     await store.close();
   });

@@ -1,4 +1,4 @@
-import type { AdoGitRef, AdoGitRepository, AdoProject, WorkItemSearchPage } from '@agentic-qa/ado/client';
+import type { AdoGitRef, AdoGitRepository, AdoOrganization, AdoProject, WorkItemSearchPage } from '@agentic-qa/ado/client';
 import type { AccountSummary } from '@agentic-qa/ado/auth';
 import type { QueueEntry } from '@agentic-qa/domain/queue';
 import type { WorkItemSnapshot } from '@agentic-qa/domain/work-item';
@@ -6,7 +6,7 @@ import type { QAContract } from '@agentic-qa/domain/qa-contract';
 import type { Finding, Observation, QAReport, RunManifest } from '@agentic-qa/domain/run';
 import type { WorkItemKind, WorkItemTypeMappings } from '@agentic-qa/domain/work-item';
 
-export type AppScreen = 'connections' | 'project' | 'work-items' | 'queue' | 'run-setup' | 'plan' | 'history';
+export type AppScreen = 'connections' | 'project' | 'work-items' | 'queue' | 'run-setup' | 'plan' | 'history' | 'settings';
 
 export interface TargetConfig {
   targetKind: 'repository' | 'site' | 'both';
@@ -29,12 +29,32 @@ export interface QueueItemView {
   snapshot?: WorkItemSnapshot;
 }
 
+export interface AdoRunProfile {
+  id: string;
+  name: string;
+  organization: string;
+  project: AdoProject;
+  team: string;
+  boardColumn: string;
+  storyIds: number[];
+}
+
+export type AdoRunProfileInput = Omit<AdoRunProfile, 'id' | 'project'> & { id?: string; project: { id?: string; name: string; state?: string } };
+
+export interface ProfileWorkItemsResult {
+  iterationName: string;
+  stories: WorkItemSnapshot[];
+  tasksByStory: Record<number, WorkItemSnapshot[]>;
+}
+
 export interface DesktopState {
-  clientIdConfigured: boolean;
-  clientId?: string;
+  azureCliAvailable?: boolean;
   accounts: AccountSummary[];
   selectedAccountId?: string;
   selectedOrganization?: string;
+  savedOrganizations?: string[];
+  adoProfiles?: AdoRunProfile[];
+  activeAdoProfileId?: string;
   selectedProject?: AdoProject;
   customTypeMappings?: WorkItemTypeMappings;
   queue: QueueItemView[];
@@ -68,12 +88,18 @@ export interface SearchItemsInput {
 
 export interface DesktopApi {
   getState(): Promise<DesktopState>;
-  saveClientId(clientId: string): Promise<DesktopState>;
   signIn(): Promise<DesktopState>;
   signOut(homeAccountId: string): Promise<DesktopState>;
+  selectAccount(homeAccountId: string): Promise<DesktopState>;
+  listOrganizations(): Promise<AdoOrganization[]>;
   selectOrganization(organization: string): Promise<DesktopState>;
   listProjects(): Promise<AdoProject[]>;
   selectProject(project: AdoProject): Promise<DesktopState>;
+  saveAdoProfile(profile: AdoRunProfileInput): Promise<DesktopState>;
+  activateAdoProfile(profileId: string): Promise<DesktopState>;
+  deleteAdoProfile(profileId: string): Promise<DesktopState>;
+  importAdoProfilesConfig(): Promise<DesktopState>;
+  loadActiveProfileWorkItems(): Promise<ProfileWorkItemsResult>;
   listWorkItemTypes(): Promise<string[]>;
   saveWorkItemTypeMapping(type: string, kind: WorkItemKind): Promise<DesktopState>;
   searchItems(input: SearchItemsInput): Promise<WorkItemSearchPage>;

@@ -21,6 +21,13 @@ export interface AccountSummary {
   displayName?: string;
 }
 
+export interface AdoAuthService {
+  getAccounts(): Promise<AccountSummary[]>;
+  signIn(): Promise<AccountSummary>;
+  getAccessToken(homeAccountId: string): Promise<string>;
+  signOut(homeAccountId: string): Promise<void>;
+}
+
 interface AuthenticationResultLike {
   account: CachedAccount | null;
   accessToken: string;
@@ -106,7 +113,7 @@ function authError(error: unknown): AdoAuthError {
   );
 }
 
-export class EntraAdoAuthService {
+export class EntraAdoAuthService implements AdoAuthService {
   private readonly client: PublicClientPort;
   private readonly openBrowser: (url: string) => Promise<void>;
 

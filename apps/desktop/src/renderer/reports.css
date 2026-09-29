@@ -1,1 +1,8 @@
-.report-preview{padding:22px;margin-top:16px}.report-preview .panel-title-row{margin-bottom:12px}.report-explanation{border-left:3px solid #6c9fe0;padding:9px 12px;background:#f6f9fd;color:#596d82;font-size:10px;line-height:1.7}.report-criteria{display:grid;gap:8px;margin:14px 0}.report-criterion{display:grid;gap:5px;padding:10px;border:1px solid #e9edf1;border-radius:5px}.report-criterion strong{color:#4a5b6c;font-size:9px}.report-criterion span{color:#8793a0;font-size:8px}
+.command-preview { margin-bottom: 12px; padding: 16px; }
+.command-preview .panel-title-row { align-items: flex-start; }
+.command-preview .panel-title-row h2 { margin: 2px 0 5px; font-size: 13px; }
+.command-preview .panel-title-row p { color: #929ba8; font-size: 11px; }
+.command-preview-row { display: grid; gap: 5px; padding: 10px 0; border-top: 1px solid #2e333d; }
+.command-preview-row strong { color: #d5dae3; font-size: 11px; }
+.command-preview-row code { overflow-wrap: anywhere; color: #a9c3e1; font-size: 11px; }
+.command-preview-row small { color: #858e9c; font-size: 10px; line-height: 1.5; }

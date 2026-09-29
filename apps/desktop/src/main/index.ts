@@ -1,16 +1,14 @@
-import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell, session } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, session } from 'electron';
 import { randomBytes } from 'node:crypto';
-import { createHash } from 'node:crypto';
-import { chmod, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
 import { openQaStore } from '@agentic-qa/storage/database';
-import { createEntraAdoAuthService } from '@agentic-qa/ado/auth';
+import { AzureCliAdoAuthService } from '@agentic-qa/ado/azure-cli-auth';
 import { DesktopController } from './controller.js';
 import { registerIpcHandlers } from './ipc.js';
-import { createSafeStorageMsalCache } from './msal-cache.js';
 
 const devServerUrl = !app.isPackaged && process.env.VITE_DEV_SERVER_URL === 'http://127.0.0.1:5173'
   ? process.env.VITE_DEV_SERVER_URL
@@ -90,7 +88,7 @@ async function createWindow(): Promise<void> {
   const window = new BrowserWindow({
     width: 1280,
     height: 840,
-    minWidth: 980,
+    minWidth: 800,
     minHeight: 680,
     backgroundColor: '#f5f6f8',
     title: 'Agentic QA',
@@ -135,18 +133,7 @@ async function createWindow(): Promise<void> {
     evidenceRoot: join(userDataPath, 'evidence'),
     scratchRoot,
     artifactKey: () => getDatabaseKey(join(userDataPath, 'storage-key.enc')),
-    authFactory: (clientId) => createEntraAdoAuthService({
-      clientId,
-      cache: createSafeStorageMsalCache({
-        filePath: join(userDataPath, `entra-${createHash('sha256').update(clientId.toLowerCase()).digest('hex').slice(0, 20)}.bin`),
-        safeStorage,
-      }),
-      openBrowser: async (url) => {
-        const parsed = new URL(url);
-        if (parsed.protocol !== 'https:' || parsed.hostname !== 'login.microsoftonline.com') throw new Error('Sign-in requested an unexpected browser destination.');
-        await shell.openExternal(url);
-      },
-    }),
+    authFactory: async () => new AzureCliAdoAuthService(),
     chooseRepository: async () => {
       const result = await dialog.showOpenDialog(window, { properties: ['openDirectory', 'dontAddToRecent'] });
       return result.canceled ? undefined : result.filePaths[0];
@@ -154,6 +141,13 @@ async function createWindow(): Promise<void> {
     chooseModelKeyFile: async () => {
       const result = await dialog.showOpenDialog(window, { properties: ['openFile', 'dontAddToRecent'], filters: [{ name: 'Plain text API key', extensions: ['txt'] }] });
       return result.canceled ? undefined : result.filePaths[0];
+    },
+    readAdoProfilesConfig: async () => {
+      const result = await dialog.showOpenDialog(window, { properties: ['openFile', 'dontAddToRecent'], filters: [{ name: 'Azure DevOps profiles', extensions: ['json'] }] });
+      if (result.canceled || !result.filePaths[0]) return undefined;
+      const filePath = result.filePaths[0];
+      if ((await stat(filePath)).size > 128 * 1024) throw new Error('The selected Azure DevOps profile config file is too large.');
+      return readFile(filePath, 'utf8');
     },
     saveReportFile: async (filename, contents, format) => {
       const extension = format === 'markdown' ? 'md' : format;

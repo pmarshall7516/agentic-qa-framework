@@ -1,8 +1,10 @@
 # Azure DevOps onboarding and work selection design
 
-**Status:** proposed design for product-owner review  
+**Status:** approved; auth/profile amendment in progress
 **Date:** 2026-09-28  
 **Scope:** first-run sign-in, organization/project selection, Story and Task selection, and desktop UI cleanup.
+
+**Amendment note:** the Azure CLI identity and reusable profile requirements below supersede the earlier app-owned public-client setup and manual organization/project-only setup. See “Amendment: Azure CLI identity and reusable work profiles.”
 
 ## Context
 
@@ -76,6 +78,8 @@ This design refines existing M1 requirements FR-01 through FR-04 and NFR-08; it 
 - **ONB-06:** A user can find an ADO Story/requirement, expand child Tasks, and add the Story, selected Tasks, or both to the local QA Queue.
 - **ONB-07:** Queue changes are local. No ADO write request occurs. The queue keeps the parent relationship, actual item types and revisions; duplicate additions are prevented.
 - **ONB-08:** UI text clearly distinguishes a Task from its parent's acceptance criteria and never represents Task completion as proof of Story behavior.
+- **ONB-09:** Before approving a QA plan, the user can review selected Stories/Requirements, Tasks, project scope, acceptance-criteria coverage, required check layers and target. The summary distinguishes Task context from criterion evidence.
+- **ONB-10:** After plan approval, the approved run is selected in Runs and exposes **Start approved run** without requiring the user to find the run manually.
 - **UI-01:** Main navigation exposes Work items, QA Queue, Runs and Settings; setup/review stages remain in the run flow.
 - **UI-02:** The first-run, organization/project, work-item and queue screens fit an 800px-wide desktop window without horizontal page scrolling.
 - **UI-03:** Text and controls use a readable size hierarchy; keyboard focus, labels, errors, loading and empty states remain visible and accessible.
@@ -100,4 +104,14 @@ This design refines existing M1 requirements FR-01 through FR-04 and NFR-08; it 
 
 ## Open release gate
 
-The public-client registration has to exist and its client ID and delegated ADO permissions must be configured before a user can complete first-run sign-in. M0 must verify that registration, consent and ADO reads work in the supported tenant/account cases on Windows and macOS. This design does not claim the existing M0 gate is complete.
+The prior public-client registration gate is superseded. M0 must verify Azure CLI detection, sign-in, ADO token acquisition, encrypted profile storage and ADO reads on Windows and macOS. This design does not claim the existing M0 gate is complete.
+
+## Amendment: Azure CLI identity and reusable work profiles
+
+The user approved reusing the machine's Azure CLI sign-in instead of requiring the app publisher's client-ID configuration. On first use, the app checks whether Azure CLI is installed and signed in, then offers to open the CLI's Microsoft browser sign-in when needed. It obtains an Azure DevOps token in the Electron main process using the fixed Azure DevOps resource ID. The token is transient and is never placed in renderer state, profile configuration, logs, or worker environments. This avoids an app-owned client registration; the CLI token remains Entra-backed, as Azure DevOps' documented CLI flow requires.
+
+The app has a schema-versioned local ADO configuration with one or more named profiles. Each profile contains an organization, project, team, target taskboard column, and zero or more Story IDs. A profile is validated with read-only ADO requests before activation. Settings can add, edit, remove, and activate profiles; the user can switch the active profile before searching or starting a run. Profile values have safe defaults, but the first-use flow does not require entering organization/project/team values when a configuration file is provided. The in-app editor writes back the local profile configuration. Keep credentials out of this file and preserve encrypted-at-rest storage for profile data.
+
+For a configured team and board column, work-item discovery follows this read-only sequence: current team iteration, taskboard work-item IDs and columns, configured Story relation/child IDs, batched item details, then comments. Only Story/Task IDs meeting the chosen board-column filter enter the work-selection flow. Users retain the option to browse/add work manually when no board filter is configured. Descriptions, acceptance criteria, and comments are normalized from HTML at the adapter boundary. ADO remains read-only and local Queue membership does not write back to the service.
+
+This amendment supersedes the public-client registration and mandatory manual org/project-entry details above. The system browser still handles Microsoft authentication through Azure CLI. The M0 gate now verifies CLI availability, sign-in/context selection, token lifetime/failure handling, and read-only API access on macOS and Windows. Azure CLI installation remains a machine prerequisite; app packaging must detect and explain its absence.

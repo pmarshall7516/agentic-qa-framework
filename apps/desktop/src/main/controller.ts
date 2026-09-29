@@ -5,7 +5,8 @@ import { promisify } from 'node:util';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, relative, isAbsolute, sep } from 'node:path';
-import type { AccountSummary, EntraAdoAuthService } from '@agentic-qa/ado/auth';
+import type { AccountSummary, AdoAuthService } from '@agentic-qa/ado/auth';
+import { AzureCliAdoAuthService } from '@agentic-qa/ado/azure-cli-auth';
 import { AdoClient, resolveOrganization, type AdoProject, type WorkItemSearchPage } from '@agentic-qa/ado/client';
 import type { QueueEntry } from '@agentic-qa/domain/queue';
 import type { WorkItemKind, WorkItemSnapshot, WorkItemTypeMappings } from '@agentic-qa/domain/work-item';
@@ -23,20 +24,31 @@ import { runRepositoryChecks } from '@agentic-qa/repo-worker/runner';
 import { isExcludedRepositoryPath } from '@agentic-qa/repo-worker/snapshot';
 import micromatch from 'micromatch';
 import { buildModelPayload, requestScenarioSuggestions } from '@agentic-qa/model-adapters/openai';
-import type { DesktopState, DraftPlan, QueueItemView, SearchItemsInput, TargetConfig } from '../shared/ipc.js';
+import type { AdoRunProfile, AdoRunProfileInput, DesktopState, DraftPlan, QueueItemView, SearchItemsInput, TargetConfig } from '../shared/ipc.js';
 
 const SETTING = {
-  clientId: 'entra.clientId',
   accountId: 'entra.selectedAccountId',
   organization: 'ado.organization',
   project: 'ado.project',
+  organizations: 'ado.organizations',
+  profiles: 'ado.profiles',
+  activeProfile: 'ado.activeProfile',
 } as const;
 
-const ClientIdSchema = z.string().uuid();
 const ModelSettingsSchema = z.object({ model: z.string().regex(/^[a-zA-Z0-9._:-]{1,80}$/), maxOutputTokens: z.number().int().min(256).max(4096) }).strict();
 const WorkItemTypeMappingsSchema = z.record(z.string().min(1).max(120), z.enum(['REQUIREMENT', 'TASK', 'OTHER']));
 const execFile = promisify(execFileCallback);
 const ProjectSchema = z.object({ id: z.string().min(1).max(200), name: z.string().min(1).max(200), state: z.string().max(80).optional() }).strict();
+const AdoRunProfileSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().trim().min(1).max(100),
+  organization: z.string().min(1).max(500),
+  project: ProjectSchema,
+  team: z.string().trim().min(1).max(200),
+  boardColumn: z.string().trim().min(1).max(120),
+  storyIds: z.array(z.number().int().positive().max(2_147_483_647)).max(200),
+}).strict();
+const AdoRunProfileInputSchema = AdoRunProfileSchema.extend({ project: z.object({ id: z.string().min(1).max(200).optional(), name: z.string().min(1).max(200), state: z.string().max(80).optional() }).strict() }).omit({ id: true }).extend({ id: z.string().uuid().optional() });
 const SearchSchema = z.object({
   term: z.string().max(120),
   types: z.array(z.string().max(120)).max(20),
@@ -71,9 +83,8 @@ function sha256(text: string): string { return createHash('sha256').update(text)
 export class DesktopController {
   private readonly store: QaStore;
   private readonly ado: AdoClient;
-  private readonly authFactory: (clientId: string) => Promise<EntraAdoAuthService>;
-  private auth?: EntraAdoAuthService;
-  private authClientId?: string;
+  private readonly authFactory: (clientId?: string) => Promise<AdoAuthService>;
+  private auth?: AdoAuthService;
   private readonly chosenRepository: () => Promise<string | undefined>;
   private chosenRepositoryPath?: string;
   private readonly pendingPlans = new Map<string, DraftPlan>();
@@ -94,12 +105,13 @@ export class DesktopController {
   private readonly repoWorkerImageProbe?: () => Promise<boolean>;
   private readonly repoWorkerImageInstaller?: () => Promise<void>;
   private readonly chooseModelKeyFile?: () => Promise<string | undefined>;
+  private readonly readAdoProfilesConfig?: () => Promise<string | undefined>;
   private readonly pendingModelPreviews = new Map<string, { runId: string; draftHash: string; preview: ReturnType<typeof buildModelPayload>; includedCriterionIds: string[]; expiresAt: number }>();
 
   constructor(options: {
     store: QaStore;
     ado?: AdoClient;
-    authFactory?: (clientId: string) => Promise<EntraAdoAuthService>;
+    authFactory?: () => Promise<AdoAuthService>;
     chooseRepository?: () => Promise<string | undefined>;
     saveReportFile?: (filename: string, contents: string, format: ReportFormat) => Promise<boolean>;
     saveEvidenceFile?: (filename: string, contents: Buffer, restricted: boolean) => Promise<boolean>;
@@ -116,10 +128,11 @@ export class DesktopController {
     repoWorkerImageProbe?: () => Promise<boolean>;
     installRepoWorkerImage?: () => Promise<void>;
     chooseModelKeyFile?: () => Promise<string | undefined>;
+    readAdoProfilesConfig?: () => Promise<string | undefined>;
   }) {
     this.store = options.store;
     this.ado = options.ado ?? new AdoClient();
-    this.authFactory = options.authFactory ?? (() => Promise.reject(new Error('Entra sign-in is unavailable')));
+    this.authFactory = options.authFactory ?? (async () => new AzureCliAdoAuthService());
     this.chosenRepository = options.chooseRepository ?? (async () => undefined);
     this.saveReportFile = options.saveReportFile ?? (async () => false);
     this.saveEvidenceFile = options.saveEvidenceFile ?? (async () => false);
@@ -141,12 +154,13 @@ export class DesktopController {
     this.repoWorkerImageProbe = options.repoWorkerImageProbe;
     this.repoWorkerImageInstaller = options.installRepoWorkerImage;
     this.chooseModelKeyFile = options.chooseModelKeyFile;
+    this.readAdoProfilesConfig = options.readAdoProfilesConfig;
   }
 
   async getState(): Promise<DesktopState> {
-    const [clientId, selectedAccountId, organization, project, entries, target, modelKey, modelSettings] = await Promise.all([
-      this.setting<string>(SETTING.clientId),
-      this.setting<string>(SETTING.accountId),
+    const selectedAccountId = await this.setting<string>(SETTING.accountId);
+    if (selectedAccountId) await this.migrateLegacySelections(selectedAccountId);
+    const [organization, project, entries, target, modelKey, modelSettings] = await Promise.all([
       this.setting<string>(SETTING.organization),
       this.setting<AdoProject>(SETTING.project),
       this.store.getQueue(),
@@ -154,21 +168,24 @@ export class DesktopController {
       this.setting<string>('model.apiKey'),
       this.setting<{ model: string; maxOutputTokens: number }>('model.settings'),
     ]);
-    const auth = clientId ? await this.getAuth(clientId) : undefined;
-    const accounts = auth ? await auth.getAccounts() : [];
-    const customTypeMappings = organization && project ? await this.typeMappings(organization, project.id) : {};
+    const auth = await this.getAuth().catch(() => undefined);
+    const accounts = auth ? await auth.getAccounts().catch(() => []) : [];
+    const activeAccountId = selectedAccountId && accounts.some(({ homeAccountId }) => homeAccountId === selectedAccountId) ? selectedAccountId : undefined;
+    const customTypeMappings = activeAccountId && organization && project ? await this.typeMappings(organization, project.id) : {};
     const queue: QueueItemView[] = await Promise.all(entries.map(async (entry: QueueEntry) => ({
       entry,
       snapshot: await this.store.getSnapshot(entry.key),
     })));
     return {
-      clientIdConfigured: Boolean(clientId),
-      ...(clientId ? { clientId } : {}),
+      azureCliAvailable: Boolean(auth),
       accounts,
-      ...(selectedAccountId ? { selectedAccountId } : {}),
-      ...(organization ? { selectedOrganization: organization } : {}),
-      ...(project ? { selectedProject: project } : {}),
+      ...(activeAccountId ? { selectedAccountId: activeAccountId } : {}),
+      ...(activeAccountId && organization ? { selectedOrganization: organization } : {}),
+      ...(activeAccountId && project ? { selectedProject: project } : {}),
       customTypeMappings,
+      savedOrganizations: activeAccountId ? await this.setting<string[]>(SETTING.organizations) ?? [] : [],
+      adoProfiles: activeAccountId ? await this.setting<AdoRunProfile[]>(SETTING.profiles) ?? [] : [],
+      ...(activeAccountId && await this.setting<string>(SETTING.activeProfile) ? { activeAdoProfileId: await this.setting<string>(SETTING.activeProfile) } : {}),
       queue,
       ...(target ? { target } : {}),
       modelProviderConfigured: Boolean(modelKey),
@@ -245,22 +262,11 @@ export class DesktopController {
     return next;
   }
 
-  async saveClientId(input: string): Promise<DesktopState> {
-    const clientId = ClientIdSchema.parse(input.trim());
-    const previous = await this.setting<string>(SETTING.clientId);
-    if (previous !== clientId) {
-      this.auth = undefined;
-      this.authClientId = undefined;
-      await this.store.setSetting(SETTING.accountId, null);
-    }
-    await this.store.setSetting(SETTING.clientId, clientId);
-    return this.getState();
-  }
-
   async signIn(): Promise<DesktopState> {
     const auth = await this.requireAuth();
     const account = await auth.signIn();
     await this.store.setSetting(SETTING.accountId, account.homeAccountId);
+    await this.migrateLegacySelections(account.homeAccountId);
     return this.getState();
   }
 
@@ -285,12 +291,36 @@ export class DesktopController {
     return this.getState();
   }
 
+  async selectAccount(homeAccountIdInput: string): Promise<DesktopState> {
+    const homeAccountId = z.string().min(1).max(500).parse(homeAccountIdInput);
+    const account = (await (await this.requireAuth()).getAccounts()).find(({ homeAccountId: id }) => id === homeAccountId);
+    if (!account) throw new Error('That Azure CLI account is no longer signed in. Run `az login` and try again.');
+    await this.store.setSetting(SETTING.accountId, account.homeAccountId);
+    await this.migrateLegacySelections(account.homeAccountId);
+    return this.getState();
+  }
+
   async selectOrganization(input: string): Promise<DesktopState> {
     const organization = resolveOrganization(input);
-    await this.requireAccount();
-    await this.store.setSetting(SETTING.organization, organization);
-    await this.store.setSetting(SETTING.project, null);
+    const account = await this.requireAccount();
+    const token = await this.requireAuth().then((auth) => auth.getAccessToken(account.homeAccountId));
+    await this.ado.listProjects(token, organization);
+    const saved = await this.setting<string[]>(SETTING.organizations) ?? [];
+    if (!saved.some((item) => item.toLocaleLowerCase('en-US') === organization.toLocaleLowerCase('en-US'))) {
+      await this.setSetting(SETTING.organizations, [...saved, organization]);
+    }
+    await this.setSetting(SETTING.organization, organization);
+    await this.setSetting(SETTING.project, null);
+    await this.setSetting(SETTING.activeProfile, null);
     return this.getState();
+  }
+
+  async listOrganizations() {
+    const account = await this.requireAccount();
+    const token = await this.requireAuth().then((auth) => auth.getAccessToken(account.homeAccountId));
+    const profile = await this.ado.getProfile(token);
+    const memberId = z.string().uuid().parse(profile.id);
+    return this.ado.listOrganizations(token, memberId);
   }
 
   async listProjects(): Promise<AdoProject[]> {
@@ -307,8 +337,127 @@ export class DesktopController {
     if (!(await this.setting<string>(SETTING.organization))) {
       throw new Error('Choose an Azure DevOps organization first.');
     }
-    await this.store.setSetting(SETTING.project, project);
+    await this.setSetting(SETTING.project, project);
+    await this.setSetting(SETTING.activeProfile, null);
     return this.getState();
+  }
+
+  async saveAdoProfile(input: AdoRunProfileInput): Promise<DesktopState> {
+    await this.requireAccount();
+    const parsed = AdoRunProfileInputSchema.parse(input);
+    const organization = resolveOrganization(parsed.organization);
+    const token = await this.accessToken();
+    const projects = await this.ado.listProjects(token, organization);
+    const project = projects.find(({ id, name }) => parsed.project.id ? id === parsed.project.id : name.toLocaleLowerCase('en-US') === parsed.project.name.toLocaleLowerCase('en-US'));
+    if (!project) throw new Error('The selected project is not available in this organization for the signed-in Azure CLI account.');
+    const teams = await this.ado.listTeams(token, organization, project.id);
+    if (!teams.some(({ name }) => name.toLocaleLowerCase('en-US') === parsed.team.toLocaleLowerCase('en-US'))) throw new Error('The selected team is not available in this Azure DevOps project.');
+    const current = await this.setting<AdoRunProfile[]>(SETTING.profiles) ?? [];
+    const existing = current.find((item) => item.name.toLocaleLowerCase('en-US') === parsed.name.toLocaleLowerCase('en-US') && item.organization.toLocaleLowerCase('en-US') === organization.toLocaleLowerCase('en-US') && item.project.id === project.id && item.team.toLocaleLowerCase('en-US') === parsed.team.toLocaleLowerCase('en-US'));
+    const profile: AdoRunProfile = { ...parsed, id: parsed.id ?? existing?.id ?? randomUUID(), organization, project };
+    const next = current.some(({ id }) => id === profile.id)
+      ? current.map((item) => item.id === profile.id ? profile : item)
+      : [...current, profile];
+    await this.setSetting(SETTING.profiles, next);
+    if (!await this.setting<string>(SETTING.activeProfile)) await this.activateAdoProfile(profile.id);
+    return this.getState();
+  }
+
+  async activateAdoProfile(profileIdInput: string): Promise<DesktopState> {
+    await this.requireAccount();
+    const profileId = z.string().uuid().parse(profileIdInput);
+    const profiles = await this.setting<AdoRunProfile[]>(SETTING.profiles) ?? [];
+    const profile = profiles.find(({ id }) => id === profileId);
+    if (!profile) throw new Error('That Azure DevOps configuration profile no longer exists.');
+    const projectsInOrganization = await this.ado.listProjects(await this.accessToken(), profile.organization);
+    const project = projectsInOrganization.find(({ id }) => id === profile.project.id);
+    if (!project) throw new Error('The saved project is no longer available to the signed-in Azure CLI account.');
+    const teams = await this.ado.listTeams(await this.accessToken(), profile.organization, project.id);
+    if (!teams.some(({ name }) => name.toLocaleLowerCase('en-US') === profile.team.toLocaleLowerCase('en-US'))) throw new Error(`The saved team “${profile.team}” is no longer available in project ${project.name}.`);
+    await this.setSetting(SETTING.organization, profile.organization);
+    await this.setSetting(SETTING.project, profile.project);
+    await this.setSetting(SETTING.activeProfile, profile.id);
+    const saved = await this.setting<string[]>(SETTING.organizations) ?? [];
+    if (!saved.some((item) => item.toLocaleLowerCase('en-US') === profile.organization.toLocaleLowerCase('en-US'))) {
+      await this.setSetting(SETTING.organizations, [...saved, profile.organization]);
+    }
+    return this.getState();
+  }
+
+  async deleteAdoProfile(profileIdInput: string): Promise<DesktopState> {
+    await this.requireAccount();
+    const profileId = z.string().uuid().parse(profileIdInput);
+    const profiles = await this.setting<AdoRunProfile[]>(SETTING.profiles) ?? [];
+    await this.setSetting(SETTING.profiles, profiles.filter(({ id }) => id !== profileId));
+    if (await this.setting<string>(SETTING.activeProfile) === profileId) await this.setSetting(SETTING.activeProfile, null);
+    return this.getState();
+  }
+
+  async importAdoProfilesConfig(): Promise<DesktopState> {
+    const content = await this.readAdoProfilesConfig?.();
+    if (!content) return this.getState();
+    if (Buffer.byteLength(content, 'utf8') > 128 * 1024) throw new Error('The Azure DevOps profile config file is too large.');
+    let parsed: unknown;
+    try { parsed = JSON.parse(content); } catch { throw new Error('The Azure DevOps profile config is not valid JSON.'); }
+    const config = z.object({ schemaVersion: z.literal(1), profiles: z.array(AdoRunProfileInputSchema.omit({ id: true })).min(1).max(50) }).strict().parse(parsed);
+    await this.requireAccount();
+    const token = await this.accessToken();
+    const current = await this.setting<AdoRunProfile[]>(SETTING.profiles) ?? [];
+    const imported: AdoRunProfile[] = [];
+    for (const entry of config.profiles) {
+      const organization = resolveOrganization(entry.organization);
+      const projects = await this.ado.listProjects(token, organization);
+      const project = projects.find(({ id, name }) => entry.project.id ? id === entry.project.id : name.toLocaleLowerCase('en-US') === entry.project.name.toLocaleLowerCase('en-US'));
+      if (!project) throw new Error(`Project “${entry.project.name}” was not found in ${organization} for the signed-in account.`);
+      const teams = await this.ado.listTeams(token, organization, project.id);
+      const team = teams.find(({ name }) => name.toLocaleLowerCase('en-US') === entry.team.toLocaleLowerCase('en-US'));
+      if (!team) throw new Error(`Team “${entry.team}” was not found in project ${project.name}.`);
+      const existing = current.find((item) => item.name.toLocaleLowerCase('en-US') === entry.name.toLocaleLowerCase('en-US') && item.organization.toLocaleLowerCase('en-US') === organization.toLocaleLowerCase('en-US') && item.project.id === project.id && item.team.toLocaleLowerCase('en-US') === team.name.toLocaleLowerCase('en-US'));
+      imported.push({ ...entry, id: existing?.id ?? randomUUID(), organization, project, team: team.name });
+    }
+    const next = [...current];
+    for (const profile of imported) {
+      const index = next.findIndex(({ id }) => id === profile.id);
+      if (index < 0) next.push(profile); else next[index] = profile;
+    }
+    await this.setSetting(SETTING.profiles, next);
+    if (!await this.setting<string>(SETTING.activeProfile) && imported[0]) await this.activateAdoProfile(imported[0].id);
+    return this.getState();
+  }
+
+  async loadActiveProfileWorkItems() {
+    const profileId = await this.setting<string>(SETTING.activeProfile);
+    const profiles = await this.setting<AdoRunProfile[]>(SETTING.profiles) ?? [];
+    const profile = profiles.find(({ id }) => id === profileId);
+    if (!profile) throw new Error('Choose an Azure DevOps configuration profile in Settings first.');
+    const token = await this.accessToken();
+    const iteration = await this.ado.getCurrentIteration(token, profile.organization, profile.project.id, profile.team);
+    if (!iteration) throw new Error(`No current sprint was found for ${profile.team}. Check the team's iteration settings in Azure DevOps.`);
+    const taskboard = await this.ado.getTaskboardItems(token, profile.organization, profile.project.id, profile.team, iteration.id);
+    const targetIds = new Set(taskboard.filter(({ column }) => column.trim().toLocaleLowerCase('en-US') === profile.boardColumn.trim().toLocaleLowerCase('en-US')).map(({ workItemId }) => workItemId));
+    const context = { organization: profile.organization, projectId: profile.project.id, projectName: profile.project.name, customTypeMappings: await this.typeMappings(profile.organization, profile.project.id) };
+    const childIdsByStory: Record<number, number[]> = {};
+    for (const storyId of profile.storyIds) {
+      const childIds = await this.ado.getChildIds(token, { organization: profile.organization, parentId: storyId });
+      childIdsByStory[storyId] = childIds.filter((id) => targetIds.has(id));
+    }
+    const selectedIds = [...new Set([...profile.storyIds, ...Object.values(childIdsByStory).flat()])];
+    const allItems = await this.ado.fetchWorkItems(token, { ...context, ids: selectedIds });
+    const withComments: WorkItemSnapshot[] = [];
+    for (let index = 0; index < allItems.length; index += 8) {
+      const batch = await Promise.all(allItems.slice(index, index + 8).map(async (item) => {
+        const comments = await this.ado.getWorkItemComments(token, profile.organization, profile.project.id, item.id).catch(() => []);
+        return { ...item, ...(comments.length ? { comments } : {}) };
+      }));
+      withComments.push(...batch);
+    }
+    const byId = new Map(withComments.map((item) => [item.id, item]));
+    const stories = profile.storyIds.map((id) => byId.get(id)).filter((item): item is WorkItemSnapshot => Boolean(item && item.kind === 'REQUIREMENT'));
+    return {
+      iterationName: iteration.name,
+      stories,
+      tasksByStory: Object.fromEntries(Object.entries(childIdsByStory).map(([id, children]) => [id, children.map((childId) => byId.get(childId)).filter((item): item is WorkItemSnapshot => Boolean(item && item.kind === 'TASK'))])),
+    };
   }
 
   async listWorkItemTypes(): Promise<string[]> {
@@ -958,8 +1107,55 @@ export class DesktopController {
   }
 
   private async setting<T>(key: string): Promise<T | undefined> {
+    const scoped = key === SETTING.organization || key === SETTING.project || key === SETTING.organizations || key === SETTING.profiles || key === SETTING.activeProfile;
+    const accountId = scoped ? await this.rawSetting<string>(SETTING.accountId) : undefined;
+    if (scoped && !accountId) return undefined;
+    const value = scoped ? await this.rawSetting<T>(this.accountSettingKey(key, accountId!)) : await this.rawSetting<T>(key);
+    return value === null || value === undefined ? undefined : value as T;
+  }
+
+  private async rawSetting<T>(key: string): Promise<T | undefined> {
     const value = await this.store.getSetting(key);
     return value === null || value === undefined ? undefined : value as T;
+  }
+
+  private async setSetting(key: string, value: unknown): Promise<void> {
+    const scoped = key === SETTING.organization || key === SETTING.project || key === SETTING.organizations || key === SETTING.profiles || key === SETTING.activeProfile;
+    const accountId = scoped ? await this.rawSetting<string>(SETTING.accountId) : undefined;
+    if (scoped && !accountId) throw new Error('Sign in to Azure DevOps before saving organization or project selections.');
+    await this.store.setSetting(scoped ? this.accountSettingKey(key, accountId!) : key, value);
+  }
+
+  private accountSettingKey(key: string, accountId: string): string {
+    const legacyKey = `${key}.${encodeURIComponent(accountId)}`;
+    if (/^[A-Za-z][A-Za-z0-9._-]{0,100}$/.test(legacyKey)) return legacyKey;
+    return `${key}.${sha256(accountId)}`;
+  }
+
+  private async migrateLegacySelections(accountId: string): Promise<void> {
+    const organizationKey = this.accountSettingKey(SETTING.organization, accountId);
+    const projectKey = this.accountSettingKey(SETTING.project, accountId);
+    const organizationsKey = this.accountSettingKey(SETTING.organizations, accountId);
+    const [savedOrganization, savedProject, savedOrganizations, legacyOrganization, legacyProject] = await Promise.all([
+      this.rawSetting<string>(organizationKey),
+      this.rawSetting<AdoProject>(projectKey),
+      this.rawSetting<string[]>(organizationsKey),
+      this.rawSetting<string>(SETTING.organization),
+      this.rawSetting<AdoProject>(SETTING.project),
+    ]);
+    let migratedOrganization: string | undefined;
+    if (!savedOrganization && legacyOrganization) {
+      try { migratedOrganization = resolveOrganization(legacyOrganization); } catch { migratedOrganization = undefined; }
+      if (migratedOrganization) await this.store.setSetting(organizationKey, migratedOrganization);
+    }
+    if (!savedProject && legacyProject && (savedOrganization || migratedOrganization)) {
+      await this.store.setSetting(projectKey, legacyProject);
+    }
+    if (!savedOrganizations && (savedOrganization || migratedOrganization)) {
+      await this.store.setSetting(organizationsKey, [savedOrganization ?? migratedOrganization]);
+    }
+    if (legacyOrganization !== undefined) await this.store.setSetting(SETTING.organization, null);
+    if (legacyProject !== undefined) await this.store.setSetting(SETTING.project, null);
   }
 
   private typeMappingsSettingKey(organization: string, projectId: string): string {
@@ -1050,17 +1246,12 @@ export class DesktopController {
     }
   }
 
-  private async requireAuth(): Promise<EntraAdoAuthService> {
-    const clientId = await this.setting<string>(SETTING.clientId);
-    if (!clientId) throw new Error('Configure an Entra public application client ID first.');
-    return this.getAuth(clientId);
+  private async requireAuth(): Promise<AdoAuthService> {
+    return this.getAuth();
   }
 
-  private async getAuth(clientId: string): Promise<EntraAdoAuthService> {
-    if (!this.auth || this.authClientId !== clientId) {
-      this.auth = await this.authFactory(clientId);
-      this.authClientId = clientId;
-    }
+  private async getAuth(): Promise<AdoAuthService> {
+    if (!this.auth) this.auth = await this.authFactory();
     return this.auth;
   }
 

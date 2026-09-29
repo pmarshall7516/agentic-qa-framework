@@ -264,7 +264,7 @@ export async function openQaStore(options: QaStoreOptions): Promise<QaStore> {
     const recordArtifactStatement = db.prepare('INSERT INTO artifacts (id, run_id, artifact_json) VALUES (?, ?, ?)');
     const deleteLocalQaData = db.transaction(() => {
       db!.exec('DELETE FROM queue_entries; DELETE FROM work_items; DELETE FROM run_records; DELETE FROM qa_contracts;');
-      db!.prepare(`DELETE FROM app_settings WHERE key IN ('entra.selectedAccountId', 'ado.organization', 'ado.project', 'run.target') OR key LIKE 'ado.customTypeMappings.%' OR key LIKE 'run.target.%'`).run();
+      db!.prepare(`DELETE FROM app_settings WHERE key IN ('entra.selectedAccountId', 'entra.clientId', 'ado.organization', 'ado.project', 'ado.organizations', 'run.target') OR key LIKE 'ado.organization.%' OR key LIKE 'ado.project.%' OR key LIKE 'ado.organizations.%' OR key LIKE 'ado.customTypeMappings.%' OR key LIKE 'run.target.%'`).run();
     });
 
     return {

@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --config vite.config.ts",
     "build:ui": "vite build --config vite.config.ts",
-    "build:main": "esbuild src/main/index.ts --bundle --platform=node --format=cjs --external:electron --external:better-sqlite3-multiple-ciphers --external:@azure/msal-node --external:playwright --external:playwright-core --external:chromium-bidi --outfile=dist-electron/main.cjs && esbuild src/preload/index.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist-electron/preload.cjs",
+    "build:main": "node scripts/build-main.mjs",
     "build": "npm run build:ui && npm run build:main",
     "start": "electron .",
     "package:win": "npm run build && electron-builder --win nsis portable --x64",

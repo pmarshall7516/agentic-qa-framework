@@ -26,7 +26,7 @@ export interface NormalizeContext {
   customTypeMappings?: WorkItemTypeMappings;
 }
 
-function safePlainText(value: unknown): string | undefined {
+export function normalizeHtmlText(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   return sanitizeHtml(value.slice(0, 128_000), {
     allowedTags: [],
@@ -83,8 +83,8 @@ export function normalizeWorkItem(
   const id = Number(input.id);
   const fields = input.fields ?? {};
   const type = typeof fields[TYPE_FIELD] === 'string' ? fields[TYPE_FIELD].trim() : '';
-  const description = safePlainText(fields[DESCRIPTION_FIELD]);
-  const acceptanceCriteria = safePlainText(fields[ACCEPTANCE_FIELD]);
+  const description = normalizeHtmlText(fields[DESCRIPTION_FIELD]);
+  const acceptanceCriteria = normalizeHtmlText(fields[ACCEPTANCE_FIELD]);
 
   return WorkItemSnapshotSchema.parse({
     organization: context.organization,
@@ -94,8 +94,8 @@ export function normalizeWorkItem(
     revision: Number(input.rev),
     type,
     kind: classifyWorkItemType(type, context.customTypeMappings),
-    title: safePlainText(fields['System.Title']) ?? '',
-    state: safePlainText(fields['System.State']) ?? '',
+    title: normalizeHtmlText(fields['System.Title']) ?? '',
+    state: normalizeHtmlText(fields['System.State']) ?? '',
     ...(description !== undefined ? { description } : {}),
     ...(acceptanceCriteria !== undefined ? { acceptanceCriteria } : {}),
     ...(relatedWorkItemId(input.relations, 'System.LinkTypes.Hierarchy-Reverse')

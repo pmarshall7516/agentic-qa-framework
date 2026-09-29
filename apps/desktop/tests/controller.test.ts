@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -21,7 +21,10 @@ function fixture(browserStatus: 'PASSED' | 'FAILED' = 'PASSED', chooseModelKeyFi
   const findings: any[] = [];
   const store = {
     getSetting: vi.fn(async (key: string) => settings.get(key)),
-    setSetting: vi.fn(async (key: string, value: unknown) => { settings.set(key, value); }),
+    setSetting: vi.fn(async (key: string, value: unknown) => {
+      if (!/^[A-Za-z][A-Za-z0-9._-]{0,100}$/.test(key)) throw new Error('Invalid setting key');
+      settings.set(key, value);
+    }),
     getQueue: vi.fn(async () => queue),
     getSnapshot: vi.fn(async (key: string) => snapshots.get(key)),
     addToQueue: vi.fn(async (snapshot: any) => {
@@ -43,7 +46,6 @@ function fixture(browserStatus: 'PASSED' | 'FAILED' = 'PASSED', chooseModelKeyFi
     recordArtifact: vi.fn(async (artifact: any) => { runRecords.get(artifact.runId)?.artifacts.push(artifact); }),
   } as unknown as QaStore;
   const account = { homeAccountId: 'account-1', tenantId: 'tenant', username: 'qa@example.com' };
-  settings.set('entra.clientId', '11111111-1111-1111-8111-111111111111');
   settings.set('entra.selectedAccountId', account.homeAccountId);
   const auth = {
     getAccounts: vi.fn(async () => [account]),
@@ -52,6 +54,8 @@ function fixture(browserStatus: 'PASSED' | 'FAILED' = 'PASSED', chooseModelKeyFi
     getAccessToken: vi.fn(async () => 'secret-token'),
   } as unknown as EntraAdoAuthService;
   const ado = {
+    getProfile: vi.fn(async () => ({ id: '11111111-1111-4111-8111-111111111111' })),
+    listOrganizations: vi.fn(async () => [{ id: 'org-id-1', name: 'org' }]),
     listProjects: vi.fn(async () => [{ id: 'project-1', name: 'Project One' }]),
     getWorkItemTypes: vi.fn(async () => ['User Story', 'Task']),
     search: vi.fn(async () => [{ id: 17, organization: 'org', projectId: 'project-1' }]),
@@ -71,6 +75,20 @@ function fixture(browserStatus: 'PASSED' | 'FAILED' = 'PASSED', chooseModelKeyFi
 }
 
 describe('desktop controller', () => {
+  it('uses the injected Azure CLI auth adapter without returning credential data to the renderer', async () => {
+    const { store, settings, auth } = fixture();
+    settings.delete('entra.clientId');
+    const authFactory = vi.fn(async () => auth);
+    const controller = new DesktopController({ store, authFactory });
+
+    const state = await controller.signIn();
+
+    expect(authFactory).toHaveBeenCalledOnce();
+    expect(authFactory).toHaveBeenCalledWith();
+    expect(state.azureCliAvailable).toBe(true);
+    expect(state).not.toHaveProperty('accessToken');
+  });
+
   it('records local Git cleanliness without persisting changed filenames', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'agentic-git-state-'));
     const { controller } = fixture();
@@ -82,9 +100,61 @@ describe('desktop controller', () => {
       expect(JSON.stringify(await (controller as any).inspectLocalGitState(directory))).not.toContain('private-change.txt');
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
+
+  it('discovers organizations using the selected account profile ID', async () => {
+    const { controller, ado } = fixture();
+
+    await expect(controller.listOrganizations()).resolves.toEqual([{ id: 'org-id-1', name: 'org' }]);
+
+    expect(ado.getProfile).toHaveBeenCalledWith('secret-token');
+    expect(ado.listOrganizations).toHaveBeenCalledWith('secret-token', '11111111-1111-4111-8111-111111111111');
+  });
+
+  it('validates and remembers organizations per signed-in account without duplicates', async () => {
+    const { controller, settings, auth } = fixture();
+    await controller.selectOrganization('https://dev.azure.com/org');
+    await controller.selectOrganization('org');
+
+    expect(settings.get('ado.organizations.account-1')).toEqual(['org']);
+    expect((await controller.getState()).savedOrganizations).toEqual(['org']);
+
+    const secondAccount = { homeAccountId: 'account-2', tenantId: 'tenant-2', username: 'other@example.com' };
+    (auth.getAccounts as any).mockResolvedValue([{ homeAccountId: 'account-1', tenantId: 'tenant', username: 'qa@example.com' }, secondAccount]);
+    settings.set('entra.selectedAccountId', secondAccount.homeAccountId);
+    await controller.selectOrganization('fabrikam');
+    expect(settings.get('ado.organizations.account-2')).toEqual(['fabrikam']);
+    expect(settings.get('ado.organization.account-1')).toBe('org');
+  });
+
+  it('uses a storage-safe key for Azure CLI account IDs containing punctuation', async () => {
+    const { controller, settings, auth, store } = fixture();
+    const cliAccount = {
+      homeAccountId: 'azure-cli:11111111-1111-4111-8111-111111111111:qa@example.com',
+      tenantId: '11111111-1111-4111-8111-111111111111',
+      username: 'qa@example.com',
+    };
+    (auth.getAccounts as any).mockResolvedValue([cliAccount]);
+    settings.set('entra.selectedAccountId', cliAccount.homeAccountId);
+
+    await controller.selectOrganization('org');
+
+    const persistedKeys = (store.setSetting as any).mock.calls.map(([key]: [string]) => key);
+    const accountHash = createHash('sha256').update(cliAccount.homeAccountId).digest('hex');
+    expect(persistedKeys).toContain(`ado.organizations.${accountHash}`);
+    expect(persistedKeys.every((key: string) => /^[A-Za-z][A-Za-z0-9._-]{0,100}$/.test(key))).toBe(true);
+  });
+
+  it('does not save an organization until project access has been validated', async () => {
+    const { controller, settings, ado } = fixture();
+    (ado.listProjects as any).mockRejectedValueOnce(new Error('Azure DevOps denied access to this organization or project.'));
+
+    await expect(controller.selectOrganization('not-a-member')).rejects.toThrow('denied access');
+
+    expect(settings.has('ado.organizations.account-1')).toBe(false);
+    expect(settings.has('ado.organization.account-1')).toBe(false);
+  });
   it('keeps tokens in the main service and sends only account summaries to the UI', async () => {
     const { controller, auth } = fixture();
-    await controller.saveClientId('11111111-1111-1111-8111-111111111111');
     const state = await controller.signIn();
     expect(auth.signIn).toHaveBeenCalledOnce();
     expect(JSON.stringify(state)).not.toContain('secret-token');
@@ -127,7 +197,6 @@ describe('desktop controller', () => {
 
   it('scopes queue additions to the selected organization and project', async () => {
     const { controller, ado } = fixture();
-    await controller.saveClientId('11111111-1111-1111-8111-111111111111');
     await controller.signIn();
     await controller.selectOrganization('org');
     await controller.listProjects();
@@ -286,7 +355,6 @@ describe('desktop controller', () => {
       { path: '/.agentic-qa.yml', isFolder: false }, { path: '/package.json', isFolder: false }, { path: '/.env', isFolder: false },
     ]);
     (ado as any).getGitItemContent = vi.fn(async (_token: string, _org: string, _repo: string, _commit: string, path: string) => path === '/.agentic-qa.yml' ? config : path === '/package.json' ? '{"name":"safe"}' : 'SECRET=canary');
-    settings.set('entra.clientId', '11111111-1111-1111-8111-111111111111');
     settings.set('entra.selectedAccountId', 'account-1');
     settings.set('run.target', { targetKind: 'repository', repositorySource: 'ado-git', adoRepository: { organization: 'org', projectId: 'project-1', id: 'repo-1', name: 'Portal', refName: 'refs/heads/main', commit }, allowedOrigins: [] });
     const draft = await controller.createDraftPlan();

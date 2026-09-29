@@ -1,10 +1,12 @@
-.result-group{display:grid;gap:6px}.child-toggle{white-space:nowrap}.child-items{display:grid;gap:6px;margin-left:36px;border-left:2px solid #e6edf5;padding-left:9px}.child-items .work-card{padding:10px}.child-empty{padding:10px 13px;background:#f8fafc;color:#8995a3;font-size:9px;border-radius:5px}
-.custom-type-mappings{display:grid;gap:8px;margin-top:15px;padding:14px;border:1px solid #e8edf3;border-radius:8px;background:#fafbfd}.custom-type-mappings>strong{font-size:11px}.custom-type-mappings .filters-row{margin:0;align-items:center}.custom-type-mappings .filters-row label{width:100%}.custom-type-mappings select{min-width:150px}
-.report-evidence-list{display:grid;gap:8px;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
-.report-evidence-item{display:grid;gap:4px;padding:10px 12px;background:var(--surface-subtle);border-radius:8px}
-.report-evidence-item>strong{font-size:12px;text-transform:uppercase;letter-spacing:.06em}
-.report-evidence-item>span{font-size:13px;line-height:1.5}
-.registration-help{margin-top:12px;border:1px solid var(--line);border-radius:8px;padding:11px 13px;background:var(--surface-subtle);color:var(--text-secondary);font-size:12px;line-height:1.55}
-.registration-help summary{cursor:pointer;color:var(--text-primary);font-weight:600}
-.registration-help ol{padding-left:20px;margin:10px 0 0;display:grid;gap:7px}
-.registration-help code{overflow-wrap:anywhere}
+.report-preview { margin-top: 16px; padding: 20px; }
+.report-preview .panel-title-row { margin-bottom: 12px; }
+.report-explanation { padding: 10px 12px; border-left: 3px solid #6399d5; background: #1c2530; color: #b6c3d2; font-size: 12px; line-height: 1.65; }
+.report-criteria { display: grid; gap: 9px; margin: 14px 0; }
+.report-criterion { display: grid; gap: 6px; padding: 11px; border: 1px solid #303641; border-radius: 5px; background: #191c22; }
+.report-criterion strong { color: #d0d6df; font-size: 11px; }
+.report-criterion span { color: #98a1ae; font-size: 10px; }
+.report-evidence-list { display: grid; gap: 8px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.report-evidence-item { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid #303641; border-radius: 6px; background: #15181e; }
+.report-evidence-item > strong { color: #cfd5df; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+.report-evidence-item > span { color: #b3bbc7; font-size: 12px; line-height: 1.5; }
+.registration-help { margin-top: 12px; border: 1px solid var(--line); border-radius: 8px; padding: 11px 13px; background: var(--surface-raised); color: var(--text-secondary); font-size: 12px; line-height: 1.55; }

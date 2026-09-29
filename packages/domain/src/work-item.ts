@@ -16,6 +16,7 @@ export const WorkItemSnapshotSchema = z
     state: z.string(),
     description: z.string().optional(),
     acceptanceCriteria: z.string().optional(),
+    comments: z.array(z.string().max(12_000)).max(200).optional(),
     parentId: z.number().int().positive().optional(),
     url: z.url(),
     retrievedAt: z.iso.datetime(),

@@ -2,21 +2,18 @@ import { useEffect, useMemo, useState } from 'react';
 import type { AdoGitRef, AdoGitRepository, AdoProject } from '@agentic-qa/ado/client';
 import type { WorkItemSnapshot } from '@agentic-qa/domain/work-item';
 import type { Scenario } from '@agentic-qa/domain/qa-contract';
-import type { AppScreen, DesktopApi, DesktopState, DraftPlan, ModelPayloadPreview, TargetConfig } from '../shared/ipc.js';
+import type { AppScreen, DesktopApi, DesktopState, DraftPlan, ModelPayloadPreview, QueueItemView, TargetConfig } from '../shared/ipc.js';
 
-const navigation: Array<{ id: AppScreen; label: string; number: string }> = [
-  { id: 'connections', label: 'Connections', number: '01' },
-  { id: 'project', label: 'Project', number: '02' },
-  { id: 'work-items', label: 'Work items', number: '03' },
-  { id: 'queue', label: 'QA Queue', number: '04' },
-  { id: 'run-setup', label: 'Run setup', number: '05' },
-  { id: 'plan', label: 'Plan review', number: '06' },
-  { id: 'history', label: 'History', number: '07' },
+const navigation: Array<{ id: AppScreen; label: string }> = [
+  { id: 'work-items', label: 'Work items' },
+  { id: 'queue', label: 'QA Queue' },
+  { id: 'history', label: 'Runs' },
+  { id: 'settings', label: 'Settings' },
 ];
 const BUILT_IN_WORK_ITEM_TYPES = new Set(['user story', 'product backlog item', 'issue', 'requirement', 'task']);
 
 const EMPTY_STATE: DesktopState = {
-  clientIdConfigured: false,
+  azureCliAvailable: false,
   accounts: [],
   queue: [],
   modelProviderConfigured: false,
@@ -25,7 +22,11 @@ const EMPTY_STATE: DesktopState = {
 };
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : 'The requested operation could not be completed.';
+  const message = error instanceof Error ? error.message : '';
+  if (/AdoRequestError|Azure DevOps request failed|Error invoking remote method/i.test(message)) {
+    return 'Azure DevOps could not complete this request. Check your connection and organization access, then try again.';
+  }
+  return message || 'The requested operation could not be completed.';
 }
 
 function projectLabel(project?: AdoProject): string {
@@ -93,6 +94,7 @@ function WorkItemCard({
         ) : (
           <p className="criteria-missing">No acceptance criteria field was returned.</p>
         )}
+        {item.comments?.length ? <details className="work-comments"><summary>{item.comments.length} ADO comments</summary><ul>{item.comments.map((comment, index) => <li key={index}>{comment}</li>)}</ul></details> : null}
       </div>
       {item.kind === 'REQUIREMENT' && onChildren ? <button className="text-button child-toggle" type="button" onClick={() => onChildren(item.id)}>{childrenExpanded ? 'Hide tasks' : 'Browse child tasks'}</button> : null}
       <button
@@ -107,6 +109,36 @@ function WorkItemCard({
   );
 }
 
+function PlanSummary({ draftPlan, queue, target }: { draftPlan?: DraftPlan; queue: QueueItemView[]; target?: TargetConfig }) {
+  const stories = queue.filter(({ snapshot }) => snapshot?.kind === 'REQUIREMENT');
+  const tasks = queue.filter(({ snapshot }) => snapshot?.kind === 'TASK');
+  const projects = [...new Set(queue.map(({ entry, snapshot }) => `${entry.organization} / ${snapshot?.projectName ?? entry.projectId}`))];
+  const projectSummary = projects.length > 2 ? `${projects.length} Azure DevOps projects` : projects.join(' · ') || 'No project selected';
+  const storyLabel = stories.every(({ snapshot }) => ['user story', 'product backlog item'].includes(snapshot?.type.toLocaleLowerCase('en-US') ?? '')) ? 'Story' : 'Requirement';
+  const storySummary = `${stories.length} ${storyLabel}${stories.length === 1 ? '' : 's'}`;
+  const taskSummary = `${tasks.length} Task${tasks.length === 1 ? '' : 's'}`;
+  const criterionCount = draftPlan?.contract.criteria.length ?? 0;
+  const criterionSummary = `${criterionCount} acceptance ${criterionCount === 1 ? 'criterion' : 'criteria'}`;
+  const checks = draftPlan?.manifest.targetKind === 'site' ? 'Browser checks'
+    : draftPlan?.manifest.targetKind === 'repository' ? 'Repository checks'
+      : draftPlan?.manifest.targetKind === 'both' ? 'Repository and browser checks' : 'Not selected';
+  const targetName = target?.siteBaseUrl
+    ?? target?.adoRepository?.name
+    ?? (target?.repositoryPath ? 'Local repository' : 'Target details unavailable');
+
+  return <section className="plan-summary" aria-labelledby="plan-summary-title">
+    <h2 id="plan-summary-title">Plan summary</h2>
+    <dl className="plan-summary-grid">
+      <div><dt>Selected work</dt><dd>{storySummary} · {taskSummary}</dd></div>
+      <div><dt>Project scope</dt><dd>{projectSummary}</dd></div>
+      <div><dt>Coverage</dt><dd>{criterionSummary} · {checks}</dd></div>
+      <div><dt>Target</dt><dd>{targetName}</dd></div>
+    </dl>
+    {tasks.length ? <p className="plan-summary-note">Tasks provide context; they do not verify their Story's acceptance criteria.</p> : null}
+    {criterionCount === 0 ? <p className="plan-summary-warning" role="note">No Story acceptance criteria were found. Add or clarify acceptance criteria before approving a QA run.</p> : null}
+  </section>;
+}
+
 export function App({
   api,
   initialState,
@@ -115,9 +147,9 @@ export function App({
   initialState?: DesktopState;
 }) {
   const [state, setState] = useState<DesktopState>(initialState ?? EMPTY_STATE);
-  const [screen, setScreen] = useState<AppScreen>('connections');
+  const [screen, setScreen] = useState<AppScreen>(initialState?.selectedProject ? 'work-items' : initialState?.selectedAccountId ? 'project' : 'connections');
   const [organization, setOrganization] = useState(initialState?.selectedOrganization ?? '');
-  const [clientId, setClientId] = useState(initialState?.clientId ?? '');
+  const [organizations, setOrganizations] = useState<Array<{ id: string; name: string }>>([]);
   const [projects, setProjects] = useState<AdoProject[]>([]);
   const [workItemTypes, setWorkItemTypes] = useState<string[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
@@ -144,6 +176,14 @@ export function App({
   const [modelPreview, setModelPreview] = useState<ModelPayloadPreview>();
   const [modelId, setModelId] = useState(initialState?.modelId ?? 'gpt-5.6-terra');
   const [modelMaxOutputTokens, setModelMaxOutputTokens] = useState(initialState?.modelMaxOutputTokens ?? 1200);
+  const [profileId, setProfileId] = useState('');
+  const [profileName, setProfileName] = useState('');
+  const [profileOrganization, setProfileOrganization] = useState(initialState?.selectedOrganization ?? '');
+  const [profileProjectId, setProfileProjectId] = useState(initialState?.selectedProject?.id ?? '');
+  const [profileProjectName, setProfileProjectName] = useState(initialState?.selectedProject?.name ?? '');
+  const [profileTeam, setProfileTeam] = useState('');
+  const [profileColumn, setProfileColumn] = useState('');
+  const [profileStoryIds, setProfileStoryIds] = useState('');
   const [modelIncludedCriteria, setModelIncludedCriteria] = useState<string[]>([]);
   const [runs, setRuns] = useState<Array<{ manifest: DraftPlan['manifest']; report?: import('@agentic-qa/domain/run').QAReport }>>([]);
   const [selectedRunId, setSelectedRunId] = useState('');
@@ -165,8 +205,11 @@ export function App({
     if (initialState) return;
     void api.getState().then((next) => {
       setState(next);
-      setClientId(next.clientId ?? '');
       setOrganization(next.selectedOrganization ?? '');
+      setProfileOrganization(next.selectedOrganization ?? '');
+      setProfileProjectId(next.selectedProject?.id ?? '');
+      setProfileProjectName(next.selectedProject?.name ?? '');
+      setScreen(next.selectedProject ? 'work-items' : next.selectedAccountId ? 'project' : 'connections');
       setTargetKind(next.target?.targetKind ?? 'site');
       setSiteBaseUrl(next.target?.siteBaseUrl ?? '');
       setRepositoryPath(next.target?.repositoryPath ?? '');
@@ -183,6 +226,11 @@ export function App({
     void api.isBrowserInstalled().then(setBrowserInstalled).catch(() => setBrowserInstalled(false));
     void api.isRepoWorkerImageInstalled().then(setRepoWorkerInstalled).catch(() => setRepoWorkerInstalled(false));
   }, [api, screen]);
+
+  useEffect(() => {
+    if (screen !== 'project' || !state.selectedAccountId || organizations.length) return;
+    void api.listOrganizations().then(setOrganizations).catch((cause) => setError(errorMessage(cause)));
+  }, [api, organizations.length, screen, state.selectedAccountId]);
 
   async function installBrowser() {
     await run(async () => {
@@ -216,8 +264,12 @@ export function App({
 
   function updateState(next: DesktopState) {
     setState(next);
-    setClientId(next.clientId ?? '');
     setOrganization(next.selectedOrganization ?? '');
+    if (!profileId) {
+      setProfileOrganization(next.selectedOrganization ?? '');
+      setProfileProjectId(next.selectedProject?.id ?? '');
+      setProfileProjectName(next.selectedProject?.name ?? '');
+    }
     if (next.target) {
       setTargetKind(next.target.targetKind);
       setSiteBaseUrl(next.target.siteBaseUrl ?? '');
@@ -230,16 +282,29 @@ export function App({
     setModelMaxOutputTokens(next.modelMaxOutputTokens ?? 1200);
   }
 
-  async function saveClientId() {
-    await run(() => api.saveClientId(clientId.trim()), (next) => {
+  async function signIn() {
+    if (!state.azureCliAvailable) return;
+    await run(async () => {
+      const next = await api.signIn();
       updateState(next);
-      setNotice('Application ID saved on this device.');
+      const found = await api.listOrganizations();
+      setOrganizations(found);
+      setScreen('project');
+      setNotice(found.length ? `Found ${found.length} Azure DevOps organizations.` : 'Sign-in complete. Add an Azure DevOps organization to continue.');
     });
   }
 
-  async function connectOrganization() {
+  async function refreshOrganizations() {
     await run(async () => {
-      const next = await api.selectOrganization(organization.trim());
+      const found = await api.listOrganizations();
+      setOrganizations(found);
+      setNotice(found.length ? `Found ${found.length} Azure DevOps organizations.` : 'No organizations were returned for this account. You can add one by name.');
+    });
+  }
+
+  async function connectOrganization(name = organization) {
+    await run(async () => {
+      const next = await api.selectOrganization(name.trim());
       updateState(next);
       const found = await api.listProjects();
       setProjects(found);
@@ -277,6 +342,17 @@ export function App({
       setActiveSearch(input);
       setSearchAfterId(items.nextAfterId);
       setSearchHasMore(items.nextAfterId !== undefined);
+    });
+  }
+
+  async function loadConfiguredStories() {
+    await run(async () => {
+      const result = await api.loadActiveProfileWorkItems();
+      setResults(result.stories);
+      setChildrenByParent(result.tasksByStory);
+      setExpandedParents(new Set(result.stories.map(({ id }) => id)));
+      setSearchHasMore(false);
+      setNotice(`Loaded configured Stories and tasks in “${state.adoProfiles?.find(({ id }) => id === state.activeAdoProfileId)?.boardColumn ?? 'the selected board column'}” for ${result.iterationName}.`);
     });
   }
 
@@ -395,10 +471,15 @@ export function App({
       const approved = { ...draftPlan, contract: { ...draftPlan.contract, scenarios: draftPlan.contract.scenarios.map((scenario) => ({ ...scenario, approved: true })) } };
       await api.approvePlan(approved);
       setDraftPlan(undefined);
-      const nextRuns = await api.listRuns();
-      setRuns(nextRuns);
-      setNotice('Approved plan saved as an immutable run manifest.');
+      const runId = approved.manifest.runId;
+      setSelectedRunId(runId);
+      setSelectedRun(undefined);
       setScreen('history');
+      const [nextRuns, detail] = await Promise.all([api.listRuns(), api.getRun(runId)]);
+      setRuns(nextRuns);
+      setSelectedRun(detail);
+      setReviewFindingId(detail?.findings.find((finding) => !finding.humanOverride)?.id ?? '');
+      setNotice('Plan approved. This QA run is ready to start.');
     });
   }
 
@@ -416,6 +497,44 @@ export function App({
       updateState(await api.getState());
       setNotice('Provider model and output-token limit saved locally.');
     });
+  }
+
+  async function saveAdoProfile() {
+    const storyIds = profileStoryIds.split(/[\s,]+/).map((value) => value.trim()).filter(Boolean).map(Number);
+    if (storyIds.some((id) => !Number.isSafeInteger(id) || id < 1)) { setError('Story IDs must be positive numbers separated by commas or spaces.'); return; }
+    await run(async () => {
+      const next = await api.saveAdoProfile({ ...(profileId ? { id: profileId } : {}), name: profileName, organization: profileOrganization, project: { ...(profileProjectId.trim() ? { id: profileProjectId } : {}), name: profileProjectName }, team: profileTeam, boardColumn: profileColumn, storyIds });
+      updateState(next);
+      setProfileId('');
+      setProfileName('');
+      setProfileTeam('');
+      setProfileColumn('');
+      setProfileStoryIds('');
+      setNotice('Azure DevOps configuration profile saved locally.');
+    });
+  }
+
+  async function importAdoProfilesConfig() {
+    await run(async () => {
+      const next = await api.importAdoProfilesConfig();
+      updateState(next);
+      if (next.selectedProject) {
+        setWorkItemTypes(await api.listWorkItemTypes());
+        setScreen('work-items');
+      }
+      setNotice(next.adoProfiles?.length ? 'Azure DevOps profiles imported and validated from the configuration file.' : 'No configuration file was imported.');
+    });
+  }
+
+  function editAdoProfile(profile: NonNullable<DesktopState['adoProfiles']>[number]) {
+    setProfileId(profile.id);
+    setProfileName(profile.name);
+    setProfileOrganization(profile.organization);
+    setProfileProjectId(profile.project.id);
+    setProfileProjectName(profile.project.name);
+    setProfileTeam(profile.team);
+    setProfileColumn(profile.boardColumn);
+    setProfileStoryIds(profile.storyIds.join(', '));
   }
 
   async function previewModelRequest() {
@@ -561,11 +680,12 @@ export function App({
     });
   }
 
-  const screenTitle = navigation.find(({ id }) => id === screen)?.label ?? 'Connections';
+  const screenTitle = navigation.find(({ id }) => id === screen)?.label ?? (screen === 'connections' ? 'Sign in' : screen === 'project' ? 'Organization' : screen === 'run-setup' ? 'New run' : screen === 'plan' ? 'Plan review' : 'Workspace');
+  const activeNavigation = screen === 'run-setup' || screen === 'plan' ? 'history' : screen === 'project' ? 'work-items' : screen;
 
   return (
-    <div className="app-frame">
-      <aside className="sidebar">
+    <div className={`app-frame ${screen === 'connections' ? 'onboarding-frame' : ''}`} data-theme="dark">
+      {screen !== 'connections' ? <aside className="sidebar">
         <div className="brand-row">
           <div className="brand-symbol" aria-hidden="true">AQ</div>
           <div className="brand-name"><strong>Agentic QA</strong><span>LOCAL QA WORKSPACE</span></div>
@@ -576,11 +696,10 @@ export function App({
             <button
               type="button"
               key={item.id}
-              className={`nav-item ${screen === item.id ? 'selected' : ''}`}
-              aria-current={screen === item.id ? 'page' : undefined}
+              className={`nav-item ${activeNavigation === item.id ? 'selected' : ''}`}
+              aria-current={activeNavigation === item.id ? 'page' : undefined}
               onClick={() => { setScreen(item.id); if (item.id === 'history') void openHistory(); }}
             >
-              <span className="nav-number">{item.number}</span>
               <span>{item.label}</span>
               {item.id === 'queue' && state.queue.length > 0 ? (
                 <span className="nav-count">{state.queue.length}</span>
@@ -592,18 +711,19 @@ export function App({
           <div className="privacy-mark"><span>●</span> Stored on this device</div>
           <div className="version-mark">Version 1.0 · Local</div>
         </div>
-      </aside>
+      </aside> : null}
 
       <div className="main-column">
-        <header className="topbar">
+        {screen !== 'connections' ? <header className="topbar">
           <div className="breadcrumbs"><span>Workspace</span><b>/</b><strong>{screenTitle}</strong></div>
           <div className="context-pills">
-            <span className="context-pill"><i className={state.accounts.length ? 'connected' : ''} />
-              {state.accounts[0]?.username ?? 'Azure DevOps not connected'}
+            <span className="context-pill"><i className={state.selectedAccountId ? 'connected' : ''} />
+              {state.accounts.find(({ homeAccountId }) => homeAccountId === state.selectedAccountId)?.username ?? 'Azure DevOps not connected'}
             </span>
+            {state.selectedOrganization ? <span className="context-pill organization-pill">{state.selectedOrganization}</span> : null}
             {state.selectedProject ? <span className="context-pill project-pill">{state.selectedProject.name}</span> : null}
           </div>
-        </header>
+        </header> : null}
 
         <main className="content-area">
           {error ? <div className="message error-message" role="alert">{error}</div> : null}
@@ -612,42 +732,17 @@ export function App({
           {screen === 'connections' ? (
             <section className="page-section">
               <div className="page-heading">
-                <div><p className="eyebrow">STEP 01 · ACCOUNT</p><h1>Connect your work</h1></div>
-                <span className="step-count">01 <i>/</i> 04</span>
+                <div><p className="eyebrow">WELCOME</p><h1>Start your QA workspace</h1></div>
               </div>
-              <p className="page-description">Sign in with your Entra account to read Azure DevOps work items. Your app ID and queue stay on this computer.</p>
+              <p className="page-description">Sign in with your Azure DevOps account to choose an organization and add Stories or Tasks to your local QA Queue.</p>
               <div className="panel connection-panel">
                 <div className="panel-illustration" aria-hidden="true"><span>↗</span><div>ADO</div></div>
                 <div className="panel-body">
-                  <div className="panel-title-row"><div><h2>Azure DevOps Services</h2><p>Delegated, read-only access</p></div><span className="security-tag">READ ONLY</span></div>
-                  {!state.clientIdConfigured ? (
-                    <>
-                      <label className="field-label" htmlFor="client-id">Entra application client ID</label>
-                      <input id="client-id" className="text-input" value={clientId} onChange={(event) => setClientId(event.target.value)} placeholder="00000000-0000-0000-0000-000000000000" autoComplete="off" />
-                      <p className="field-help">Use a public client registration with Azure DevOps delegated read permissions. No client secret is used.</p>
-                      <details className="registration-help">
-                        <summary>Set up the Entra public client</summary>
-                        <ol>
-                          <li>Register an app for accounts in any organizational directory.</li>
-                          <li>Under Authentication, add the Mobile and desktop platform with redirect URI <code>http://localhost</code>.</li>
-                          <li>Under API permissions, add Azure DevOps delegated read scopes: <code>vso.profile</code>, <code>vso.project</code>, and <code>vso.work</code>. Add <code>vso.code</code> only if you plan to use an ADO Git repository target.</li>
-                          <li>Do not add a client secret, application permissions, <code>user_impersonation</code>, or write/manage scopes. Tenant policy may require an administrator to approve delegated consent.</li>
-                        </ol>
-                      </details>
-                      <div className="button-row">
-                        <button className="button primary" type="button" disabled={busy || !clientId.trim()} onClick={() => void saveClientId()}>{busy ? 'Saving…' : 'Save application ID'}</button>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="saved-client-id"><span className="check-mark">✓</span><div><strong>Public client configured</strong><span>{state.clientId}</span></div><button className="text-button" type="button" onClick={() => setState({ ...state, clientIdConfigured: false })}>Edit</button></div>
-                      {state.accounts.length ? (
-                        <div className="account-list">{state.accounts.map((account) => <div className="account-row" key={account.homeAccountId}><span className="account-avatar">{(account.displayName ?? account.username).slice(0, 1).toUpperCase()}</span><div><strong>{account.displayName ?? account.username}</strong><span>{account.username}</span></div><button className="button quiet" type="button" disabled={busy} onClick={() => void run(() => api.signOut(account.homeAccountId), updateState)}>Sign out</button></div>)}</div>
-                      ) : <button className="button primary microsoft-button" type="button" disabled={busy} onClick={() => void run(() => api.signIn(), updateState)}><span className="ms-grid" aria-hidden="true"><i /><i /><i /><i /></span>{busy ? 'Opening Microsoft sign-in…' : 'Sign in with Microsoft'}</button>}
-                      <p className="field-help">The system browser handles sign-in. Personal Microsoft accounts are not supported for this first release.</p>
-                    </>
-                  )}
-                  <div className="permission-note"><span>🔒</span><p>Tokens stay in the encrypted system cache. The renderer and repository worker never receive them.</p></div>
+                  <div className="panel-title-row"><div><h2>Azure DevOps Services</h2><p>Read-only access · data stays on this device</p></div><span className="security-tag">READ ONLY</span></div>
+                  <p className="field-help">Azure CLI opens Microsoft sign-in in your system browser and reuses the account already signed in on this machine.</p>
+                  <button className="button primary microsoft-button" type="button" disabled={busy || !state.azureCliAvailable} onClick={() => void signIn()}><span className="ms-grid" aria-hidden="true"><i /><i /><i /><i /></span>{busy ? 'Opening sign-in…' : 'Sign in with Azure DevOps'}</button>
+                  {!state.azureCliAvailable ? <p className="field-help" role="note">Azure CLI is not installed. Install Azure CLI, then restart this app.</p> : <p className="field-help" role="note">Sign-in opens your system browser through Azure CLI. Your existing CLI sign-in is reused.</p>}
+                  <div className="permission-note"><span>🔒</span><p>Azure CLI manages sign-in on this machine. A short-lived ADO token is used only in the app's main process; the renderer and QA workers never receive it.</p></div>
                 </div>
               </div>
             </section>
@@ -655,14 +750,17 @@ export function App({
 
           {screen === 'project' ? (
             <section className="page-section">
-              <div className="page-heading"><div><p className="eyebrow">STEP 02 · SCOPE</p><h1>Choose your project</h1></div><span className="step-count">02 <i>/</i> 04</span></div>
-              <p className="page-description">Connect to an organization where your signed-in account has access. You can enter its validated Azure DevOps URL.</p>
+              <div className="page-heading"><div><p className="eyebrow">ORGANIZATION</p><h1>Choose an organization</h1></div><span className="context-pill">{state.accounts.find(({ homeAccountId }) => homeAccountId === state.selectedAccountId)?.username ?? 'Azure DevOps account'}</span></div>
+              <p className="page-description">Select an organization available to your account, or add one by name. We’ll check access before saving it.</p>
               <div className="panel selection-panel">
-                <label className="field-label" htmlFor="organization">Organization</label>
-                <div className="inline-form"><input id="organization" className="text-input" value={organization} onChange={(event) => setOrganization(event.target.value)} placeholder="contoso or https://dev.azure.com/contoso" /><button type="button" className="button primary" disabled={busy || !organization.trim() || state.accounts.length === 0} onClick={() => void connectOrganization()}>{busy ? 'Loading…' : 'Find projects'}</button></div>
-                {!state.accounts.length ? <p className="field-help">Connect an Azure DevOps account first.</p> : null}
+                <div className="panel-title-row"><div><h2>Already have an ADO config file?</h2><p>Import organization, project, team, board column and Story IDs to finish setup without entering them here.</p></div><button className="button outline" type="button" disabled={busy || !state.selectedAccountId} onClick={() => void importAdoProfilesConfig()}>Import profiles config file…</button></div>
+                <div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void refreshOrganizations()}>{busy ? 'Checking…' : 'Refresh organizations'}</button></div>
+                {organizations.length || state.savedOrganizations?.length ? <div className="project-list"><div className="list-heading"><div><span className="eyebrow">AVAILABLE TO THIS ACCOUNT</span><h2>{organizations.length || state.savedOrganizations?.length} organizations</h2></div></div>{organizations.map((item) => <button type="button" className="project-card" key={item.id} onClick={() => { setOrganization(item.name); void connectOrganization(item.name); }}><span className="project-icon">{item.name.slice(0, 1).toUpperCase()}</span><span className="project-name"><strong>{item.name}</strong><small>{state.savedOrganizations?.includes(item.name) ? 'Saved organization' : 'Available organization'}</small></span><span className="project-arrow">→</span></button>)}</div> : null}
+                <label className="field-label" htmlFor="organization">Add organization by name</label>
+                <div className="inline-form"><input id="organization" className="text-input" value={organization} onChange={(event) => setOrganization(event.target.value)} placeholder="contoso" /><button type="button" className="button primary" disabled={busy || !organization.trim() || !state.selectedAccountId} onClick={() => void connectOrganization()}>{busy ? 'Checking…' : 'Add organization'}</button></div>
+                {!state.selectedAccountId ? <p className="field-help">Sign in with Azure DevOps first.</p> : null}
                 <div className="project-list">
-                  <div className="list-heading"><div><span className="eyebrow">ACCESSIBLE PROJECTS</span><h2>{projects.length ? `${projects.length} projects` : 'No project selected'}</h2></div></div>
+                  <div className="list-heading"><div><span className="eyebrow">PROJECTS</span><h2>{projects.length ? `${projects.length} projects` : 'Choose an organization first'}</h2></div></div>
                   {projects.map((project) => <button type="button" className={`project-card ${state.selectedProject?.id === project.id ? 'active' : ''}`} key={project.id} onClick={() => void selectProject(project)}><span className="project-icon">{project.name.slice(0, 1).toUpperCase()}</span><span className="project-name"><strong>{project.name}</strong><small>{project.state ?? 'Azure DevOps project'}</small></span><span className="project-arrow">→</span></button>)}
                   {!projects.length ? <div className="empty-card"><span className="empty-icon">⌕</span><strong>Projects will appear here</strong><p>Enter an organization above to list projects available to this account.</p></div> : null}
                 </div>
@@ -672,9 +770,10 @@ export function App({
 
           {screen === 'work-items' ? (
             <section className="page-section">
-              <div className="page-heading"><div><p className="eyebrow">STEP 03 · REQUIREMENTS</p><h1>Find work to verify</h1></div><span className="step-count">03 <i>/</i> 04</span></div>
-              <p className="page-description">Search work items in <strong>{projectLabel(state.selectedProject)}</strong>. Requirements and child tasks are kept distinct in the QA Queue.</p>
+              <div className="page-heading"><div><p className="eyebrow">WORK ITEMS</p><h1>Find work to verify</h1></div></div>
+              <p className="page-description">Search Stories and Tasks in <strong>{projectLabel(state.selectedProject)}</strong>. Add a Story, its child Tasks, or both to the local QA Queue.</p>
               <div className="search-panel">
+                {state.activeAdoProfileId ? <div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void loadConfiguredStories()}>{busy ? 'Loading…' : 'Load configured Stories and sprint tasks'}</button><span className="field-help">Uses the active profile's Story IDs, team, current sprint and board column.</span></div> : <p className="field-help">Save and select a configuration profile in Settings to load configured Stories and tasks automatically.</p>}
                 <label className="field-label" htmlFor="work-search">Work item ID or title</label>
                 <div className="search-line"><div className="search-input-wrap"><span aria-hidden="true">⌕</span><input id="work-search" className="search-input" value={searchTerm} onChange={(event) => { setSearchTerm(event.target.value); setSearchHasMore(false); }} onKeyDown={(event) => { if (event.key === 'Enter') void search(); }} placeholder="e.g. 4821 or remember filters" /></div><button className="button primary" type="button" disabled={busy || !state.selectedProject} onClick={() => void search()}>{busy ? 'Searching…' : 'Search work items'}</button></div>
                 <div className="filters-row"><label>Type <select aria-label="Filter by work item type" value={typeFilter} onChange={(event) => { setTypeFilter(event.target.value); setSearchHasMore(false); }}><option value="">All types</option>{workItemTypes.map((type) => <option key={type}>{type}</option>)}</select></label><label>State <select aria-label="Filter by state" value={stateFilter} onChange={(event) => { setStateFilter(event.target.value); setSearchHasMore(false); }}><option value="">All states</option>{['New', 'Active', 'Resolved', 'Closed', 'To Do', 'Doing', 'Done'].map((value) => <option key={value}>{value}</option>)}</select></label></div>
@@ -688,16 +787,16 @@ export function App({
 
           {screen === 'queue' ? (
             <section className="page-section">
-              <div className="page-heading"><div><p className="eyebrow">STEP 04 · READY TO REVIEW</p><h1>Your QA Queue</h1></div><span className="step-count">{state.queue.length} <i>items</i></span></div>
+              <div className="page-heading"><div><p className="eyebrow">READY TO REVIEW</p><h1>Your QA Queue</h1></div><span className="step-count">{state.queue.length} items</span></div>
               <p className="page-description">Selected work stays on this device. Queue order changes presentation only; it does not affect verdict priority.</p>
-              <div className="queue-toolbar"><div><strong>{state.queue.length} selected</strong><span>Grouped by Azure DevOps project</span></div><button className="button outline" type="button" disabled={busy || !state.queue.length} onClick={() => void mutateQueue(() => api.refreshQueue())}>{busy ? 'Refreshing…' : 'Refresh source revisions'}</button></div>
+              <div className="queue-toolbar"><div><strong>{state.queue.length} selected</strong><span>Grouped by Azure DevOps project</span></div><div className="button-row"><button className="button outline" type="button" disabled={busy || !state.queue.length} onClick={() => void mutateQueue(() => api.refreshQueue())}>{busy ? 'Refreshing…' : 'Refresh source revisions'}</button><button className="button primary" type="button" disabled={!state.queue.length} onClick={() => setScreen('run-setup')}>Start QA</button></div></div>
               <div className="queue-list">{state.queue.map(({ entry, snapshot }, index) => <article className="queue-card" key={entry.key}><span className="queue-index">{String(index + 1).padStart(2, '0')}</span><div className="queue-copy"><div className="work-meta"><span>{snapshot?.type ?? 'Work item'}</span><span>#{entry.workItemId}</span><span>{snapshot?.projectName ?? entry.projectId}</span></div><h3>{snapshot?.title ?? 'Work item details unavailable'}</h3><p>{entry.organization} · {snapshot?.state ?? 'Unknown state'} · Revision {snapshot?.revision ?? '—'}</p>{entry.stale ? <span className="stale-badge">Source changed or inaccessible · refresh before run</span> : null}</div><div className="queue-actions"><button aria-label={`Move item ${entry.workItemId} up`} className="icon-button" disabled={busy || index === 0} onClick={() => void mutateQueue(() => api.moveQueueItem(entry.key, 'up'))}>↑</button><button aria-label={`Move item ${entry.workItemId} down`} className="icon-button" disabled={busy || index === state.queue.length - 1} onClick={() => void mutateQueue(() => api.moveQueueItem(entry.key, 'down'))}>↓</button><button className="text-button remove-button" type="button" disabled={busy} onClick={() => void mutateQueue(() => api.removeQueueItem(entry.key))}>Remove</button></div></article>)}{!state.queue.length ? <div className="empty-card"><span className="empty-icon">＋</span><strong>Your queue is ready for requirements</strong><p>Search a project and add work items. A task can inform QA scope, but it does not prove its parent’s acceptance criteria.</p><button className="button outline" type="button" onClick={() => setScreen('work-items')}>Find work items</button></div> : null}</div>
             </section>
           ) : null}
 
           {screen === 'run-setup' ? (
             <section className="page-section">
-              <div className="page-heading"><div><p className="eyebrow">STEP 05 · TARGET</p><h1>Set up a QA run</h1></div><span className="step-count">05 <i>/</i> 07</span></div>
+              <div className="page-heading"><div><p className="eyebrow">NEW RUN</p><h1>Set up a QA run</h1></div></div>
               <p className="page-description">Choose which target this contract must cover. Repository checks use a disposable snapshot; site checks stay within the approved origin.</p>
               <div className="panel selection-panel run-setup-panel">
                 <label className="field-label" htmlFor="target-kind">Target layers</label>
@@ -708,12 +807,6 @@ export function App({
                 {targetKind !== 'repository' ? <div className="target-block"><label className="field-label" htmlFor="site-url">Development or staging URL</label><input id="site-url" className="text-input" value={siteBaseUrl} onChange={(event) => setSiteBaseUrl(event.target.value)} placeholder="https://staging.example.test" /><p className="field-help">Only the origin in this URL will be approved for the browser worker. Production URLs are not recommended.</p></div> : null}
                 {targetKind !== 'repository' ? <div className="target-block"><div className="queue-toolbar"><div><strong>Local Chromium browser</strong><span>{browserInstalled ? 'Installed and ready' : 'Required for site checks; downloads to this device (about 300 MB).'}</span></div><button className="button outline" type="button" disabled={busy || browserInstalled} onClick={() => void installBrowser()}>{busy ? 'Installing…' : browserInstalled ? 'Installed' : 'Install browser'}</button></div></div> : null}
                 {targetKind !== 'site' ? <div className="target-block"><div className="queue-toolbar"><div><strong>Docker repository worker</strong><span>{repoWorkerInstalled ? 'Worker image installed' : 'Docker Desktop required; prepares the local Node 22 worker image.'}</span></div><button className="button outline" type="button" disabled={busy || repoWorkerInstalled} onClick={() => void installRepoWorker()}>{busy ? 'Preparing…' : repoWorkerInstalled ? 'Installed' : 'Prepare worker'}</button></div></div> : null}
-                <div className="target-block model-settings">
-                  <div className="panel-title-row"><div><h2>Optional AI scenario suggestions</h2><p>{state.modelProviderConfigured ? 'OpenAI is configured. Planning stays local unless you preview and approve a specific request.' : 'No provider is configured. Local deterministic planning works without an API key.'}</p></div></div>
-                  <div className="filters-row"><label>OpenAI model<input className="text-input" value={modelId} maxLength={80} onChange={(event) => setModelId(event.target.value)} placeholder="gpt-5.6-terra" /></label><label>Max output tokens<input className="text-input" type="number" min={256} max={4096} step={128} value={modelMaxOutputTokens} onChange={(event) => setModelMaxOutputTokens(Number(event.target.value))} /></label></div>
-                  <div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void saveModelSettings()}>Save provider settings</button>{state.modelProviderConfigured ? <button className="button outline" type="button" disabled={busy} onClick={() => void run(async () => { await api.clearModelKey(); updateState(await api.getState()); setNotice('OpenAI key removed from encrypted local storage.'); })}>Remove API key</button> : <button className="button outline" type="button" disabled={busy} onClick={() => void importModelKey()}>Import API key file…</button>}</div>
-                  <small>Choose a private plain-text file containing one API key. The main process imports it into the encrypted local database; the key is never returned to renderer state or sent to workers. Delete the source file after import. ADO text is sent only after a separate preview approval. No repository files, tasks, secrets, tool calls or verdicts are sent. OpenAI data-handling and retention terms apply.</small>
-                </div>
                 <div className="button-row"><button className="button primary" type="button" disabled={busy || !state.queue.length || (targetKind !== 'repository' && !siteBaseUrl.trim()) || (targetKind !== 'site' && (repositorySource === 'local' ? !repositoryPath : !selectedGitRepository || !selectedGitRef))} onClick={() => void saveRunTarget()}>{busy ? 'Preparing…' : 'Review local plan'}</button></div>
               </div>
             </section>
@@ -721,8 +814,9 @@ export function App({
 
           {screen === 'plan' ? (
             <section className="page-section">
-              <div className="page-heading"><div><p className="eyebrow">STEP 06 · CONTRACT</p><h1>Review the QA plan</h1></div><span className="step-count">{draftPlan?.contract.criteria.length ?? 0} criteria</span></div>
+              <div className="page-heading"><div><p className="eyebrow">PLAN REVIEW</p><h1>Review the QA plan</h1></div><span className="step-count">{draftPlan?.contract.criteria.length ?? 0} criteria</span></div>
               <p className="page-description">The source revision and acceptance-criteria field are frozen in this draft. Edit expected behavior and required evidence before saving the contract.</p>
+              <PlanSummary draftPlan={draftPlan} queue={state.queue} target={state.target} />
               {draftPlan?.notes.map((note) => <div className="message review-message" key={note}>{note}</div>)}
               {draftPlan?.repositoryCommands?.length ? <div className="panel command-preview"><div className="panel-title-row"><div><h2>Repository commands</h2><p>Exact argument arrays run inside the isolated worker, with networking disabled.</p></div><button className="button outline" type="button" disabled={busy} onClick={() => void refreshPlan()}>Refresh after config edits</button></div>{draftPlan.repositoryCommands.map((command) => <div className="command-preview-row" key={command.id}><strong>{command.label} · {command.timeoutSeconds}s</strong><code>{command.executable} {command.arguments.map((argument) => JSON.stringify(argument)).join(' ')}</code><small>Directory: {command.workingDirectory} · Results: {command.resultFormat ?? 'none'}{command.scenarioMappings.length ? ` · Scenarios: ${command.scenarioMappings.map(({ scenarioId, testCaseIds }) => `${scenarioId} ← ${testCaseIds.join(', ')}`).join('; ')}` : ' · diagnostic only'}</small></div>)}</div> : null}
               <div className="disclosure-card"><div className="disclosure-icon">✓</div><div><strong>{state.modelProviderConfigured ? 'Provider is optional and approval-gated' : 'Disclosure preview: no transmission'}</strong><p>{state.modelProviderConfigured ? 'The local draft makes no provider request. To request optional browser-scenario suggestions, review the exact acceptance-criteria payload first and approve it in the next step. Repository files and task descriptions are never included.' : 'Source: local encrypted ADO queue snapshots. Files included: none. Provider key is not configured. No model request is sent.'}</p></div></div>
@@ -743,9 +837,43 @@ export function App({
             </section>
           ) : null}
 
+          {screen === 'settings' ? (
+            <section className="page-section">
+              <div className="page-heading"><div><p className="eyebrow">PREFERENCES</p><h1>Settings</h1></div></div>
+              <p className="page-description">Manage your Azure DevOps account, saved organizations, and optional local planning assistance.</p>
+              <div className="panel selection-panel">
+                <div className="panel-title-row"><div><h2>Azure DevOps account</h2><p>Authentication runs through Azure CLI in your system browser. Access is read-only.</p></div><span className="security-tag">{state.selectedAccountId ? 'CONNECTED' : 'NOT CONNECTED'}</span></div>
+                {state.accounts.map((account) => <div className="account-row" key={account.homeAccountId}><span className="account-avatar">{(account.displayName ?? account.username).slice(0, 1).toUpperCase()}</span><div><strong>{account.displayName ?? account.username}{state.selectedAccountId === account.homeAccountId ? ' · Active' : ''}</strong><span>{account.username}</span></div>{state.selectedAccountId === account.homeAccountId ? <button className="button quiet" type="button" disabled={busy} onClick={() => void run(() => api.signOut(account.homeAccountId), updateState)}>Disconnect</button> : <button className="button quiet" type="button" disabled={busy} onClick={() => void run(() => api.selectAccount(account.homeAccountId), updateState)}>Use account</button>}</div>)}
+                <button className="button primary" type="button" disabled={busy || !state.azureCliAvailable} onClick={() => void signIn()}>{state.accounts.length ? 'Add or refresh CLI account' : 'Sign in with Azure DevOps'}</button>
+                {state.selectedAccountId ? <p className="field-help">Disconnect only clears Agentic QA's selected account. Azure CLI stays signed in for your other tools.</p> : null}
+                {!state.azureCliAvailable ? <p className="field-help" role="note">Azure CLI is not installed. Install Azure CLI, then restart this app.</p> : null}
+                <div className="permission-note"><span>🔒</span><p>Azure CLI keeps the sign-in on this machine. A short-lived ADO token is used only in the main process and never sent to QA workers.</p></div>
+              </div>
+              <div className="panel selection-panel">
+                <div className="panel-title-row"><div><h2>Azure DevOps configuration profiles</h2><p>Save each organization/project/team/board-column setup once, then switch profiles before runs. These settings stay encrypted with this app's local data.</p></div></div>
+                <div className="button-row"><button className="button outline" type="button" disabled={busy || !state.selectedAccountId} onClick={() => void importAdoProfilesConfig()}>Import profiles config file…</button><span className="field-help">Load a version 1 JSON file; credentials are never included.</span></div>
+                {state.adoProfiles?.length ? <div className="saved-organizations">{state.adoProfiles.map((profile) => <div className="profile-card" key={profile.id}><div><strong>{profile.name}{state.activeAdoProfileId === profile.id ? ' · Active' : ''}</strong><span>{profile.organization} / {profile.project.name} · {profile.team} · {profile.boardColumn} · {profile.storyIds.length} Stories</span></div><div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void run(() => api.activateAdoProfile(profile.id), updateState)}>{state.activeAdoProfileId === profile.id ? 'Selected' : 'Use for runs'}</button><button className="button quiet" type="button" disabled={busy} onClick={() => editAdoProfile(profile)}>Edit</button><button className="button quiet" type="button" disabled={busy} onClick={() => void run(() => api.deleteAdoProfile(profile.id), updateState)}>Remove</button></div></div>)}</div> : <p className="field-help">No profiles saved. Create one from the configuration file values you use for QA.</p>}
+                <div className="filters-row settings-fields"><label>Profile name<input className="text-input" value={profileName} maxLength={100} onChange={(event) => setProfileName(event.target.value)} placeholder="Derse QA" /></label><label>Organization URL or name<input className="text-input" value={profileOrganization} maxLength={500} onChange={(event) => setProfileOrganization(event.target.value)} placeholder="https://dev.azure.com/Xorbix" /></label></div>
+                <div className="filters-row settings-fields"><label>Project name<input className="text-input" value={profileProjectName} maxLength={200} onChange={(event) => setProfileProjectName(event.target.value)} placeholder="Derse" /></label><label>Project ID <span className="field-help">Optional · resolves from project name</span><input className="text-input" value={profileProjectId} maxLength={200} onChange={(event) => setProfileProjectId(event.target.value)} placeholder="Project ID" /></label><label>Team<input className="text-input" value={profileTeam} maxLength={200} onChange={(event) => setProfileTeam(event.target.value)} placeholder="Derse Team" /></label></div>
+                <div className="filters-row settings-fields"><label>Taskboard column<input className="text-input" value={profileColumn} maxLength={120} onChange={(event) => setProfileColumn(event.target.value)} placeholder="QA / Dev Env" /></label><label>Story IDs<input className="text-input" value={profileStoryIds} maxLength={1600} onChange={(event) => setProfileStoryIds(event.target.value)} placeholder="20024, 19997" /></label></div>
+                <div className="button-row"><button className="button primary" type="button" disabled={busy || !profileName.trim() || !profileOrganization.trim() || !profileProjectName.trim() || !profileTeam.trim() || !profileColumn.trim()} onClick={() => void saveAdoProfile()}>{profileId ? 'Save profile' : 'Add profile'}</button>{profileId ? <button className="button quiet" type="button" onClick={() => { setProfileId(''); setProfileName(''); }}>Cancel edit</button> : null}</div>
+              </div>
+              <div className="panel selection-panel">
+                <div className="panel-title-row"><div><h2>Organizations</h2><p>Saved separately for each signed-in account.</p></div><button className="button outline" type="button" onClick={() => setScreen('project')}>Manage organizations</button></div>
+                {state.savedOrganizations?.length ? <div className="saved-organizations">{state.savedOrganizations.map((name) => <span className="context-pill" key={name}>{name}</span>)}</div> : <p className="field-help">No organizations saved yet.</p>}
+              </div>
+              <div className="panel selection-panel model-settings">
+                <div className="panel-title-row"><div><h2>Optional AI scenario suggestions</h2><p>{state.modelProviderConfigured ? 'OpenAI is configured. Requests require a separate payload review and approval.' : 'Local deterministic planning works without an API key.'}</p></div></div>
+                <div className="filters-row settings-fields"><label>OpenAI model<input className="text-input" value={modelId} maxLength={80} onChange={(event) => setModelId(event.target.value)} placeholder="gpt-5.6-terra" /></label><label>Max output tokens<input className="text-input" type="number" min={256} max={4096} step={128} value={modelMaxOutputTokens} onChange={(event) => setModelMaxOutputTokens(Number(event.target.value))} /></label></div>
+                <div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void saveModelSettings()}>Save provider settings</button>{state.modelProviderConfigured ? <button className="button outline" type="button" disabled={busy} onClick={() => void run(async () => { await api.clearModelKey(); updateState(await api.getState()); setNotice('OpenAI key removed from encrypted local storage.'); })}>Remove API key</button> : <button className="button outline" type="button" disabled={busy} onClick={() => void importModelKey()}>Import API key file…</button>}</div>
+                <small>Import a private plain-text file containing one API key. The main process stores it encrypted; the key is never returned to the renderer or sent to workers. ADO text is sent only after preview and approval.</small>
+              </div>
+            </section>
+          ) : null}
+
           {screen === 'history' ? (
             <section className="page-section">
-              <div className="page-heading"><div><p className="eyebrow">STEP 07 · LOCAL RECORDS</p><h1>Run history</h1></div><button className="button outline" type="button" disabled={busy} onClick={() => void openHistory()}>Refresh</button></div>
+              <div className="page-heading"><div><p className="eyebrow">LOCAL RECORDS</p><h1>Run history</h1></div><button className="button outline" type="button" disabled={busy} onClick={() => void openHistory()}>Refresh</button></div>
               <p className="page-description">Approved run manifests and source evidence remain immutable. Reviewer decisions are appended and shown as the current verdict.</p>
               <div className="queue-list">{runs.map(({ manifest, report }) => <button type="button" className="history-row" key={manifest.runId} onClick={() => void openRun(manifest.runId)}><span className="queue-index">{manifest.startedAt.slice(0, 10)}</span><span className="project-name"><strong>{manifest.targetKind} · {manifest.sources.length} source snapshots</strong><small>Run {manifest.runId}</small></span><span className="verdict-badge">{report ? `${report.executionState} · ${report.verdict}` : selectedRunId === manifest.runId ? 'Manifest saved' : 'Not started'}</span></button>)}{!runs.length ? <div className="empty-card"><span className="empty-icon">◷</span><strong>No saved runs yet</strong><p>Approve a reviewed local plan to create the first immutable manifest.</p><button className="button outline" type="button" onClick={() => setScreen('run-setup')}>Set up a run</button></div> : null}</div>
               {selectedRun ? <div className="panel report-preview">

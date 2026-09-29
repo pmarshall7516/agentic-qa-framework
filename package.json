@@ -10,6 +10,10 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "build": "npm run build --workspace @agentic-qa/desktop",
+    "app:build": "npm run build",
+    "app:run": "npm run start --workspace @agentic-qa/desktop",
+    "app:ui-review": "node apps/desktop/scripts/ui-review.mjs",
+    "app": "npm run app:build && npm run app:run",
     "package:win": "npm run package:win --workspace @agentic-qa/desktop",
     "package:mac": "npm run package:mac --workspace @agentic-qa/desktop"
   },

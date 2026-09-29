@@ -7,7 +7,7 @@ function fixture() {
     handle: vi.fn((channel: string, listener: (...args: any[]) => unknown) => handlers.set(channel, listener)),
     removeHandler: vi.fn(),
   };
-  const api = { getState: vi.fn(async () => ({ queue: [] })) } as any;
+  const api = { getState: vi.fn(async () => ({ queue: [] })), listOrganizations: vi.fn(async () => []) } as any;
   const dispose = registerIpcHandlers(ipc, api, { devServerUrl: 'http://127.0.0.1:5173/' });
   return { handlers, api, dispose, ipc };
 }
@@ -28,6 +28,15 @@ describe('validated desktop IPC', () => {
     expect([...handlers.keys()]).toContain('qa:list-git-repositories');
     expect([...handlers.keys()]).toContain('qa:save-work-item-type-mapping');
     expect([...handlers.keys()]).toContain('qa:export-artifact');
+    expect([...handlers.keys()]).toContain('qa:list-organizations');
+    expect([...handlers.keys()]).not.toContain('qa:save-client-id');
     await expect(handlers.get('qa:list-git-refs')!({ senderFrame: { url: 'http://127.0.0.1:5173/' } }, '../invalid')).rejects.toThrow();
+  });
+
+  it('discovers organizations only from a trusted renderer', async () => {
+    const { handlers, api } = fixture();
+    await expect(handlers.get('qa:list-organizations')!({ senderFrame: { url: 'https://attacker.example/' } })).rejects.toThrow('Untrusted');
+    await expect(handlers.get('qa:list-organizations')!({ senderFrame: { url: 'http://127.0.0.1:5173/' } })).resolves.toEqual([]);
+    expect(api.listOrganizations).toHaveBeenCalledOnce();
   });
 });

@@ -9,6 +9,34 @@ function jsonResponse(value: unknown, headers?: Record<string, string>): Respons
 }
 
 describe('read-only ADO client', () => {
+  it('discovers the signed-in member organizations through the fixed Accounts API', async () => {
+    const requests: Array<{ url: string; authorization: string | null }> = [];
+    const memberId = '11111111-1111-4111-8111-111111111111';
+    const client = new AdoClient({ fetcher: async (input, init) => {
+      requests.push({ url: String(input), authorization: new Headers(init?.headers).get('authorization') });
+      return jsonResponse({ value: [
+        { accountId: 'org-1', accountName: 'contoso' },
+        { accountId: 'org-2', accountName: 'fabrikam-team' },
+        { accountId: 'org-bad', accountName: 'https://attacker.example' },
+      ] });
+    } });
+
+    await expect(client.listOrganizations('test-token', memberId)).resolves.toEqual([
+      { id: 'org-1', name: 'contoso' },
+      { id: 'org-2', name: 'fabrikam-team' },
+    ]);
+    expect(requests[0]?.url).toContain('https://app.vssps.visualstudio.com/_apis/accounts?');
+    expect(new URL(requests[0]!.url).searchParams.get('memberId')).toBe(memberId);
+    expect(new URL(requests[0]!.url).searchParams.get('api-version')).toBe('7.1');
+    expect(requests[0]?.authorization).toBe('Bearer test-token');
+  });
+
+  it('rejects malformed organization account responses', async () => {
+    const client = new AdoClient({ fetcher: async () => jsonResponse({ value: 'not-an-array' }) });
+    await expect(client.listOrganizations('test-token', '11111111-1111-4111-8111-111111111111'))
+      .rejects.toMatchObject({ kind: 'malformed-response' });
+  });
+
   it('lists repositories and refs through fixed Azure DevOps endpoints and pins commit identities', async () => {
     const requests: string[] = [];
     const client = new AdoClient({ fetcher: async (input) => {
@@ -84,6 +112,23 @@ describe('read-only ADO client', () => {
 
     expect(batchSizes).toEqual([200, 1]);
     expect(items).toHaveLength(201);
+  });
+
+  it('returns only Task children when browsing a Story', async () => {
+    const client = new AdoClient({ fetcher: async (input) => {
+      const url = String(input);
+      if (url.includes('/workitems/42?')) return jsonResponse({ id: 42, rev: 1, relations: [
+        { rel: 'System.LinkTypes.Hierarchy-Forward', url: 'https://dev.azure.com/contoso/_apis/wit/workItems/43' },
+        { rel: 'System.LinkTypes.Hierarchy-Forward', url: 'https://dev.azure.com/contoso/_apis/wit/workItems/44' },
+      ] });
+      return jsonResponse({ value: [
+        { id: 43, rev: 1, fields: { 'System.WorkItemType': 'Task', 'System.Title': 'Implement filters' }, relations: [{ rel: 'System.LinkTypes.Hierarchy-Reverse', url: 'https://dev.azure.com/contoso/_apis/wit/workItems/42' }] },
+        { id: 44, rev: 1, fields: { 'System.WorkItemType': 'Bug', 'System.Title': 'Related bug' }, relations: [{ rel: 'System.LinkTypes.Hierarchy-Reverse', url: 'https://dev.azure.com/contoso/_apis/wit/workItems/42' }] },
+      ] });
+    }, now: () => '2026-09-27T12:00:00.000Z' });
+
+    const children = await client.getChildren('token', { organization: 'contoso', projectId: 'p1', projectName: 'Portal', parentId: 42 });
+    expect(children.map(({ id, kind }) => ({ id, kind }))).toEqual([{ id: 43, kind: 'TASK' }]);
   });
 
   it('pages search results by immutable work item ID cursor', async () => {

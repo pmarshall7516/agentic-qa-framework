@@ -1,4 +1,4 @@
-import { normalizeWorkItem, type RawAdoWorkItem } from './normalize.js';
+import { normalizeHtmlText, normalizeWorkItem, type RawAdoWorkItem } from './normalize.js';
 import type { WorkItemSnapshot, WorkItemTypeMappings } from '@agentic-qa/domain/work-item';
 
 const ADO_API_VERSION = '7.1';
@@ -33,6 +33,15 @@ export interface AdoProject {
   id: string;
   name: string;
   state?: string;
+}
+
+export interface AdoTeam { id: string; name: string }
+export interface AdoIteration { id: string; name: string; path?: string }
+export interface AdoTaskboardItem { workItemId: number; column: string; state?: string }
+
+export interface AdoOrganization {
+  id: string;
+  name: string;
 }
 
 export interface AdoGitRepository { id: string; name: string; defaultBranch?: string }
@@ -163,6 +172,29 @@ export class AdoClient {
     );
   }
 
+  async listOrganizations(accessToken: string, memberId: string): Promise<AdoOrganization[]> {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(memberId)) {
+      throw new AdoRequestError('malformed-response', 'Azure DevOps returned an invalid profile ID for organization discovery.');
+    }
+    const url = new URL(`${ADO_RESOURCE}/_apis/accounts`);
+    url.searchParams.set('memberId', memberId);
+    url.searchParams.set('api-version', ADO_API_VERSION);
+    const data = await this.requestJson(url.toString(), accessToken);
+    if (!Array.isArray(data.value)) {
+      throw new AdoRequestError('malformed-response', 'Azure DevOps returned an unreadable organization list.');
+    }
+    return data.value.flatMap((value) => {
+      if (!value || typeof value !== 'object') return [];
+      const account = value as Record<string, unknown>;
+      if (typeof account.accountId !== 'string' || typeof account.accountName !== 'string') return [];
+      try {
+        return [{ id: account.accountId, name: resolveOrganization(account.accountName) }];
+      } catch {
+        return [];
+      }
+    });
+  }
+
   async listProjects(accessToken: string, organizationInput: string): Promise<AdoProject[]> {
     const organization = resolveOrganization(organizationInput);
     const baseUrl = `https://dev.azure.com/${encodeURIComponent(organization)}/_apis/projects`;
@@ -191,6 +223,61 @@ export class AdoClient {
     }
 
     throw new AdoRequestError('malformed-response', 'Azure DevOps project listing exceeded the page limit.');
+  }
+
+  async listTeams(accessToken: string, organizationInput: string, projectId: string): Promise<AdoTeam[]> {
+    const organization = resolveOrganization(organizationInput);
+    const url = new URL(`https://dev.azure.com/${encodeURIComponent(organization)}/_apis/projects/${encodeURIComponent(projectId)}/teams`);
+    url.searchParams.set('api-version', ADO_API_VERSION);
+    const data = await this.requestJson(url.toString(), accessToken);
+    if (!Array.isArray(data.value)) return [];
+    return data.value.flatMap((entry) => {
+      if (!entry || typeof entry !== 'object') return [];
+      const team = entry as Record<string, unknown>;
+      return typeof team.id === 'string' && typeof team.name === 'string' ? [{ id: team.id, name: team.name }] : [];
+    });
+  }
+
+  async getCurrentIteration(accessToken: string, organizationInput: string, projectId: string, team: string): Promise<AdoIteration | undefined> {
+    const organization = resolveOrganization(organizationInput);
+    const url = new URL(`https://dev.azure.com/${encodeURIComponent(organization)}/${encodeURIComponent(projectId)}/${encodeURIComponent(team)}/_apis/work/teamsettings/iterations`);
+    url.searchParams.set('$timeframe', 'current');
+    url.searchParams.set('api-version', ADO_API_VERSION);
+    const data = await this.requestJson(url.toString(), accessToken);
+    if (!Array.isArray(data.value)) return undefined;
+    const item = data.value.find((entry) => entry && typeof entry === 'object' && typeof (entry as Record<string, unknown>).id === 'string') as Record<string, unknown> | undefined;
+    return item ? { id: String(item.id), name: typeof item.name === 'string' ? item.name : '', ...(typeof item.path === 'string' ? { path: item.path } : {}) } : undefined;
+  }
+
+  async getTaskboardItems(accessToken: string, organizationInput: string, projectId: string, team: string, iterationId: string): Promise<AdoTaskboardItem[]> {
+    const organization = resolveOrganization(organizationInput);
+    const url = new URL(`https://dev.azure.com/${encodeURIComponent(organization)}/${encodeURIComponent(projectId)}/${encodeURIComponent(team)}/_apis/work/taskboardworkitems/${encodeURIComponent(iterationId)}`);
+    url.searchParams.set('api-version', ADO_API_VERSION);
+    const data = await this.requestJson(url.toString(), accessToken);
+    const candidates = Array.isArray(data.workItems) ? data.workItems : Array.isArray(data.value) ? data.value : [];
+    return candidates.flatMap((entry) => {
+      if (!entry || typeof entry !== 'object') return [];
+      const item = entry as Record<string, unknown>;
+      const workItemId = Number(item.workItemId ?? item.id);
+      if (!Number.isSafeInteger(workItemId) || workItemId < 1 || typeof item.column !== 'string') return [];
+      return [{ workItemId, column: item.column, ...(typeof item.state === 'string' ? { state: item.state } : {}) }];
+    });
+  }
+
+  async getWorkItemComments(accessToken: string, organizationInput: string, projectId: string, workItemId: number): Promise<string[]> {
+    const organization = resolveOrganization(organizationInput);
+    const url = new URL(`https://dev.azure.com/${encodeURIComponent(organization)}/${encodeURIComponent(projectId)}/_apis/wit/workItems/${workItemId}/comments`);
+    url.searchParams.set('api-version', '7.1-preview.4');
+    const data = await this.requestJson(url.toString(), accessToken);
+    if (!Array.isArray(data.comments) && !Array.isArray(data.value)) return [];
+    const comments = Array.isArray(data.comments) ? data.comments : data.value as unknown[];
+    return comments.flatMap((entry) => {
+      if (!entry || typeof entry !== 'object') return [];
+      const text = (entry as Record<string, unknown>).text ?? (entry as Record<string, unknown>).commentText;
+      if (typeof text !== 'string') return [];
+      const plain = normalizeHtmlText(text)?.trim() ?? '';
+      return plain ? [plain.slice(0, 12_000)] : [];
+    });
   }
 
   async getWorkItemTypes(accessToken: string, organizationInput: string, projectId: string): Promise<string[]> {
@@ -379,6 +466,15 @@ export class AdoClient {
     accessToken: string,
     input: Omit<FetchItemsInput, 'ids'> & { parentId: number },
   ): Promise<WorkItemSnapshot[]> {
+    const childIds = await this.getChildIds(accessToken, input);
+    const children = await this.fetchWorkItems(accessToken, { ...input, ids: childIds });
+    return children.filter(({ kind }) => kind === 'TASK');
+  }
+
+  async getChildIds(
+    accessToken: string,
+    input: Pick<FetchItemsInput, 'organization'> & { parentId: number },
+  ): Promise<number[]> {
     const organization = resolveOrganization(input.organization);
     if (!Number.isInteger(input.parentId) || input.parentId < 1) return [];
     const url = new URL(
@@ -387,8 +483,7 @@ export class AdoClient {
     url.searchParams.set('api-version', ADO_API_VERSION);
     url.searchParams.set('$expand', 'Relations');
     const parent = (await this.requestJson(url.toString(), accessToken)) as RawAdoWorkItem;
-    const childIds = idsFromRelations(parent, 'System.LinkTypes.Hierarchy-Forward');
-    return this.fetchWorkItems(accessToken, { ...input, organization, ids: childIds });
+    return idsFromRelations(parent, 'System.LinkTypes.Hierarchy-Forward');
   }
 
   private async requestJson(
