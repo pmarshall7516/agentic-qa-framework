@@ -33,11 +33,15 @@ describe('validated desktop IPC', () => {
     const { handlers, api, ipc } = fixture();
     await expect(handlers.get('qa:get-state')!({ senderFrame: { url: 'http://127.0.0.1:5173/' } }, 'extra')).rejects.toThrow();
     expect(api.getState).not.toHaveBeenCalled();
-    expect(ipc.handle).toHaveBeenCalledTimes(50);
+    expect(ipc.handle).toHaveBeenCalledTimes(54);
     expect([...handlers.keys()]).toContain('qa:generate-model-suggestions');
     expect([...handlers.keys()]).toContain('qa:list-git-repositories');
     expect([...handlers.keys()]).toContain('qa:save-work-item-type-mapping');
     expect([...handlers.keys()]).toContain('qa:export-artifact');
+    expect([...handlers.keys()]).toContain('qa:get-artifact-preview');
+    expect([...handlers.keys()]).toContain('qa:get-run-progress');
+    expect([...handlers.keys()]).toContain('qa:save-repository-config-draft');
+    expect([...handlers.keys()]).toContain('qa:get-repository-config-draft');
     expect([...handlers.keys()]).toContain('qa:list-organizations');
     expect([...handlers.keys()]).toContain('qa:list-sprint-taskboard');
     expect([...handlers.keys()]).not.toContain('qa:save-client-id');

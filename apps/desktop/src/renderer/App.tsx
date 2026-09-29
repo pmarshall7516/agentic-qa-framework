@@ -171,6 +171,19 @@ function PlanSummary({ draftPlan, queue, target }: { draftPlan?: DraftPlan; queu
   </section>;
 }
 
+function OrchestratorPlan({ draftPlan }: { draftPlan?: DraftPlan }) {
+  if (!draftPlan) return null;
+  const repository = draftPlan.contract.scenarios.filter(({ layer }) => layer === 'repo');
+  const browser = draftPlan.contract.scenarios.filter(({ layer }) => layer === 'browser');
+  const both = repository.length > 0 && browser.length > 0;
+  return <div className="panel orchestrator-plan"><div className="panel-title-row"><div><h2>Orchestrator plan</h2><p>Deterministic local coordination. Each lane gets only its approved scenarios, target, command manifest and shared run limits.</p></div><span className="verdict-badge">{both ? '2 worker lanes' : '1 worker lane'}</span></div><ol>
+    <li><strong>Freeze and validate sources</strong><span>ADO revisions, target origin, repository snapshot/config hash and reviewed QA Contract.</span></li>
+    {repository.length ? <li><strong>Delegate to Repository worker · {repository.length} Scenario{repository.length === 1 ? '' : 's'}</strong><span>{draftPlan.repositoryCommands?.length ?? 0} reviewed command{draftPlan.repositoryCommands?.length === 1 ? '' : 's'} in the isolated container; only mapped JUnit assertions can verify a criterion.</span></li> : null}
+    {browser.length ? <li><strong>Delegate to Playwright worker · {browser.length} Scenario{browser.length === 1 ? '' : 's'}</strong><span>Approved-origin browser actions only; capture an encrypted screenshot after each completed step.</span></li> : null}
+    <li><strong>Assemble evidence and compute verdict</strong><span>Join observations and artifacts to their Scenario and Acceptance Criterion; unresolved gaps remain NEEDS_REVIEW.</span></li>
+  </ol>{both ? <p className="field-help">Worker lanes currently run in the reviewed manifest order under one cancellation signal and time limit.</p> : null}</div>;
+}
+
 export function App({
   api,
   initialState,
@@ -200,6 +213,7 @@ export function App({
   const [targetKind, setTargetKind] = useState<TargetConfig['targetKind']>(initialState?.target?.targetKind ?? 'site');
   const [siteBaseUrl, setSiteBaseUrl] = useState(initialState?.target?.siteBaseUrl ?? '');
   const [repositoryPath, setRepositoryPath] = useState(initialState?.target?.repositoryPath ?? '');
+  const [repositoryConfigDraft, setRepositoryConfigDraft] = useState('');
   const [repositorySource, setRepositorySource] = useState<TargetConfig['repositorySource']>(initialState?.target?.repositorySource ?? (initialState?.target?.adoRepository ? 'ado-git' : 'local'));
   const [gitRepositories, setGitRepositories] = useState<AdoGitRepository[]>([]);
   const [gitRefs, setGitRefs] = useState<AdoGitRef[]>([]);
@@ -221,6 +235,8 @@ export function App({
   const [runs, setRuns] = useState<Array<{ manifest: DraftPlan['manifest']; report?: import('@agentic-qa/domain/run').QAReport }>>([]);
   const [selectedRunId, setSelectedRunId] = useState('');
   const [selectedRun, setSelectedRun] = useState<NonNullable<Awaited<ReturnType<DesktopApi['getRun']>>>>();
+  const [artifactPreviews, setArtifactPreviews] = useState<Record<string, string>>({});
+  const [runProgress, setRunProgress] = useState<Awaited<ReturnType<DesktopApi['getRunProgress']>>>([]);
   const [activeRunId, setActiveRunId] = useState('');
   const [browserInstalled, setBrowserInstalled] = useState(false);
   const [repoWorkerInstalled, setRepoWorkerInstalled] = useState(false);
@@ -399,21 +415,50 @@ export function App({
 
   async function saveRunTarget() {
     await run(async () => {
-      const needsSite = targetKind !== 'repository';
-      const parsedUrl = needsSite && siteBaseUrl ? new URL(siteBaseUrl) : undefined;
-      const target: TargetConfig = {
-        targetKind,
-        ...(targetKind !== 'site' && repositorySource === 'local' && repositoryPath ? { repositorySource, repositoryPath } : {}),
-        ...(targetKind !== 'site' && repositorySource === 'ado-git' && selectedGitRepository && selectedGitRef && state.selectedProject && state.selectedOrganization ? { repositorySource, adoRepository: { organization: state.selectedOrganization, projectId: state.selectedProject.id, id: selectedGitRepository.id, name: selectedGitRepository.name, refName: selectedGitRef.name, commit: selectedGitRef.objectId } } : {}),
-        ...(needsSite && siteBaseUrl ? { siteBaseUrl } : {}),
-        allowedOrigins: parsedUrl ? [parsedUrl.origin] : [],
-      };
+      const target = composeTargetConfig();
       const next = await api.saveTarget(target);
       updateState(next);
+      if (target.targetKind !== 'site' && repositoryConfigDraft.trim()) await api.saveRepositoryConfigDraft({ target, content: repositoryConfigDraft });
       const plan = await api.createDraftPlan();
       setDraftPlan(plan);
       setModelIncludedCriteria(plan.contract.criteria.filter(({ requiredLayers }) => requiredLayers.includes('browser')).map(({ id }) => id));
       setScreen('plan');
+    });
+  }
+
+  function composeTargetConfig(): TargetConfig {
+    const needsSite = targetKind !== 'repository';
+    const parsedUrl = needsSite && siteBaseUrl ? new URL(siteBaseUrl) : undefined;
+    return {
+      targetKind,
+      ...(targetKind !== 'site' && repositorySource === 'local' && repositoryPath ? { repositorySource, repositoryPath } : {}),
+      ...(targetKind !== 'site' && repositorySource === 'ado-git' && selectedGitRepository && selectedGitRef && state.selectedProject && state.selectedOrganization ? { repositorySource, adoRepository: { organization: state.selectedOrganization, projectId: state.selectedProject.id, id: selectedGitRepository.id, name: selectedGitRepository.name, refName: selectedGitRef.name, commit: selectedGitRef.objectId } } : {}),
+      ...(needsSite && siteBaseUrl ? { siteBaseUrl } : {}),
+      allowedOrigins: parsedUrl ? [parsedUrl.origin] : [],
+    };
+  }
+
+  async function loadRepositoryConfigDraft() {
+    const target = composeTargetConfig();
+    await run(async () => setRepositoryConfigDraft(await api.getRepositoryConfigDraft(target)));
+  }
+
+  async function saveRepositoryConfigOnly() {
+    const target = composeTargetConfig();
+    await run(async () => {
+      await api.saveTarget(target);
+      await api.saveRepositoryConfigDraft({ target, content: repositoryConfigDraft });
+      setNotice('Repository configuration saved locally in encrypted app storage. It has not been written to the repository.');
+    });
+  }
+
+  async function saveRepositoryConfigAndRefreshPlan() {
+    const target = composeTargetConfig();
+    await run(async () => {
+      await api.saveRepositoryConfigDraft({ target, content: repositoryConfigDraft });
+      const plan = await api.createDraftPlan();
+      setDraftPlan(plan);
+      setNotice('Configuration saved locally and plan refreshed against current ADO revisions.');
     });
   }
 
@@ -441,6 +486,35 @@ export function App({
       ...draftPlan.contract,
       criteria: draftPlan.contract.criteria.map((criterion) => criterion.id === criterionId ? { ...criterion, expectedBehavior } : criterion),
     } });
+  }
+
+  function promoteTaskCandidate(candidateId: string) {
+    if (!draftPlan) return;
+    const candidate = draftPlan.contract.taskCandidates.find(({ id }) => id === candidateId);
+    if (!candidate || candidate.disposition !== 'PROPOSED') return;
+    const layer = draftPlan.manifest.targetKind === 'site' ? 'browser' as const : 'repo' as const;
+    const criterionId = `${candidate.id}-criterion`;
+    const scenarioId = `${candidate.id}-${layer}`;
+    const text = candidate.text.slice(0, 1000);
+    const criteria = [...draftPlan.contract.criteria, {
+      id: criterionId, source: { userAdded: true as const, author: 'Local QA plan editor', derivedFrom: candidate.source },
+      expectedBehavior: text, requiredLayers: [layer], scenarioIds: [scenarioId], ambiguityNotes: [],
+    }];
+    const scenarios = [...draftPlan.contract.scenarios, {
+      id: scenarioId, criterionIds: [criterionId], layer, preconditions: [],
+      steps: layer === 'browser' ? [{ action: 'expectText' as const, text }] : [],
+      expectedObservations: [text], risk: 'medium' as const, approved: false,
+    }];
+    setModelPreview(undefined);
+    setDraftPlan({ ...draftPlan, contract: {
+      ...draftPlan.contract, criteria, scenarios,
+      taskCandidates: draftPlan.contract.taskCandidates.map((item) => item.id === candidateId ? { ...item, disposition: 'ACCEPTED', criterionId } : item),
+    } });
+  }
+
+  function rejectTaskCandidate(candidateId: string) {
+    if (!draftPlan) return;
+    setDraftPlan({ ...draftPlan, contract: { ...draftPlan.contract, taskCandidates: draftPlan.contract.taskCandidates.map((item) => item.id === candidateId ? { ...item, disposition: 'REJECTED', criterionId: undefined } : item) } });
   }
 
   function toggleLayer(criterionId: string, layer: 'repo' | 'browser') {
@@ -621,9 +695,11 @@ export function App({
   }
 
   async function openRun(runId: string) {
-    await run(() => api.getRun(runId), (detail) => {
+    await run(async () => Promise.all([api.getRun(runId), api.getRunProgress(runId)]), ([detail, progress]) => {
       setSelectedRunId(runId);
       setSelectedRun(detail);
+      setArtifactPreviews({});
+      setRunProgress(progress);
       setReviewFindingId(detail?.findings.find((finding) => !finding.humanOverride)?.id ?? '');
       setNotice(detail?.report ? `${detail.report.executionState} · ${detail.report.verdict} · ${detail.report.explanation}` : 'This manifest is saved. Execution has not started yet.');
     });
@@ -640,6 +716,14 @@ export function App({
     if (!selectedRun) return;
     await run(() => api.exportArtifact(selectedRun.manifest.runId, artifactId), (saved) => {
       if (saved) setNotice('Restricted evidence was saved to the location you selected.');
+    });
+  }
+
+  async function previewEvidence(artifactId: string) {
+    if (!selectedRun || artifactPreviews[artifactId]) return;
+    await run(async () => {
+      const dataUrl = await api.getArtifactPreview(selectedRun.manifest.runId, artifactId);
+      setArtifactPreviews((current) => ({ ...current, [artifactId]: dataUrl }));
     });
   }
 
@@ -670,7 +754,21 @@ export function App({
     if (!selectedRun || selectedRun.report) return;
     const runId = selectedRun.manifest.runId;
     setActiveRunId(runId);
-    await run(() => api.startRun(runId), (report) => {
+    let settled = false;
+    const pending = api.startRun(runId).finally(() => { settled = true; });
+    await run(async () => {
+      while (!settled) {
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 600));
+        const [progress, detail] = await Promise.all([api.getRunProgress(runId), api.getRun(runId)]);
+        setRunProgress(progress);
+        if (detail) setSelectedRun(detail);
+      }
+      const report = await pending;
+      const [detail, progress] = await Promise.all([api.getRun(runId), api.getRunProgress(runId)]);
+      if (detail) setSelectedRun(detail);
+      setRunProgress(progress);
+      return report;
+    }, (report) => {
       setSelectedRun((current) => current ? { ...current, report } : current);
       void api.listRuns().then(setRuns);
       setNotice(`${report.executionState} · ${report.verdict} · ${report.explanation}`);
@@ -828,6 +926,7 @@ export function App({
                   <option value="site">Site only</option><option value="repository">Repository only</option><option value="both">Repository and site</option>
                 </select>
                 {targetKind !== 'site' ? <div className="target-block"><label className="field-label" htmlFor="repository-source">Repository source</label><select id="repository-source" className="text-input" value={repositorySource} onChange={(event) => setRepositorySource(event.target.value as 'local' | 'ado-git')}><option value="local">Local folder</option><option value="ado-git">Azure DevOps Git</option></select>{repositorySource === 'local' ? <><div className="inline-form"><input id="repo-path" className="text-input" value={repositoryPath} readOnly placeholder="Choose a repository folder" /><button className="button outline" type="button" disabled={busy} onClick={() => void chooseRepository()}>Choose folder…</button></div><p className="field-help">The selected source will be copied into a temporary snapshot before repository commands run.</p></> : <><div className="button-row"><button className="button outline" type="button" disabled={busy || !state.selectedProject} onClick={() => void loadGitRepositories()}>Load project repositories</button></div><label className="field-label" htmlFor="ado-git-repository">Repository</label><select id="ado-git-repository" className="text-input" value={selectedGitRepository?.id ?? ''} onChange={(event) => { const repository = gitRepositories.find(({ id }) => id === event.target.value); if (repository) void selectGitRepository(repository); }}><option value="">Choose repository</option>{gitRepositories.map((repository) => <option key={repository.id} value={repository.id}>{repository.name}</option>)}</select><label className="field-label" htmlFor="ado-git-ref">Ref and commit</label><select id="ado-git-ref" className="text-input" value={selectedGitRef?.name ?? ''} onChange={(event) => setSelectedGitRef(gitRefs.find(({ name }) => name === event.target.value))}><option value="">Choose branch or tag</option>{gitRefs.map((ref) => <option key={`${ref.name}:${ref.objectId}`} value={ref.name}>{ref.name} · {ref.objectId.slice(0, 12)}</option>)}</select><p className="field-help">The chosen ref is resolved to its commit SHA. Only configured, non-secret files from that frozen commit are staged locally; the worker receives no ADO token.</p></>}</div> : null}
+                {targetKind !== 'site' ? <div className="target-block"><div className="panel-title-row"><div><strong>Repository check configuration</strong><p className="field-help">Edit the JSON used to select files and exact worker commands. It is stored encrypted with this app and does not change repository files.</p></div><button className="button outline" type="button" disabled={busy || (repositorySource === 'local' ? !repositoryPath : !selectedGitRepository || !selectedGitRef)} onClick={() => void loadRepositoryConfigDraft()}>{repositoryConfigDraft ? 'Reload configuration' : 'Load configuration starter'}</button></div>{repositoryConfigDraft ? <><textarea className="contract-textarea payload-preview" aria-label="Repository configuration JSON" value={repositoryConfigDraft} onChange={(event) => setRepositoryConfigDraft(event.target.value)} /><div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void saveRepositoryConfigOnly()}>Save local configuration</button></div></> : null}</div> : null}
                 {targetKind !== 'repository' ? <div className="target-block"><label className="field-label" htmlFor="site-url">Development or staging URL</label><input id="site-url" className="text-input" value={siteBaseUrl} onChange={(event) => setSiteBaseUrl(event.target.value)} placeholder="https://staging.example.test" /><p className="field-help">Only the origin in this URL will be approved for the browser worker. Production URLs are not recommended.</p></div> : null}
                 {targetKind !== 'repository' ? <div className="target-block"><div className="queue-toolbar"><div><strong>Local Chromium browser</strong><span>{browserInstalled ? 'Installed and ready' : 'Required for site checks; downloads to this device (about 300 MB).'}</span></div><button className="button outline" type="button" disabled={busy || browserInstalled} onClick={() => void installBrowser()}>{busy ? 'Installing…' : browserInstalled ? 'Installed' : 'Install browser'}</button></div></div> : null}
                 {targetKind !== 'site' ? <div className="target-block"><div className="queue-toolbar"><div><strong>Docker repository worker</strong><span>{repoWorkerInstalled ? 'Worker image installed' : 'Docker Desktop required; prepares the local Node 22 worker image.'}</span></div><button className="button outline" type="button" disabled={busy || repoWorkerInstalled} onClick={() => void installRepoWorker()}>{busy ? 'Preparing…' : repoWorkerInstalled ? 'Installed' : 'Prepare worker'}</button></div></div> : null}
@@ -841,10 +940,14 @@ export function App({
               <div className="page-heading"><div><p className="eyebrow">PLAN REVIEW</p><h1>Review the QA plan</h1></div><span className="step-count">{draftPlan?.contract.criteria.length ?? 0} criteria</span></div>
               <p className="page-description">The source revision and acceptance-criteria field are frozen in this draft. Edit expected behavior and required evidence before saving the contract.</p>
               <PlanSummary draftPlan={draftPlan} queue={state.queue} target={state.target} />
+              <OrchestratorPlan draftPlan={draftPlan} />
               {draftPlan?.notes.map((note) => <div className="message review-message" key={note}>{note}</div>)}
+              {draftPlan?.contract.coverageGaps?.map((gap) => <div className="message error-message" role="note" key={gap.id}>{gap.message} This source gap keeps the run at NEEDS_REVIEW until the Requirement is updated in Azure DevOps and the plan is refreshed.</div>)}
+              {draftPlan?.contract.taskCandidates?.length ? <div className="panel command-preview"><div className="panel-title-row"><div><h2>Task descriptions · scope context</h2><p>Each description is tied to its ADO revision. Promote a Task into a candidate check only after reviewing it; a Task does not establish its parent Requirement’s Acceptance Criteria.</p></div></div>{draftPlan.contract.taskCandidates.map((candidate) => <div className="command-preview-row" key={candidate.id}><strong>ADO Task #{candidate.source.workItemId} · {candidate.disposition.toLocaleLowerCase('en-US')}</strong><p>{candidate.text}</p><small>{candidate.source.field} · revision {candidate.source.revision}</small>{candidate.disposition === 'PROPOSED' ? <div className="button-row"><button className="button outline" type="button" onClick={() => promoteTaskCandidate(candidate.id)}>Add as candidate criterion</button><button className="text-button" type="button" onClick={() => rejectTaskCandidate(candidate.id)}>Ignore this Task</button></div> : candidate.disposition === 'ACCEPTED' ? <small>Linked to candidate criterion {candidate.criterionId}. Review its checks below.</small> : null}</div>)}</div> : null}
               {draftPlan?.repositoryCommands?.length ? <div className="panel command-preview"><div className="panel-title-row"><div><h2>Repository commands</h2><p>Exact argument arrays run inside the isolated worker, with networking disabled.</p></div><button className="button outline" type="button" disabled={busy} onClick={() => void refreshPlan()}>Refresh after config edits</button></div>{draftPlan.repositoryCommands.map((command) => <div className="command-preview-row" key={command.id}><strong>{command.label} · {command.timeoutSeconds}s</strong><code>{command.executable} {command.arguments.map((argument) => JSON.stringify(argument)).join(' ')}</code><small>Directory: {command.workingDirectory} · Results: {command.resultFormat ?? 'none'}{command.scenarioMappings.length ? ` · Scenarios: ${command.scenarioMappings.map(({ scenarioId, testCaseIds }) => `${scenarioId} ← ${testCaseIds.join(', ')}`).join('; ')}` : ' · diagnostic only'}</small></div>)}</div> : null}
-              <div className="disclosure-card"><div className="disclosure-icon">✓</div><div><strong>{state.modelProviderConfigured ? 'Provider is optional and approval-gated' : 'Disclosure preview: no transmission'}</strong><p>{state.modelProviderConfigured ? 'The local draft makes no provider request. To request optional browser-scenario suggestions, review the exact acceptance-criteria payload first and approve it in the next step. Repository files and task descriptions are never included.' : 'Source: local encrypted ADO queue snapshots. Files included: none. Provider key is not configured. No model request is sent.'}</p></div></div>
-              {state.modelProviderConfigured ? <div className="target-block"><strong>Choose criteria to disclose</strong><p className="field-help">Only checked browser acceptance criteria are sent. Work-item descriptions, tasks, files and artifacts stay local.</p><div className="model-criteria-list">{draftPlan?.contract.criteria.filter(({ requiredLayers }) => requiredLayers.includes('browser')).map((criterion) => <label key={criterion.id}><input type="checkbox" disabled={Boolean(modelPreview)} checked={modelIncludedCriteria.includes(criterion.id)} onChange={(event) => { setModelPreview(undefined); setModelIncludedCriteria((current) => event.target.checked ? [...current, criterion.id] : current.filter((id) => id !== criterion.id)); }} />{criterion.expectedBehavior}</label>)}</div><div className="button-row"><button className="button outline" type="button" disabled={busy || !modelIncludedCriteria.length} onClick={() => void previewModelRequest()}>Preview AI request</button></div></div> : null}
+              {draftPlan?.manifest.targetKind !== 'site' ? <div className="panel command-preview"><div className="panel-title-row"><div><h2>Local repository configuration</h2><p>Use the plan’s Repository Scenario IDs in each JUnit command’s scenarioMappings. A command without a mapping is diagnostic and cannot prove acceptance criteria.</p></div><button className="button outline" type="button" disabled={busy} onClick={() => void loadRepositoryConfigDraft()}>Load saved JSON</button></div>{repositoryConfigDraft ? <><textarea className="contract-textarea payload-preview" aria-label="Repository configuration JSON for mapping scenarios" value={repositoryConfigDraft} onChange={(event) => setRepositoryConfigDraft(event.target.value)} /><div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void saveRepositoryConfigAndRefreshPlan()}>Save and refresh plan</button></div></> : <p className="field-help">Load the saved configuration to map exact JUnit testcase IDs to the reviewed scenarios.</p>}</div> : null}
+              <div className="disclosure-card"><div className="disclosure-icon">✓</div><div><strong>{state.modelProviderConfigured ? 'Provider is optional and approval-gated' : 'Disclosure preview: no transmission'}</strong><p>{state.modelProviderConfigured ? 'The local draft makes no provider request. You choose criteria, inspect the exact payload, then approve a separate request. Raw Task descriptions, repository files and artifacts stay local; a promoted Task-derived criterion can include the text you explicitly accepted.' : 'Source: local encrypted ADO queue snapshots. Files included: none. Provider key is not configured. No model request is sent.'}</p></div></div>
+              {state.modelProviderConfigured ? <div className="target-block"><strong>Choose criteria to disclose</strong><p className="field-help">Only checked browser criterion text is sent. A promoted Task-derived candidate is labeled here; preview the exact request before approving it.</p><div className="model-criteria-list">{draftPlan?.contract.criteria.filter(({ requiredLayers }) => requiredLayers.includes('browser')).map((criterion) => <label key={criterion.id}><input type="checkbox" disabled={Boolean(modelPreview)} checked={modelIncludedCriteria.includes(criterion.id)} onChange={(event) => { setModelPreview(undefined); setModelIncludedCriteria((current) => event.target.checked ? [...current, criterion.id] : current.filter((id) => id !== criterion.id)); }} />{'userAdded' in criterion.source && criterion.source.derivedFrom ? `Task #${criterion.source.derivedFrom.workItemId} candidate: ` : ''}{criterion.expectedBehavior}</label>)}</div><div className="button-row"><button className="button outline" type="button" disabled={busy || !modelIncludedCriteria.length} onClick={() => void previewModelRequest()}>Preview AI request</button></div></div> : null}
               {modelPreview ? <div className="panel command-preview"><div className="panel-title-row"><div><h2>Exact provider payload · no request sent yet</h2><p>OpenAI · {modelPreview.model} · estimated input ≤ {modelPreview.estimatedInputTokens.toLocaleString()} tokens · maximum output {modelPreview.maxOutputTokens.toLocaleString()} tokens. Review acceptance-criteria text and prompt before approving.</p></div><button className="text-button" type="button" onClick={() => setModelPreview(undefined)}>Discard preview</button></div><textarea className="contract-textarea payload-preview" aria-label="Exact provider payload" readOnly value={JSON.stringify(modelPreview.requestBody, null, 2)} /><div className="button-row"><button className="button primary" type="button" disabled={busy} onClick={() => void sendApprovedModelRequest()}>Approve this payload and send to OpenAI</button></div></div> : null}
               <div className="criteria-list">{draftPlan?.contract.criteria.map((criterion) => <article className="criterion-card" key={criterion.id}>
                 <div className="criterion-source"><span>ADO #{criterion.source && 'workItemId' in criterion.source ? criterion.source.workItemId : 'Local'}</span><span>revision {criterion.source && 'revision' in criterion.source ? criterion.source.revision : '—'}</span><span>{criterion.source && 'field' in criterion.source ? criterion.source.field : 'User-added'}</span></div>
@@ -904,6 +1007,7 @@ export function App({
               {selectedRun ? <div className="panel report-preview">
                 {(() => { const report = selectedRun.reviewedReport ?? selectedRun.report; return <>
                 <div className="panel-title-row"><div><h2>{report ? 'Local report preview' : 'Approved run manifest'}</h2><p>{report ? `${report.executionState} · ${report.verdict}${selectedRun.reviewedReport ? ' · reviewed' : ''}` : 'Ready to execute'}</p></div></div>
+                {runProgress.length ? <div className="run-progress" aria-label="Orchestrator and worker progress"><h3>Orchestrator and worker activity</h3><ol>{runProgress.map((event, index) => <li key={`${event.runId}:${index}`} className={`progress-${event.state.toLowerCase()}`}><span>{event.worker} · {event.stage}</span><strong>{event.state}</strong><p>{event.message}</p><time>{new Date(event.at).toLocaleTimeString()}</time></li>)}</ol></div> : null}
                 {report ? <>
                   <p className="report-explanation">{report.explanation}</p>
                   <div className="report-criteria">{selectedRun.contract.criteria.map((criterion) => {
@@ -918,7 +1022,11 @@ export function App({
                           <strong>{observation.worker} · {observation.status}</strong><span>{observation.assertion}</span>
                           {observation.artifactIds.map((artifactId) => {
                             const artifact = selectedRun.artifacts.find(({ id }) => id === artifactId);
-                            return artifact ? <button className="text-button" type="button" key={artifactId} disabled={busy} onClick={() => void exportEvidence(artifactId)}>Save restricted {artifact.kind} evidence ({Math.ceil(artifact.bytes / 1024)} KB)</button> : null;
+                            if (!artifact) return null;
+                            return <div className="artifact-evidence" key={artifactId}>
+                              {artifact.kind === 'screenshot' ? <><button className="text-button" type="button" disabled={busy} onClick={() => void previewEvidence(artifactId)}>{artifact.sequence ? `View step ${artifact.sequence} screenshot` : 'View screenshot'}</button>{artifactPreviews[artifactId] ? <img className="evidence-screenshot" src={artifactPreviews[artifactId]} alt={`Restricted Playwright screenshot${artifact.sequence ? ` for step ${artifact.sequence}` : ''}`} /> : null}</> : null}
+                              <button className="text-button" type="button" disabled={busy} onClick={() => void exportEvidence(artifactId)}>Save restricted {artifact.kind} evidence ({Math.ceil(artifact.bytes / 1024)} KB)</button>
+                            </div>;
                           })}
                         </div>) : <span>No direct observations were recorded.</span>}
                       </div>

@@ -73,11 +73,14 @@ const scenario = {
   approved: false,
 };
 const contract: QAContract = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   id: contractId,
   revision: 1,
   criteria: [criterion],
   scenarios: [scenario],
+  sourceContext: [requirement, task].map(({ id, ...snapshot }) => ({ ...snapshot, workItemId: id })),
+  taskCandidates: [],
+  coverageGaps: [],
 };
 const manifest: RunManifest = {
   schemaVersion: 1,
@@ -233,6 +236,8 @@ export function createUiReviewFixture(scenarioName: string): { api: DesktopApi; 
     listGitRepositories: async () => [{ id: 'repo-portal', name: 'Portal Experience', defaultBranch: 'refs/heads/main' }],
     listGitRefs: async () => [{ name: 'refs/heads/main', objectId: 'c'.repeat(40) }],
     saveTarget: async (target: TargetConfig) => withState({ target }),
+    getRepositoryConfigDraft: async () => JSON.stringify({ schemaVersion: 1, project: { name: 'Portal' }, repository: { include: ['**/*'], exclude: [] }, setup: [], tests: [{ id: 'project-tests', label: 'Project tests', executable: 'npm', arguments: ['test'], workingDirectory: '.', timeoutSeconds: 600, network: 'none', resultFormat: 'none', resultPaths: [], scenarioMappings: [] }], limits: { browserActions: 100, runSeconds: 1800, artifactMiB: 500 } }, null, 2),
+    saveRepositoryConfigDraft: async () => undefined,
     createDraftPlan: async () => plan,
     importModelKey: async () => false,
     clearModelKey: async () => undefined,
@@ -242,6 +247,8 @@ export function createUiReviewFixture(scenarioName: string): { api: DesktopApi; 
     approvePlan: async () => { approved = true; },
     listRuns: async () => runs(),
     getRun: async () => runDetail,
+    getArtifactPreview: async () => 'data:image/png;base64,',
+    getRunProgress: async () => [],
     exportReport: async () => true,
     exportArtifact: async () => true,
     classifyFinding: async (): Promise<QAReport> => report,

@@ -105,7 +105,8 @@ describe('encrypted QA store', () => {
     const store = await openQaStore({ databasePath: path.join(directory, 'qa.db'), key: () => Buffer.alloc(32, 9) });
     await store.addToQueue(snapshot);
     const contract: QAContract = {
-      schemaVersion: 1, id: '11111111-1111-4111-8111-111111111111', revision: 1,
+      schemaVersion: 2, id: '11111111-1111-4111-8111-111111111111', revision: 1,
+      sourceContext: [], taskCandidates: [], coverageGaps: [],
       criteria: [{ id: 'criterion-1', source: { organization: 'org', projectId: 'project', workItemId: 2, revision: 4, field: 'Microsoft.VSTS.Common.AcceptanceCriteria', excerptHash: 'a'.repeat(64) }, expectedBehavior: 'Search results are shown.', requiredLayers: ['browser'], scenarioIds: ['scenario-1'], ambiguityNotes: [] }],
       scenarios: [{ id: 'scenario-1', criterionIds: ['criterion-1'], layer: 'browser', preconditions: [], steps: [{ action: 'expectVisible', role: 'heading', name: 'Results' }], expectedObservations: ['Results heading visible.'], risk: 'low', approved: true }],
       approvedAt: '2026-09-27T12:00:00.000Z',
@@ -118,6 +119,7 @@ describe('encrypted QA store', () => {
     await store.setSetting('ado.organization.account-1', 'contoso');
     await store.setSetting('ado.project.account-1', { id: 'p-1', name: 'Project' });
     await store.setSetting('ado.customTypeMappings.contoso.p-1', { 'User Story': 'REQUIREMENT' });
+    await store.setSetting('repository.config.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', { schemaVersion: 1 });
     await store.setSetting('entra.clientId', 'legacy-client-id');
     await store.setSetting('model.apiKey', 'kept-model-key');
 
@@ -132,6 +134,7 @@ describe('encrypted QA store', () => {
     await expect(store.getSetting('ado.organization.account-1')).resolves.toBeUndefined();
     await expect(store.getSetting('ado.project.account-1')).resolves.toBeUndefined();
     await expect(store.getSetting('ado.customTypeMappings.contoso.p-1')).resolves.toBeUndefined();
+    await expect(store.getSetting('repository.config.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')).resolves.toBeUndefined();
     await expect(store.getSetting('entra.clientId')).resolves.toBeUndefined();
     await expect(store.getSetting('model.apiKey')).resolves.toBe('kept-model-key');
     await store.close();
@@ -141,7 +144,8 @@ describe('encrypted QA store', () => {
     directory = await mkdtemp(path.join(tmpdir(), 'agentic-qa-store-'));
     const store = await openQaStore({ databasePath: path.join(directory, 'qa.db'), key: () => Buffer.alloc(32, 19) });
     const contract: QAContract = {
-      schemaVersion: 1, id: '11111111-1111-4111-8111-111111111111', revision: 1,
+      schemaVersion: 2, id: '11111111-1111-4111-8111-111111111111', revision: 1,
+      sourceContext: [], taskCandidates: [], coverageGaps: [],
       criteria: [{ id: 'criterion-1', source: { organization: 'org', projectId: 'project', workItemId: 2, revision: 4, field: 'Microsoft.VSTS.Common.AcceptanceCriteria', excerptHash: 'a'.repeat(64) }, expectedBehavior: 'Search results are shown.', requiredLayers: ['browser'], scenarioIds: ['scenario-1'], ambiguityNotes: [] }],
       scenarios: [{ id: 'scenario-1', criterionIds: ['criterion-1'], layer: 'browser', preconditions: [], steps: [{ action: 'expectVisible', role: 'heading', name: 'Results' }], expectedObservations: ['Results heading visible.'], risk: 'low', approved: true }],
       approvedAt: '2026-09-27T12:00:00.000Z',
@@ -152,9 +156,13 @@ describe('encrypted QA store', () => {
       configHash: 'b'.repeat(64), toolVersions: { app: '1.0.0' }, limits: { runSeconds: 300 },
     };
     await store.createRun(manifest, contract);
+    await store.appendProgress({ runId: manifest.runId, worker: 'orchestrator', state: 'RUNNING', stage: 'preflight', message: 'Checking the approved target.', at: '2026-09-27T12:01:30.000Z' });
+    await store.appendProgress({ runId: manifest.runId, worker: 'browser', state: 'COMPLETED', stage: 'scenario-1', message: 'Playwright recorded two step screenshots.', at: '2026-09-27T12:01:45.000Z' });
     await expect(store.createRun(manifest, contract)).rejects.toThrow();
     await expect(store.saveContract({ ...contract, criteria: [{ ...contract.criteria[0]!, expectedBehavior: 'mutated' }] })).rejects.toThrow('immutable');
     expect((await store.getRun(manifest.runId))?.contract).toEqual(contract);
+    await expect(store.getProgress(manifest.runId)).resolves.toMatchObject([{ worker: 'orchestrator', stage: 'preflight' }, { worker: 'browser', stage: 'scenario-1' }]);
+    await expect(store.getRun(manifest.runId)).resolves.toMatchObject({ progress: [{ worker: 'orchestrator' }, { worker: 'browser' }] });
     await store.finalizeRun({
       schemaVersion: 1, runId: manifest.runId, executionState: 'COMPLETED', verdict: 'NEEDS_REVIEW',
       criterionResults: [{ criterionId: 'criterion-1', state: 'UNVERIFIED', observationIds: [], missingEvidence: ['No observations'], findingIds: [] }],

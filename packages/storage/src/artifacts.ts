@@ -25,6 +25,9 @@ export async function encryptArtifact(options: {
   evidenceRoot: string;
   key: Buffer;
   maxBytes: number;
+  scenarioId?: string;
+  stepId?: string;
+  sequence?: number;
 }): Promise<Artifact> {
   const runId = ArtifactSchema.shape.runId.parse(options.runId);
   const id = randomUUID();
@@ -57,7 +60,7 @@ export async function encryptArtifact(options: {
     encrypted.fill(0);
     options.key.fill(0);
   }
-  return ArtifactSchema.parse({ id, runId, kind: options.kind, relativePath, sha256, bytes: plaintextBytes, redactionState: 'restricted' });
+  return ArtifactSchema.parse({ id, runId, kind: options.kind, relativePath, sha256, bytes: plaintextBytes, redactionState: 'restricted', ...(options.scenarioId ? { scenarioId: options.scenarioId } : {}), ...(options.stepId ? { stepId: options.stepId } : {}), ...(options.sequence ? { sequence: options.sequence } : {}) });
 }
 
 export async function decryptArtifact(options: { artifact: Artifact; evidenceRoot: string; key: Buffer }): Promise<Buffer> {

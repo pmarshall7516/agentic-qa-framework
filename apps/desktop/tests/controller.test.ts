@@ -29,16 +29,20 @@ function fixture(browserStatus: 'PASSED' | 'FAILED' = 'PASSED', chooseModelKeyFi
     getSnapshot: vi.fn(async (key: string) => snapshots.get(key)),
     addToQueue: vi.fn(async (snapshot: any) => {
       const entry = { key: `org:${snapshot.projectId}:${snapshot.id}`, organization: 'org', projectId: snapshot.projectId, workItemId: snapshot.id, queuedAt: '2026-01-01T00:00:00.000Z', stale: false };
+      const existing = queue.find((candidate) => candidate.key === entry.key);
+      if (existing) { existing.stale = false; snapshots.set(entry.key, snapshot); return existing; }
       queue.push(entry); snapshots.set(entry.key, snapshot); return entry;
     }),
     removeFromQueue: vi.fn(async (key: string) => { const i = queue.findIndex((item) => item.key === key); if (i >= 0) queue.splice(i, 1); }),
     reorderQueue: vi.fn(async () => {}),
     markStale: vi.fn(async () => {}),
-    createRun: vi.fn(async (manifest: any, contract: any) => { runRecords.set(manifest.runId, { manifest, contract, observations: [], findings: [], artifacts: [] }); }),
+    createRun: vi.fn(async (manifest: any, contract: any) => { runRecords.set(manifest.runId, { manifest, contract, observations: [], findings: [], artifacts: [], progress: [] }); }),
     listRuns: vi.fn(async () => [...runRecords.values()].map(({ manifest, report }) => ({ manifest, ...(report ? { report } : {}) }))),
     getRun: vi.fn(async (runId: string) => runRecords.get(runId)),
     appendObservation: vi.fn(async (observation: any) => { observations.push(observation); runRecords.get(observation.runId)?.observations.push(observation); }),
     appendFinding: vi.fn(async (runId: string, finding: any) => { findings.push(finding); runRecords.get(runId)?.findings.push(finding); }),
+    appendProgress: vi.fn(async (event: any) => { runRecords.get(event.runId)?.progress.push(event); }),
+    getProgress: vi.fn(async (runId: string) => runRecords.get(runId)?.progress ?? []),
     finalizeRun: vi.fn(async (report: any) => { const run = runRecords.get(report.runId); run.report = report; }),
     finalizeReview: vi.fn(async (report: any) => { const run = runRecords.get(report.runId); run.reviewedReport = report; }),
     deleteRun: vi.fn(async (runId: string) => { runRecords.delete(runId); }),
@@ -64,12 +68,13 @@ function fixture(browserStatus: 'PASSED' | 'FAILED' = 'PASSED', chooseModelKeyFi
     getChildIds: vi.fn(async () => []),
     getWorkItemTypeStates: vi.fn(async () => []),
     search: vi.fn(async () => [{ id: 17, organization: 'org', projectId: 'project-1' }]),
-    fetchWorkItems: vi.fn(async (_token: string, input: any) => input.ids.map((id: number) => ({
-      organization: input.organization, projectId: input.projectId, projectName: input.projectName,
-      id, revision: snapshots.get(`org:${input.projectId}:${id}`)?.revision ?? 1, type: 'User Story', kind: 'REQUIREMENT', title: `Item ${id}`, state: 'New',
-      url: `https://dev.azure.com/${input.organization}/${input.projectId}/_workitems/edit/${id}`,
-      retrievedAt: '2026-01-01T00:00:00.000Z',
-    }))),
+    fetchWorkItems: vi.fn(async (_token: string, input: any) => input.ids.map((id: number) => {
+      const previous = snapshots.get(`org:${input.projectId}:${id}`);
+      return { ...previous, organization: input.organization, projectId: input.projectId, projectName: input.projectName,
+        id, revision: previous?.revision ?? 1, type: previous?.type ?? 'User Story', kind: previous?.kind ?? 'REQUIREMENT', title: previous?.title ?? `Item ${id}`, state: previous?.state ?? 'New',
+        url: previous?.url ?? `https://dev.azure.com/${input.organization}/${input.projectId}/_workitems/edit/${id}`,
+        retrievedAt: '2026-01-01T00:00:00.000Z' };
+    })),
   } as unknown as AdoClient;
   const browserScenarioRunner = vi.fn(async (input: any) => ({
     observation: { id: randomUUID(), runId: input.runId, scenarioId: input.scenario.id, status: browserStatus, worker: 'browser', startedAt: '2026-09-27T12:00:00.000Z', endedAt: '2026-09-27T12:00:01.000Z', assertion: browserStatus === 'PASSED' ? 'Expected text is visible.' : 'Expected text was not visible.', artifactIds: [], sourceIdentity: new URL(input.target.siteBaseUrl).origin },
@@ -365,7 +370,7 @@ describe('desktop controller', () => {
       acceptanceCriteria: '- Results show the title\n- Filters remain selected',
       url: 'https://dev.azure.com/org/project-1/_workitems/edit/17', retrievedAt: '2026-09-27T12:00:00.000Z',
     };
-    const task = { ...requirement, id: 18, type: 'Task', kind: 'TASK', acceptanceCriteria: 'Task text is context only' };
+    const task = { ...requirement, id: 18, type: 'Task', kind: 'TASK', description: 'Add a filter-state API check.', acceptanceCriteria: 'Task text is context only' };
     for (const snapshot of [requirement, task]) {
       const entry = { key: `org:project-1:${snapshot.id}`, organization: 'org', projectId: 'project-1', workItemId: snapshot.id, queuedAt: '2026-01-01T00:00:00.000Z', stale: false };
       queue.push(entry); snapshots.set(entry.key, snapshot);
@@ -374,6 +379,8 @@ describe('desktop controller', () => {
     const draft = await controller.createDraftPlan();
     expect(draft.contract.criteria.map(({ expectedBehavior }) => expectedBehavior)).toEqual(['Results show the title', 'Filters remain selected']);
     expect(draft.contract.criteria).toHaveLength(2);
+    expect(draft.contract.sourceContext.find(({ workItemId }) => workItemId === 18)?.description).toBe('Add a filter-state API check.');
+    expect(draft.contract.taskCandidates).toMatchObject([{ source: { workItemId: 18, field: 'System.Description' }, text: 'Add a filter-state API check.', disposition: 'PROPOSED' }]);
     expect(draft.notes[0]).toContain('does not prove parent acceptance criteria');
     expect(draft.manifest.sources).toHaveLength(2);
     const approved = { ...draft, contract: { ...draft.contract, scenarios: draft.contract.scenarios.map((scenario) => ({ ...scenario, approved: true })) } };
@@ -386,6 +393,33 @@ describe('desktop controller', () => {
     expect(browserScenarioRunner).toHaveBeenCalledTimes(2);
     expect(runRecords.get(draft.manifest.runId).report).toEqual(report);
     await expect(controller.approvePlan(approved)).rejects.toThrow('no longer current');
+  });
+
+  it('approves a Task-derived candidate only when it retains its queued description provenance', async () => {
+    const { controller, settings, queue, snapshots, store } = fixture();
+    const requirement = { organization: 'org', projectId: 'project-1', projectName: 'Project One', id: 71, revision: 2, type: 'User Story', kind: 'REQUIREMENT', title: 'Save sheet', state: 'Active', acceptanceCriteria: 'The sheet appears after save.', url: 'https://dev.azure.com/org/project-1/_workitems/edit/71', retrievedAt: '2026-09-27T12:00:00.000Z' };
+    const task = { ...requirement, id: 72, revision: 4, type: 'Task', kind: 'TASK', title: 'Persist sheet', acceptanceCriteria: undefined, description: 'Persist selected sheet values through the API.' };
+    const missingCriteria = { ...requirement, id: 73, acceptanceCriteria: undefined, title: 'Export sheet' };
+    for (const snapshot of [requirement, task, missingCriteria]) {
+      const key = `org:project-1:${snapshot.id}`;
+      queue.push({ key, organization: 'org', projectId: 'project-1', workItemId: snapshot.id, queuedAt: '2026-09-27T12:00:00.000Z', stale: false });
+      snapshots.set(key, snapshot);
+    }
+    settings.set('run.target', { targetKind: 'site', siteBaseUrl: 'https://site.example.test', allowedOrigins: ['https://site.example.test'] });
+    const draft = await controller.createDraftPlan();
+    const candidate = draft.contract.taskCandidates[0]!;
+    const criterionId = `${candidate.id}-criterion`;
+    const scenarioId = `${candidate.id}-browser`;
+    const contract = {
+      ...draft.contract,
+      criteria: [...draft.contract.criteria, { id: criterionId, source: { userAdded: true as const, author: 'Reviewer', derivedFrom: candidate.source }, expectedBehavior: candidate.text, requiredLayers: ['browser' as const], scenarioIds: [scenarioId], ambiguityNotes: [] }],
+      scenarios: [...draft.contract.scenarios.map((scenario) => ({ ...scenario, approved: true })), { id: scenarioId, criterionIds: [criterionId], layer: 'browser' as const, preconditions: [], steps: [{ action: 'expectText' as const, text: candidate.text }], expectedObservations: [candidate.text], risk: 'medium' as const, approved: true }],
+      taskCandidates: [{ ...candidate, disposition: 'ACCEPTED' as const, criterionId }],
+    };
+    await expect(controller.approvePlan({ ...draft, contract: { ...contract, coverageGaps: [] } })).rejects.toThrow('source context and coverage gaps are frozen');
+    await controller.approvePlan({ ...draft, contract });
+    expect(store.createRun).toHaveBeenCalledOnce();
+    await expect(controller.getRunProgress(draft.manifest.runId)).resolves.toEqual([]);
   });
 
   it('encrypts browser artifacts before persistence and links them from observations', async () => {
@@ -543,6 +577,20 @@ describe('desktop controller', () => {
     await expect(controller.startRun(draft.manifest.runId)).rejects.toThrow('immutable run already has a final report');
   });
 
+  it('recovers a run that crashed after progress began but before evidence was written', async () => {
+    const { controller, settings, queue, snapshots, store, runRecords } = fixture();
+    const requirement = { organization: 'org', projectId: 'project-1', projectName: 'Project One', id: 75, revision: 2, type: 'User Story', kind: 'REQUIREMENT', title: 'Search', state: 'Active', acceptanceCriteria: 'A result appears.', url: 'https://dev.azure.com/org/project-1/_workitems/edit/75', retrievedAt: '2026-09-27T12:00:00.000Z' };
+    queue.push({ key: 'org:project-1:75', organization: 'org', projectId: 'project-1', workItemId: 75, queuedAt: '2026-09-27T12:00:00.000Z', stale: false });
+    snapshots.set('org:project-1:75', requirement);
+    settings.set('run.target', { targetKind: 'site', siteBaseUrl: 'https://site.example.test', allowedOrigins: ['https://site.example.test'] });
+    const draft = await controller.createDraftPlan();
+    await controller.approvePlan({ ...draft, contract: { ...draft.contract, scenarios: draft.contract.scenarios.map((scenario) => ({ ...scenario, approved: true })) } });
+    await store.appendProgress({ runId: draft.manifest.runId, worker: 'orchestrator', state: 'RUNNING', stage: 'preflight', message: 'Checking target.', at: '2026-09-27T12:00:02.000Z' });
+    const [recovered] = await controller.listRuns();
+    expect(recovered.report).toMatchObject({ executionState: 'INTERRUPTED', verdict: 'BLOCKED' });
+    expect(runRecords.get(draft.manifest.runId).progress.at(-1)).toMatchObject({ worker: 'orchestrator', state: 'FAILED', stage: 'interrupted-recovery' });
+  });
+
   it('requires a reviewed one-use provider preview and keeps the imported API key out of UI state', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'agentic-model-key-'));
     const keyPath = join(directory, 'openai-key.txt');
@@ -582,5 +630,33 @@ describe('desktop controller', () => {
       vi.stubGlobal('fetch', originalFetch);
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it('creates and saves an encrypted app-local repository config starter without editing the repository', async () => {
+    const { controller, settings } = fixture();
+    const target = { targetKind: 'repository' as const, repositorySource: 'local' as const, repositoryPath: join(tmpdir(), 'fixture-repo'), allowedOrigins: [] };
+    const starter = await controller.getRepositoryConfigDraft(target);
+    const parsed = JSON.parse(starter);
+    expect(parsed.tests[0]).toMatchObject({ executable: 'npm', arguments: ['test'], network: 'none', resultFormat: 'none' });
+    await controller.saveRepositoryConfigDraft({ target, content: starter });
+    expect(JSON.parse(await controller.getRepositoryConfigDraft(target))).toEqual(parsed);
+    expect([...settings.keys()].some((key) => key.startsWith('repository.config.'))).toBe(true);
+  });
+
+  it('uses the encrypted app-local config to create a repository plan without a repo config file', async () => {
+    const { controller, settings, queue, snapshots } = fixture();
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'qa-configured-repo-'));
+    try {
+      const requirement = { organization: 'org', projectId: 'project-1', projectName: 'Project One', id: 74, revision: 2, type: 'User Story', kind: 'REQUIREMENT', title: 'Persist', state: 'Active', acceptanceCriteria: 'The saved record is returned by the API.', url: 'https://dev.azure.com/org/project-1/_workitems/edit/74', retrievedAt: '2026-09-27T12:00:00.000Z' };
+      queue.push({ key: 'org:project-1:74', organization: 'org', projectId: 'project-1', workItemId: 74, queuedAt: '2026-09-27T12:00:00.000Z', stale: false });
+      snapshots.set('org:project-1:74', requirement);
+      const target = { targetKind: 'repository' as const, repositorySource: 'local' as const, repositoryPath, allowedOrigins: [] };
+      settings.set('run.target', target);
+      const starter = await controller.getRepositoryConfigDraft(target);
+      await controller.saveRepositoryConfigDraft({ target, content: starter });
+      const draft = await controller.createDraftPlan();
+      expect(draft.repositoryCommands).toMatchObject([{ executable: 'npm', arguments: ['test'] }]);
+      expect(draft.notes.some((note) => note.toLocaleLowerCase('en-US').includes('repository scenario'))).toBe(true);
+    } finally { await rm(repositoryPath, { recursive: true, force: true }); }
   });
 });

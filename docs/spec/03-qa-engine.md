@@ -32,8 +32,13 @@ interface Scenario {
   preconditions: string[]; actions: string[]; expectedObservations: string[];
   risk: 'low' | 'medium' | 'high'; approved: boolean;
 }
+interface TaskCandidate { id: string; source: SourceRef; text: string;
+  disposition: 'PROPOSED' | 'ACCEPTED' | 'REJECTED'; criterionId?: string; }
+interface CoverageGap { id: string; code: 'MISSING_REQUIREMENT_ACCEPTANCE_CRITERIA';
+  source: SourceRef; message: string; }
 interface QAContract { schemaVersion: number; id: string; revision: number;
-  criteria: Criterion[]; scenarios: Scenario[]; approvedAt: string; }
+  sourceContext: WorkItemSnapshot[]; taskCandidates: TaskCandidate[];
+  coverageGaps: CoverageGap[]; criteria: Criterion[]; scenarios: Scenario[]; approvedAt: string; }
 interface RunManifest { schemaVersion: number; runId: string; startedAt: string;
   sources: SourceRef[]; targetKind: TargetKind; sourceCommit?: string;
   sourceSnapshotHash?: string; siteBaseUrl?: string; contractId: string;
@@ -45,7 +50,11 @@ interface Observation { id: string; runId: string; scenarioId: string;
   artifactIds: string[]; sourceIdentity: string; }
 interface Artifact { id: string; runId: string; kind: 'trace' | 'screenshot'
   | 'log' | 'test-result' | 'network' | 'report'; relativePath: string;
-  sha256: string; bytes: number; redactionState: 'redacted' | 'restricted'; }
+  sha256: string; bytes: number; redactionState: 'redacted' | 'restricted';
+  scenarioId?: string; stepId?: string; sequence?: number; }
+interface RunProgressEvent { runId: string; worker: 'orchestrator' | 'repo' | 'browser';
+  state: 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'; stage: string;
+  message: string; at: string; }
 interface CriterionResult { criterionId: string; state: CriterionState;
   observationIds: string[]; missingEvidence: string[]; findingIds: string[]; }
 interface QAReport { schemaVersion: number; runId: string; executionState: ExecutionState;
@@ -79,6 +88,8 @@ All terminal states produce a partial or complete report. Interrupted runs are r
 **Repository:** import a selected commit or approved dirty-tree snapshot into a disposable workspace. Read a versioned `.agentic-qa.yml` or GUI config with explicit allowed commands, working directory, timeouts, result-file paths and optional environment variables. Config and commands are untrusted input. Show exact commands before execution. Run in a constrained container, capture process tree exit, output, structured test results and changed-files manifest; never write to the user's source tree. If the container runtime is absent, repository checks are blocked while site checks may proceed.
 
 **Site:** create a fresh Playwright browser context per scenario, navigate only to the approved base origin and approved auth redirects, use test credentials kept outside prompt/model context, assert expected user-visible states, and capture failure traces and screenshots. Keep network bodies off by default; an explicit setting can enable restricted capture. Playwright traces include DOM snapshots, actions, screenshots and network information and therefore may contain secrets. [Trace Viewer](https://playwright.dev/docs/trace-viewer).
+
+The current v1 Browser worker captures a restricted PNG after each completed approved step, stores scenario/step/sequence provenance with encrypted artifact metadata, and retains a restricted failure screenshot and trace when available. Screenshot capture failure does not convert a passing assertion into a failed observation. Progress records are encrypted with the run and show Orchestrator, Repository, Browser Scenario and Browser step activity; repository commands run in manifest order and Browser scenarios run in plan order under one shared deadline.
 
 **Both:** a repository result and browser result can support the same criterion, but one cannot stand in for a required layer without a reviewed contract change. Record whether site build/deployment corresponds to source commit; if unknown, report a provenance gap and mark affected cross-layer claims `UNVERIFIED`.
 

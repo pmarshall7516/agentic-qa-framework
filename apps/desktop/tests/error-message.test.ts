@@ -11,4 +11,9 @@ describe('renderer error messages', () => {
     expect(errorMessage(new Error("Error invoking remote method 'qa:search-items': AdoRequestError: body contains private payload")))
       .toBe('Azure DevOps could not complete this request. Check your connection and organization access, then try again.');
   });
+
+  it('shows actionable local repository configuration errors returned through Electron IPC', () => {
+    expect(errorMessage(new Error("Error invoking remote method 'qa:create-draft-plan': Error: This repository needs a valid .agentic-qa.yml configuration. Review docs/spec/07-repository-config.md.")))
+      .toBe('This repository needs a valid .agentic-qa.yml configuration. Review docs/spec/07-repository-config.md.');
+  });
 });

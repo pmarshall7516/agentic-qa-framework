@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { QAContractSchema, validateReadyContract } from '../src/qa-contract.js';
+import { QAContractSchema, upgradeQAContract, validateReadyContract } from '../src/qa-contract.js';
 import { computeVerdict } from '../src/run.js';
 
 const emptyFindings: any[] = [];
@@ -19,6 +19,13 @@ describe('run verdict policy', () => {
     expect(computeVerdict({ executionState: 'COMPLETED', criterionResults: [result('VERIFIED')], findings: [{ highRisk: true, unresolved: true }] as any })).toBe('NEEDS_REVIEW');
     expect(computeVerdict({ executionState: 'COMPLETED', criterionResults: [result('VERIFIED')], findings: [{ highRisk: false, unresolved: true }] as any })).toBe('NEEDS_REVIEW');
   });
+
+  it('keeps unresolved Requirement source coverage at NEEDS_REVIEW without changing verdict precedence', () => {
+    const missingStoryCriteria = [{ code: 'MISSING_REQUIREMENT_ACCEPTANCE_CRITERIA' as const, source: { workItemId: 17 } }];
+    expect(computeVerdict({ executionState: 'COMPLETED', criterionResults: [result('VERIFIED')], findings: emptyFindings, coverageGaps: missingStoryCriteria })).toBe('NEEDS_REVIEW');
+    expect(computeVerdict({ executionState: 'COMPLETED', criterionResults: [result('FAILED')], findings: emptyFindings, coverageGaps: missingStoryCriteria })).toBe('FAIL');
+    expect(computeVerdict({ executionState: 'BLOCKED', criterionResults: [result('BLOCKED')], findings: emptyFindings, coverageGaps: missingStoryCriteria })).toBe('BLOCKED');
+  });
 });
 
 describe('QA contract', () => {
@@ -33,8 +40,8 @@ describe('QA contract', () => {
   };
 
   it('validates reciprocal criterion and scenario layers', () => {
-    expect(QAContractSchema.safeParse(contract).success).toBe(true);
-    expect(QAContractSchema.safeParse({ ...contract, scenarios: [] }).success).toBe(false);
+    expect(QAContractSchema.safeParse(upgradeQAContract(contract)).success).toBe(true);
+    expect(() => upgradeQAContract({ ...contract, scenarios: [] })).toThrow();
   });
 
   it('does not enter READY without criteria or review approval', () => {

@@ -9,4 +9,22 @@
 .report-evidence-item { display: grid; gap: 4px; padding: 10px 12px; border: 1px solid #303641; border-radius: 6px; background: #15181e; }
 .report-evidence-item > strong { color: #cfd5df; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
 .report-evidence-item > span { color: #b3bbc7; font-size: 12px; line-height: 1.5; }
+.artifact-evidence { display: grid; gap: 6px; justify-items: start; }
+.orchestrator-plan ol { display: grid; gap: 8px; margin: 12px 0 0; padding: 0; list-style: none; counter-reset: orchestrator; }
+.orchestrator-plan li { display: grid; gap: 4px; padding: 10px 12px 10px 42px; border: 1px solid #303641; border-radius: 6px; background: #15181e; counter-increment: orchestrator; position: relative; }
+.orchestrator-plan li::before { content: counter(orchestrator); position: absolute; left: 12px; top: 10px; width: 20px; height: 20px; display: grid; place-items: center; border-radius: 50%; background: #253246; color: #a9c3e1; font-size: 11px; }
+.orchestrator-plan li strong { color: #d5dae3; font-size: 12px; }
+.orchestrator-plan li span { color: #9da6b4; font-size: 11px; line-height: 1.45; }
+.evidence-screenshot { width: min(100%, 720px); max-height: 540px; object-fit: contain; object-position: top left; border: 1px solid #39424f; border-radius: 6px; background: #101216; }
+.run-progress { margin: 16px 0; padding: 14px; border: 1px solid #303641; border-radius: 8px; background: #15181e; }
+.run-progress h3 { margin: 0 0 10px; color: #e5e9ef; font-size: 14px; }
+.run-progress ol { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.run-progress li { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; padding: 9px 11px; border-left: 3px solid #667085; background: #1b1f26; }
+.run-progress .progress-running { border-color: #6aa9ff; }
+.run-progress .progress-completed { border-color: #59c991; }
+.run-progress .progress-failed, .run-progress .progress-cancelled { border-color: #ef8181; }
+.run-progress li > span, .run-progress li > time { color: #9da6b4; font-size: 11px; }
+.run-progress li > strong { color: #d7dde6; font-size: 10px; text-transform: uppercase; }
+.run-progress li > p { grid-column: 1 / -1; margin: 0; color: #c0c6d0; font-size: 12px; line-height: 1.45; }
+.run-progress li > time { grid-column: 1 / -1; }
 .registration-help { margin-top: 12px; border: 1px solid var(--line); border-radius: 8px; padding: 11px 13px; background: var(--surface-raised); color: var(--text-secondary); font-size: 12px; line-height: 1.55; }

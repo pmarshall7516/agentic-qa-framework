@@ -72,6 +72,7 @@ try {
   await capture(page, '05-run-setup');
   await page.getByRole('button', { name: 'Review local plan' }).click();
   await page.getByRole('heading', { name: 'Review the QA plan' }).waitFor();
+  await page.getByRole('heading', { name: 'Orchestrator plan' }).waitFor();
   await capture(page, '06-plan-review');
   await capture(page, '06-plan-review', 800);
   await page.getByRole('button', { name: 'Approve contract and save run' }).click();

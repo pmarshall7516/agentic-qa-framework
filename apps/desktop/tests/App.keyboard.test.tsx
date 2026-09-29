@@ -152,6 +152,7 @@ describe('desktop keyboard navigation', () => {
       approvePlan,
       listRuns: async () => approved ? [{ manifest: plan.manifest, ...(executed ? { report: classified ? reviewedReport : report } : {}) }] : [],
       getRun: async () => classified ? reviewedDetail : detail,
+      getRunProgress: async () => [],
       startRun,
       exportReport,
       classifyFinding,
@@ -209,6 +210,8 @@ describe('desktop keyboard navigation', () => {
     await tabTo(reviewPlan);
     await user.keyboard('{Enter}');
     expect(await screen.findByRole('heading', { name: 'Review the QA plan' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Orchestrator plan' })).toBeTruthy();
+    expect(screen.getByText(/Delegate to Playwright worker/)).toBeTruthy();
     expect(screen.getByText('1 Story · 1 Task')).toBeTruthy();
     expect(screen.getByText('1 acceptance criterion · Browser checks')).toBeTruthy();
     expect(screen.getByText('contoso / Portal')).toBeTruthy();

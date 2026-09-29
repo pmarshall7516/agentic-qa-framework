@@ -14,6 +14,7 @@ export const ArtifactSchema = z.object({
   id: z.string().uuid(), runId: z.string().uuid(), kind: z.enum(['trace', 'screenshot', 'log', 'test-result', 'network', 'report']),
   relativePath: z.string().min(1).max(1000).refine((value) => !value.startsWith('/') && !value.split(/[\\/]/).includes('..')),
   sha256: z.string().regex(/^[a-f0-9]{64}$/i), bytes: z.number().int().positive(), redactionState: z.enum(['redacted', 'restricted']),
+  scenarioId: z.string().min(1).max(120).optional(), stepId: z.string().min(1).max(200).optional(), sequence: z.number().int().positive().optional(),
 }).strict();
 export const FindingSchema = z.object({
   id: z.string().uuid(), kind: z.enum(['PRODUCT_FAILURE', 'TEST_FAILURE', 'ENVIRONMENT_FAILURE', 'FLAKY_TEST', 'AMBIGUOUS_REQUIREMENT', 'INSUFFICIENT_EVIDENCE']),
@@ -40,6 +41,11 @@ export const QAReportSchema = z.object({
   verdict: VerdictSchema, criterionResults: z.array(CriterionResultSchema), findingIds: z.array(z.string().uuid()),
   completedAt: z.iso.datetime(), explanation: z.string().min(1).max(8000),
 }).strict();
+export const RunProgressEventSchema = z.object({
+  runId: z.string().uuid(), worker: z.enum(['orchestrator', 'repo', 'browser']),
+  state: z.enum(['RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED']), stage: z.string().min(1).max(160),
+  message: z.string().min(1).max(500), at: z.iso.datetime(),
+}).strict();
 
 export type Observation = z.infer<typeof ObservationSchema>;
 export type Artifact = z.infer<typeof ArtifactSchema>;
@@ -47,22 +53,24 @@ export type Finding = z.infer<typeof FindingSchema>;
 export type CriterionResult = z.infer<typeof CriterionResultSchema>;
 export type RunManifest = z.infer<typeof RunManifestSchema>;
 export type QAReport = z.infer<typeof QAReportSchema>;
+export type RunProgressEvent = z.infer<typeof RunProgressEventSchema>;
 
 export interface VerdictInput {
   executionState: z.infer<typeof ExecutionStateSchema>;
   criterionResults: readonly CriterionResult[];
   findings: readonly Finding[];
+  coverageGaps?: readonly { code: string }[];
 }
 
 export function computeVerdict(input: VerdictInput): z.infer<typeof VerdictSchema> {
   if (input.criterionResults.some(({ state }) => state === 'FAILED')) return 'FAIL';
   if (input.executionState !== 'COMPLETED' || input.criterionResults.some(({ state }) => state === 'BLOCKED')) return 'BLOCKED';
   if (!input.criterionResults.length || input.criterionResults.some(({ state }) => state !== 'VERIFIED') ||
-    input.findings.some(({ unresolved }) => unresolved)) return 'NEEDS_REVIEW';
+    input.findings.some(({ unresolved }) => unresolved) || input.coverageGaps?.length) return 'NEEDS_REVIEW';
   return 'PASS';
 }
 
-export function buildReport(input: Omit<QAReport, 'verdict'> & { findings: Finding[] }): QAReport {
+export function buildReport(input: Omit<QAReport, 'verdict'> & { findings: Finding[]; coverageGaps?: readonly { code: string }[] }): QAReport {
   const verdict = computeVerdict(input);
   const explanation = input.explanation.trim() || `Run verdict: ${verdict}.`;
   return QAReportSchema.parse({

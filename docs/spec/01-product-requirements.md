@@ -43,6 +43,9 @@ Each requirement ID is stable for planning and verification. `M` is required for
 | FR-14 | L | Generate new tests and bounded exploratory flows | Generated tests stay in disposable workspace until user explicitly exports; no healer silently changes assertions |
 | FR-15 | L | Run automated accessibility checks | axe findings identify scanned pages and rule IDs; report does not call automated scan a full accessibility audit |
 | FR-16 | L | Publish report/bugs/status to ADO | Separate write scope and confirmation; idempotent publishing; exact destination preview |
+| FR-17 | M | Refresh queued ADO sources before planning and preserve Requirement criteria and Task descriptions with field/revision provenance | ADO access failure stops planning with the actual actionable category; Task candidates remain separate; missing Requirement criteria creates an explicit coverage gap and can never produce `PASS` |
+| FR-18 | M | Configure repository checks from a validated app-local editor when the repository has no config file | Config is encrypted locally, command argument arrays and JUnit mappings are reviewed, config hash is frozen in the manifest, and the source tree is not modified |
+| FR-19 | M | Show durable Orchestrator/worker/Scenario/Browser-step progress and criterion-linked results | Progress survives app restart, cancellation and partial runs are retained; successful Playwright steps have ordered encrypted screenshots previewable in the local report |
 
 ## Nonfunctional requirements and release gates
 

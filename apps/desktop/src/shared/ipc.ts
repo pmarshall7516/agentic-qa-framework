@@ -3,8 +3,9 @@ import type { AccountSummary } from '@agentic-qa/ado/auth';
 import type { QueueEntry } from '@agentic-qa/domain/queue';
 import type { WorkItemSnapshot } from '@agentic-qa/domain/work-item';
 import type { QAContract } from '@agentic-qa/domain/qa-contract';
-import type { Finding, Observation, QAReport, RunManifest } from '@agentic-qa/domain/run';
+import type { Finding, Observation, QAReport, RunManifest, RunProgressEvent } from '@agentic-qa/domain/run';
 import type { WorkItemKind, WorkItemTypeMappings } from '@agentic-qa/domain/work-item';
+import type { RepositoryConfig } from '@agentic-qa/repo-worker/config';
 
 export type AppScreen = 'connections' | 'project' | 'work-items' | 'queue' | 'run-setup' | 'plan' | 'history' | 'settings';
 
@@ -117,6 +118,8 @@ export interface DesktopApi {
   listGitRepositories(): Promise<AdoGitRepository[]>;
   listGitRefs(repositoryId: string): Promise<AdoGitRef[]>;
   saveTarget(target: TargetConfig): Promise<DesktopState>;
+  getRepositoryConfigDraft(target: TargetConfig): Promise<string>;
+  saveRepositoryConfigDraft(input: { target: TargetConfig; content: string }): Promise<void>;
   createDraftPlan(previousRunId?: string): Promise<DraftPlan>;
   importModelKey(): Promise<boolean>;
   clearModelKey(): Promise<void>;
@@ -125,7 +128,9 @@ export interface DesktopApi {
   generateModelSuggestions(previewId: string): Promise<DraftPlan>;
   approvePlan(plan: DraftPlan): Promise<void>;
   listRuns(): Promise<Array<{ manifest: RunManifest; report?: QAReport }>>;
-  getRun(runId: string): Promise<{ manifest: RunManifest; contract: QAContract; observations: Observation[]; findings: Finding[]; artifacts: Array<{ id: string; kind: string; sha256: string; bytes: number; redactionState: string }>; report?: QAReport; reviewedReport?: QAReport } | undefined>;
+  getRun(runId: string): Promise<{ manifest: RunManifest; contract: QAContract; observations: Observation[]; findings: Finding[]; artifacts: Array<{ id: string; kind: string; sha256: string; bytes: number; redactionState: string; scenarioId?: string; stepId?: string; sequence?: number }>; report?: QAReport; reviewedReport?: QAReport } | undefined>;
+  getArtifactPreview(runId: string, artifactId: string): Promise<string>;
+  getRunProgress(runId: string): Promise<RunProgressEvent[]>;
   exportReport(runId: string, format: 'html' | 'markdown' | 'json'): Promise<boolean>;
   exportArtifact(runId: string, artifactId: string): Promise<boolean>;
   classifyFinding(input: { runId: string; findingId: string; kind: 'PRODUCT_FAILURE' | 'TEST_FAILURE' | 'ENVIRONMENT_FAILURE' | 'FLAKY_TEST' | 'AMBIGUOUS_REQUIREMENT'; author: string; reason: string }): Promise<QAReport>;

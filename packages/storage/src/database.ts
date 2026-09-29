@@ -5,10 +5,10 @@ import {
   WorkItemSnapshotSchema,
   type WorkItemSnapshot,
 } from '@agentic-qa/domain/work-item';
-import { QAContractSchema, type QAContract } from '@agentic-qa/domain/qa-contract';
-import { ArtifactSchema, FindingSchema, ObservationSchema, QAReportSchema, RunManifestSchema, type Artifact, type Finding, type Observation, type QAReport, type RunManifest } from '@agentic-qa/domain/run';
+import { QAContractSchema, upgradeQAContract, type QAContract } from '@agentic-qa/domain/qa-contract';
+import { ArtifactSchema, FindingSchema, ObservationSchema, QAReportSchema, RunManifestSchema, RunProgressEventSchema, type Artifact, type Finding, type Observation, type QAReport, type RunManifest, type RunProgressEvent } from '@agentic-qa/domain/run';
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 type CipherDatabaseConnection = BetterSqlite3.Database & {
   key(key: Buffer): number;
 };
@@ -35,9 +35,11 @@ export interface QaStore {
   createRun(manifest: RunManifest, contract: QAContract): Promise<void>;
   appendObservation(observation: Observation): Promise<void>;
   appendFinding(runId: string, finding: Finding): Promise<void>;
+  appendProgress(event: RunProgressEvent): Promise<void>;
+  getProgress(runId: string): Promise<RunProgressEvent[]>;
   finalizeRun(report: QAReport): Promise<void>;
   finalizeReview(report: QAReport): Promise<void>;
-  getRun(runId: string): Promise<{ manifest: RunManifest; contract: QAContract; observations: Observation[]; findings: Finding[]; artifacts: Artifact[]; report?: QAReport; reviewedReport?: QAReport } | undefined>;
+  getRun(runId: string): Promise<{ manifest: RunManifest; contract: QAContract; observations: Observation[]; findings: Finding[]; artifacts: Artifact[]; progress: RunProgressEvent[]; report?: QAReport; reviewedReport?: QAReport } | undefined>;
   listRuns(): Promise<Array<{ manifest: RunManifest; report?: QAReport }>>;
   deleteRun(runId: string): Promise<void>;
   deleteLocalQaData(): Promise<void>;
@@ -141,6 +143,13 @@ function migrate(db: BetterSqlite3.Database): void {
     const migration = db.transaction(() => {
       db.exec('ALTER TABLE run_records ADD COLUMN reviewed_report_json TEXT');
       db.pragma('user_version = 4');
+    });
+    migration.immediate();
+  }
+  if (version < 5) {
+    const migration = db.transaction(() => {
+      db.exec(`CREATE TABLE run_progress (run_id TEXT NOT NULL REFERENCES run_records(run_id) ON DELETE CASCADE, sequence INTEGER NOT NULL, event_json TEXT NOT NULL, PRIMARY KEY (run_id, sequence)); CREATE INDEX run_progress_order_idx ON run_progress(run_id, sequence);`);
+      db.pragma('user_version = 5');
     });
     migration.immediate();
   }
@@ -258,13 +267,14 @@ export async function openQaStore(options: QaStoreOptions): Promise<QaStore> {
     `);
     const appendObservationStatement = db.prepare('INSERT INTO observations (id, run_id, observation_json) VALUES (?, ?, ?)');
     const appendFindingStatement = db.prepare('INSERT INTO findings (id, run_id, finding_json) VALUES (?, ?, ?)');
+    const appendProgressStatement = db.prepare('INSERT INTO run_progress (run_id, sequence, event_json) VALUES (?, ?, ?)');
     const finalizeRunStatement = db.prepare('UPDATE run_records SET report_json = ? WHERE run_id = ? AND report_json IS NULL');
     const finalizeReviewStatement = db.prepare('UPDATE run_records SET reviewed_report_json = ? WHERE run_id = ? AND report_json IS NOT NULL');
     const selectRunStatement = db.prepare('SELECT manifest_json, contract_id, contract_revision, report_json, reviewed_report_json FROM run_records WHERE run_id = ?');
     const recordArtifactStatement = db.prepare('INSERT INTO artifacts (id, run_id, artifact_json) VALUES (?, ?, ?)');
     const deleteLocalQaData = db.transaction(() => {
       db!.exec('DELETE FROM queue_entries; DELETE FROM work_items; DELETE FROM run_records; DELETE FROM qa_contracts;');
-      db!.prepare(`DELETE FROM app_settings WHERE key IN ('entra.selectedAccountId', 'entra.clientId', 'ado.organization', 'ado.project', 'ado.organizations', 'run.target') OR key LIKE 'ado.organization.%' OR key LIKE 'ado.project.%' OR key LIKE 'ado.organizations.%' OR key LIKE 'ado.customTypeMappings.%' OR key LIKE 'run.target.%'`).run();
+      db!.prepare(`DELETE FROM app_settings WHERE key IN ('entra.selectedAccountId', 'entra.clientId', 'ado.organization', 'ado.project', 'ado.organizations', 'run.target') OR key LIKE 'ado.organization.%' OR key LIKE 'ado.project.%' OR key LIKE 'ado.organizations.%' OR key LIKE 'ado.customTypeMappings.%' OR key LIKE 'repository.config.%' OR key LIKE 'run.target.%'`).run();
     });
 
     return {
@@ -346,6 +356,17 @@ export async function openQaStore(options: QaStoreOptions): Promise<QaStore> {
         if (!selectRunStatement.get(validatedRunId)) throw new Error('Run does not exist.');
         appendFindingStatement.run(finding.id, validatedRunId, JSON.stringify(finding));
       },
+      async appendProgress(input) {
+        const event = RunProgressEventSchema.parse(input);
+        if (!selectRunStatement.get(event.runId)) throw new Error('Run does not exist.');
+        const row = db!.prepare('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM run_progress WHERE run_id = ?').get(event.runId) as { sequence: number };
+        appendProgressStatement.run(event.runId, row.sequence + 1, JSON.stringify(event));
+      },
+      async getProgress(runIdInput) {
+        const runId = z.string().uuid().parse(runIdInput);
+        const rows = db!.prepare('SELECT event_json FROM run_progress WHERE run_id = ? ORDER BY sequence').all(runId) as Array<{ event_json: string }>;
+        return rows.map(({ event_json }) => RunProgressEventSchema.parse(JSON.parse(event_json)));
+      },
       async finalizeRun(input) {
         const report = QAReportSchema.parse(input);
         const result = finalizeRunStatement.run(JSON.stringify(report), report.runId);
@@ -363,12 +384,14 @@ export async function openQaStore(options: QaStoreOptions): Promise<QaStore> {
         const observations = db!.prepare('SELECT observation_json FROM observations WHERE run_id = ? ORDER BY rowid').all(runId) as Array<{ observation_json: string }>;
         const findings = db!.prepare('SELECT finding_json FROM findings WHERE run_id = ? ORDER BY rowid').all(runId) as Array<{ finding_json: string }>;
         const artifacts = db!.prepare('SELECT artifact_json FROM artifacts WHERE run_id = ? ORDER BY rowid').all(runId) as Array<{ artifact_json: string }>;
+        const progressRows = db!.prepare('SELECT event_json FROM run_progress WHERE run_id = ? ORDER BY sequence').all(runId) as Array<{ event_json: string }>;
         return {
           manifest: RunManifestSchema.parse(JSON.parse(row.manifest_json)),
-          contract: QAContractSchema.parse(JSON.parse(contractRow.contract_json)),
+          contract: upgradeQAContract(JSON.parse(contractRow.contract_json)),
           observations: observations.map((item) => ObservationSchema.parse(JSON.parse(item.observation_json))),
           findings: findings.map((item) => FindingSchema.parse(JSON.parse(item.finding_json))),
           artifacts: artifacts.map((item) => ArtifactSchema.parse(JSON.parse(item.artifact_json))),
+          progress: progressRows.map((item) => RunProgressEventSchema.parse(JSON.parse(item.event_json))),
           ...(row.report_json ? { report: QAReportSchema.parse(JSON.parse(row.report_json)) } : {}),
           ...(row.reviewed_report_json ? { reviewedReport: QAReportSchema.parse(JSON.parse(row.reviewed_report_json)) } : {}),
         };

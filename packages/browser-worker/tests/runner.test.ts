@@ -36,13 +36,27 @@ describe('isolated browser worker', () => {
     const external = await serve((_request, response) => { blockedOriginRequests += 1; response.end('should not load'); });
     const site = await serve((_request, response) => response.end(`<h1>Ready to search</h1><script>fetch('${external.origin}/collect').catch(()=>{})</script>`));
     scratch = await mkdtemp(path.join(tmpdir(), 'qa-browser-worker-'));
+    const progress = [] as Array<{ stepId: string; order: number; status: string }>;
     const result = await runBrowserScenario({
       runId, target: { siteBaseUrl: site.origin, allowedOrigins: [site.origin] }, artifactDirectory: scratch,
       timeoutMs: 10_000, actionLimit: 10,
+      onStepProgress: (step) => { progress.push(step); },
       scenario: scenario([{ action: 'goto', path: '/' }, { action: 'expectText', text: 'Ready to search' }]),
     });
     expect(result.observation.status).toBe('PASSED');
-    expect(result.observation.artifactIds).toEqual([]);
+    expect(result.steps.map(({ stepId, order, status }) => ({ stepId, order, status }))).toEqual([
+      { stepId: 'scenario-site:step:1', order: 1, status: 'PASSED' },
+      { stepId: 'scenario-site:step:2', order: 2, status: 'PASSED' },
+    ]);
+    expect(result.artifacts.filter(({ kind }) => kind === 'screenshot').map(({ stepId, order }) => ({ stepId, order }))).toEqual([
+      { stepId: 'scenario-site:step:1', order: 1 },
+      { stepId: 'scenario-site:step:2', order: 2 },
+    ]);
+    expect(result.observation.artifactIds).toHaveLength(2);
+    expect(progress.map(({ stepId, order, status }) => ({ stepId, order, status }))).toEqual([
+      { stepId: 'scenario-site:step:1', order: 1, status: 'PASSED' },
+      { stepId: 'scenario-site:step:2', order: 2, status: 'PASSED' },
+    ]);
     expect(blockedOriginRequests).toBe(0);
     expect(result.observation.sourceIdentity).toBe(site.origin);
   }, 30_000);
@@ -70,7 +84,14 @@ describe('isolated browser worker', () => {
       scenario: scenario([{ action: 'goto', path: '/' }, { action: 'expectText', text: 'Missing content' }]),
     });
     expect(result.observation.status).toBe('FAILED');
-    expect(result.artifacts.some((artifact) => artifact.kind === 'screenshot' && artifact.redactionState === 'restricted')).toBe(true);
+    expect(result.steps.map(({ stepId, order, status }) => ({ stepId, order, status }))).toEqual([
+      { stepId: 'scenario-site:step:1', order: 1, status: 'PASSED' },
+      { stepId: 'scenario-site:step:2', order: 2, status: 'FAILED' },
+    ]);
+    expect(result.artifacts.filter((artifact) => artifact.kind === 'screenshot' && artifact.redactionState === 'restricted').map(({ stepId, order }) => ({ stepId, order }))).toEqual([
+      { stepId: 'scenario-site:step:1', order: 1 },
+      { stepId: 'scenario-site:step:2', order: 2 },
+    ]);
     expect(result.artifacts.some((artifact) => artifact.kind === 'trace' && artifact.redactionState === 'restricted')).toBe(true);
     await expect(runBrowserScenario({
       runId, target: { siteBaseUrl: site.origin, allowedOrigins: ['https://attacker.example'] }, artifactDirectory: scratch,

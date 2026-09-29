@@ -12,7 +12,8 @@ export interface BrowserTarget {
 
 export interface BrowserScenarioResult {
   observation: Observation;
-  artifacts: Array<{ id: string; kind: 'trace' | 'screenshot'; path: string; sha256: string; bytes: number; redactionState: 'restricted' }>;
+  artifacts: Array<{ id: string; kind: 'trace' | 'screenshot'; path: string; sha256: string; bytes: number; redactionState: 'restricted'; stepId?: string; order?: number }>;
+  steps: Array<{ stepId: string; order: number; action: Scenario['steps'][number]['action']; status: 'PASSED' | 'FAILED'; assertion: string; completedAt: string }>;
   cancelled: boolean;
 }
 
@@ -79,6 +80,7 @@ export async function runBrowserScenario(options: {
   actionLimit: number;
   signal?: AbortSignal;
   now?: () => string;
+  onStepProgress?: (step: BrowserScenarioResult['steps'][number]) => void | Promise<void>;
 }): Promise<BrowserScenarioResult> {
   const scenario = ScenarioSchema.parse(options.scenario);
   if (scenario.layer !== 'browser' || !scenario.approved) throw new Error('Only approved browser scenarios can execute.');
@@ -91,6 +93,8 @@ export async function runBrowserScenario(options: {
   const observationId = randomUUID();
   const startedAt = now();
   const artifacts: BrowserScenarioResult['artifacts'] = [];
+  const steps: BrowserScenarioResult['steps'] = [];
+  let activeStep: { step: Scenario['steps'][number]; order: number; stepId: string } | undefined;
   let browser: Browser | undefined;
   let context: BrowserContext | undefined;
   let cancelled = false;
@@ -126,9 +130,20 @@ export async function runBrowserScenario(options: {
     await context.tracing.start({ screenshots: true, snapshots: true, sources: false, title: scenario.id });
     await page.goto(base.toString(), { waitUntil: 'domcontentloaded', timeout: options.timeoutMs });
     let completed = 0;
-    for (const step of scenario.steps) {
+    for (const [index, step] of scenario.steps.entries()) {
       if (options.signal?.aborted) throw new DOMException('Run cancelled.', 'AbortError');
+      activeStep = { step, order: index + 1, stepId: `${scenario.id}:step:${index + 1}` };
       assertion = await applyStep(page, step, base, options.timeoutMs);
+      const screenshotPath = join(scratch, `${observationId}-step-${String(index + 1).padStart(4, '0')}.png`);
+      try {
+        await page.screenshot({ path: screenshotPath, fullPage: true, timeout: 5_000 });
+        const artifact = await fileArtifact(screenshotPath, 'screenshot');
+        artifacts.push({ ...artifact, path: screenshotPath, stepId: activeStep.stepId, order: activeStep.order });
+      } catch { /* evidence capture is best effort and cannot turn a passing assertion into a failed check */ }
+      const completedStep = { stepId: activeStep.stepId, order: activeStep.order, action: step.action, status: 'PASSED' as const, assertion, completedAt: now() };
+      steps.push(completedStep);
+      try { await options.onStepProgress?.(completedStep); } catch { /* progress reporting cannot change the observation */ }
+      activeStep = undefined;
       completed += 1;
     }
     if (completed === 0) throw new Error('No browser assertions were executed.');
@@ -138,13 +153,27 @@ export async function runBrowserScenario(options: {
     assertion = cancelled ? 'Browser scenario was cancelled.' : (error instanceof Error ? error.message.slice(0, 1000) : 'Browser scenario failed.');
     if (context) {
       try {
-        const screenshotPath = join(scratch, `${observationId}.png`);
         const page = context.pages()[0];
-        if (page && !page.isClosed()) {
+        if (page && !page.isClosed() && activeStep) {
+          const screenshotPath = join(scratch, `${observationId}-step-${String(activeStep.order).padStart(4, '0')}.png`);
           await page.screenshot({ path: screenshotPath, fullPage: true, timeout: 5_000 }).catch(() => undefined);
-          if (await stat(screenshotPath).then(() => true).catch(() => false)) artifacts.push(await fileArtifact(screenshotPath, 'screenshot'));
+          if (await stat(screenshotPath).then(() => true).catch(() => false)) {
+            const artifact = await fileArtifact(screenshotPath, 'screenshot');
+            artifacts.push({ ...artifact, path: screenshotPath, stepId: activeStep.stepId, order: activeStep.order });
+          }
+        } else if (page && !page.isClosed() && steps.length === 0) {
+          // Preserve a scenario-level screenshot if setup or initial navigation failed before a step began.
+          const screenshotPath = join(scratch, `${observationId}.png`);
+          await page.screenshot({ path: screenshotPath, fullPage: true, timeout: 5_000 }).catch(() => undefined);
+          if (await stat(screenshotPath).then(() => true).catch(() => false)) artifacts.push({ ...(await fileArtifact(screenshotPath, 'screenshot')), path: screenshotPath });
         }
       } catch { /* a failed capture never changes the test observation */ }
+    }
+    if (activeStep) {
+      const failedStep = { stepId: activeStep.stepId, order: activeStep.order, action: activeStep.step.action, status: 'FAILED' as const, assertion, completedAt: now() };
+      steps.push(failedStep);
+      try { await options.onStepProgress?.(failedStep); } catch { /* progress reporting cannot change the observation */ }
+      activeStep = undefined;
     }
   } finally {
     options.signal?.removeEventListener('abort', abortBrowser);
@@ -168,5 +197,5 @@ export async function runBrowserScenario(options: {
     artifactIds: artifacts.map(({ id }) => id),
     sourceIdentity: base.origin,
   });
-  return { observation, artifacts, cancelled };
+  return { observation, artifacts, steps, cancelled };
 }

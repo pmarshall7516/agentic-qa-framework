@@ -4,7 +4,7 @@
 
 ## Location and ownership
 
-The app looks for `.agentic-qa.yml` at the selected repository root. The user reviews it in the desktop UI before each first run and whenever its content hash changes. The config is repository data, not trusted application policy. A GUI-only config may be stored locally and is linked to the repository snapshot hash. The app never silently commits or modifies this file.
+The app reads `.agentic-qa.yml` at the selected repository root when present. Run setup also provides a JSON editor backed by the same schema, so the user can configure checks when no file exists. The validated GUI config is stored encrypted in local app settings and keyed to the selected repository identity; its hash is frozen in each Run Manifest. It is passed directly to the coordinator and is not written into the source tree or worker snapshot. The user may explicitly create a repository file outside the app. The config is repository data, not trusted application policy. The app never silently commits or modifies this file.
 
 ## Schema v1
 
@@ -62,6 +62,7 @@ limits:
 - `include` defines files copied from the selected source snapshot. The app also enforces its own exclusion list for credentials, `.git` internals, OS files and private key patterns even if the config tries to include them. Missing files are reported; they are not silently ignored if required by a test.
 - `network` is `none` by default. This v1 worker blocks `approved-registries` because it has no allowlisted egress proxy. Config cannot grant arbitrary outbound access. Setup runs before tests in the same disposable workspace. Dependency lifecycle scripts remain disabled by default; projects requiring them need a reviewed exception or a prebuilt worker image.
 - `resultFormat` is `junit` or `none` in v1. A JUnit command maps exact contract `Scenario.id` values to exact `classname.name` testcase identities with `scenarioMappings`. Each mapping must match every listed test identity; extra unrelated testcases cannot verify that Scenario. Empty/missing JUnit output or a missing mapped identity is an error observation. A zero process exit without parsed and explicitly mapped assertions does not verify a criterion. Commands with `resultFormat: none` may provide diagnostic observations but cannot verify a criterion.
+- The Run setup editor starts with a bounded `npm test` diagnostic command. Users edit its executable argument array, result format, result paths and exact Scenario-to-JUnit identities. Save and refresh the plan after editing; only the refreshed commands and mappings can be approved.
 - `site` is optional for repository-only runs. A site-only run may use GUI settings without this file. `baseUrl` and origins are validated before browser launch. `accountSecretRef` names a local secret and never contains its value.
 - Global limits set in the app are ceilings. A repository config can request lower limits, never raise them. The effective limits and config hash are frozen into the run manifest.
 

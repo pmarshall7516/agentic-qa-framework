@@ -4,21 +4,21 @@ import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve, relative, isAbsolute, sep } from 'node:path';
+import { join, resolve, relative, isAbsolute, sep, basename } from 'node:path';
 import type { AccountSummary, AdoAuthService } from '@agentic-qa/ado/auth';
 import { AzureCliAdoAuthService } from '@agentic-qa/ado/azure-cli-auth';
 import { AdoClient, resolveOrganization, type AdoIteration, type AdoProject, type AdoTaskboardItem, type WorkItemSearchPage } from '@agentic-qa/ado/client';
 import type { QueueEntry } from '@agentic-qa/domain/queue';
 import { classifyWorkItemType, type WorkItemKind, type WorkItemSnapshot, type WorkItemTypeMappings } from '@agentic-qa/domain/work-item';
-import { QAContractSchema, validateReadyContract, type QAContract } from '@agentic-qa/domain/qa-contract';
-import { buildReport, computeVerdict, FindingSchema, ObservationSchema, RunManifestSchema, type CriterionResult, type Finding, type Observation, type QAReport, type RunManifest } from '@agentic-qa/domain/run';
+import { QAContractSchema, type SourceRef, validateReadyContract, type QAContract } from '@agentic-qa/domain/qa-contract';
+import { buildReport, computeVerdict, FindingSchema, ObservationSchema, RunManifestSchema, type CriterionResult, type Finding, type Observation, type QAReport, type RunManifest, type RunProgressEvent } from '@agentic-qa/domain/run';
 import type { QaStore } from '@agentic-qa/storage/database';
 import { renderReport, type ReportFormat } from '@agentic-qa/reporting/render';
 import { runBrowserScenario, type BrowserScenarioResult } from '@agentic-qa/browser-worker/runner';
 import { decryptArtifact, deleteRunEvidence, encryptArtifact } from '@agentic-qa/storage/artifacts';
 import { access, readFile, stat, writeFile } from 'node:fs/promises';
 import { mkdir } from 'node:fs/promises';
-import { readRepositoryConfig } from '@agentic-qa/repo-worker/config';
+import { readRepositoryConfig, RepositoryConfigSchema, type RepositoryConfig } from '@agentic-qa/repo-worker/config';
 import { createRepositorySnapshot } from '@agentic-qa/repo-worker/snapshot';
 import { runRepositoryChecks } from '@agentic-qa/repo-worker/runner';
 import { isExcludedRepositoryPath } from '@agentic-qa/repo-worker/snapshot';
@@ -733,6 +733,39 @@ export class DesktopController {
     return this.getState();
   }
 
+  private async refreshPlanningQueue(): Promise<QueueEntry[]> {
+    const entries = await this.store.getQueue();
+    if (!entries.length) return entries;
+    const token = await this.accessToken();
+    const snapshots = new Map<string, WorkItemSnapshot>();
+    const groups = new Map<string, QueueEntry[]>();
+    for (const entry of entries) {
+      const groupKey = `${entry.organization.toLocaleLowerCase('en-US')}\0${entry.projectId}`;
+      groups.set(groupKey, [...(groups.get(groupKey) ?? []), entry]);
+    }
+    for (const group of groups.values()) {
+      const originals = await Promise.all(group.map(async (entry) => ({ entry, snapshot: await this.store.getSnapshot(entry.key) })));
+      if (originals.some(({ snapshot }) => !snapshot)) throw new Error('A queued work item has no saved source snapshot. Refresh the QA Queue before planning.');
+      const first = originals[0]!.snapshot!;
+      const freshItems = await this.ado.fetchWorkItems(token, {
+        organization: first.organization, projectId: first.projectId, projectName: first.projectName,
+        ids: group.map(({ workItemId }) => workItemId), customTypeMappings: await this.typeMappings(first.organization, first.projectId),
+      });
+      const byId = new Map(freshItems.map((snapshot) => [snapshot.id, snapshot]));
+      for (const { entry, snapshot: old } of originals) {
+        const fresh = byId.get(entry.workItemId);
+        if (!fresh) {
+          await this.store.markStale(entry.key, true);
+          throw new Error(`Azure DevOps no longer returns queued work item ${entry.workItemId}. Remove it from the QA Queue or choose a current item.`);
+        }
+        await this.store.addToQueue(old?.parentId && !fresh.parentId ? { ...fresh, parentId: old.parentId } : fresh);
+        await this.store.markStale(entry.key, false);
+        snapshots.set(entry.key, fresh);
+      }
+    }
+    return this.store.getQueue();
+  }
+
   async chooseRepository(): Promise<string | undefined> {
     this.chosenRepositoryPath = await this.chosenRepository();
     return this.chosenRepositoryPath;
@@ -773,6 +806,35 @@ export class DesktopController {
     return this.getState();
   }
 
+  async getRepositoryConfigDraft(input: TargetConfig): Promise<string> {
+    const target = TargetSchema.parse(input);
+    if (target.targetKind === 'site') throw new Error('A site-only run does not need repository configuration.');
+    const saved = await this.rawSetting<RepositoryConfig>(this.repositoryConfigSettingKey(target));
+    if (saved) return JSON.stringify(RepositoryConfigSchema.parse(saved), null, 2);
+    if (target.repositoryPath) {
+      try { return JSON.stringify((await readRepositoryConfig(target.repositoryPath)).config, null, 2); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    }
+    const projectName = target.adoRepository?.name ?? (target.repositoryPath ? basename(target.repositoryPath) : 'QA project');
+    const template: RepositoryConfig = RepositoryConfigSchema.parse({
+      schemaVersion: 1, project: { name: projectName }, repository: { include: ['**/*'], exclude: [] },
+      setup: [], tests: [{ id: 'project-tests', label: 'Project test command', executable: 'npm', arguments: ['test'], workingDirectory: '.', timeoutSeconds: 600, network: 'none', resultFormat: 'none', resultPaths: [], scenarioMappings: [] }],
+      ...(target.siteBaseUrl ? { site: { baseUrl: target.siteBaseUrl, allowedOrigins: target.allowedOrigins } } : {}),
+      limits: { browserActions: 100, runSeconds: 1800, artifactMiB: 500 },
+    });
+    return JSON.stringify(template, null, 2);
+  }
+
+  async saveRepositoryConfigDraft(input: { target: TargetConfig; content: string }): Promise<void> {
+    const target = TargetSchema.parse(input.target);
+    if (target.targetKind === 'site') throw new Error('A site-only run does not need repository configuration.');
+    let parsed: unknown;
+    try { parsed = JSON.parse(input.content); }
+    catch { throw new Error('Repository configuration must be valid JSON. You can start from the generated example and edit the exact command, result paths, and JUnit mappings.'); }
+    const config = RepositoryConfigSchema.parse(parsed);
+    await this.setSetting(this.repositoryConfigSettingKey(target), config);
+  }
+
   async createDraftPlan(previousRunId?: string): Promise<DraftPlan> {
     this.pendingPlans.clear();
     let target = TargetSchema.parse(await this.setting<TargetConfig>('run.target'));
@@ -785,7 +847,7 @@ export class DesktopController {
       target = priorTarget;
       await this.store.setSetting('run.target', target);
     }
-    const queue = await this.store.getQueue();
+    const queue = await this.refreshPlanningQueue();
     if (!queue.length) throw new Error('Add at least one work item to the QA Queue before creating a plan.');
     const snapshots: WorkItemSnapshot[] = [];
     const notes: string[] = [];
@@ -804,7 +866,7 @@ export class DesktopController {
       const probeSnapshot = await mkdtemp(join(this.scratchRoot, 'agentic-qa-preview-'));
       try {
         const sourcePath = await this.prepareRepositorySource(target, join(probeSnapshot, 'source'));
-        const { config } = await readRepositoryConfig(sourcePath);
+        const { config } = await this.loadRepositoryConfig(target, sourcePath);
         repositoryConfig = config;
         const result = await createRepositorySnapshot({ sourcePath, destinationPath: join(probeSnapshot, 'snapshot'), config });
         repositorySnapshotHash = result.sha256;
@@ -816,14 +878,23 @@ export class DesktopController {
         : ['repo', 'browser'] as const;
     const criteria: QAContract['criteria'] = [];
     const scenarios: QAContract['scenarios'] = [];
+    const sourceContext = snapshots.map(({ id, ...snapshot }) => ({ ...snapshot, workItemId: id }));
+    const taskCandidates: QAContract['taskCandidates'] = [];
+    const coverageGaps: QAContract['coverageGaps'] = [];
     for (const snapshot of snapshots) {
       if (snapshot.kind !== 'REQUIREMENT') {
-        notes.push(`Task #${snapshot.id} is retained as scope context. It does not prove parent acceptance criteria.`);
+        notes.push(`Task #${snapshot.id} is retained with its description as scope context. It does not prove parent acceptance criteria.`);
+        if (snapshot.kind === 'TASK' && snapshot.description?.trim()) {
+          const text = snapshot.description.trim().slice(0, 4000);
+          const source: SourceRef = { organization: snapshot.organization, projectId: snapshot.projectId, workItemId: snapshot.id, revision: snapshot.revision, field: 'System.Description', excerptHash: sha256(text) };
+          taskCandidates.push({ id: `task-${snapshot.id}-${source.excerptHash.slice(0, 12)}`, source, text, disposition: 'PROPOSED' });
+        }
         continue;
       }
       const raw = snapshot.acceptanceCriteria?.trim() ?? '';
       if (!raw) {
         notes.push(`Requirement #${snapshot.id} has no acceptance criteria. No criterion was invented.`);
+        coverageGaps.push({ id: `missing-ac-${snapshot.id}-${snapshot.revision}`, code: 'MISSING_REQUIREMENT_ACCEPTANCE_CRITERIA', source: { organization: snapshot.organization, projectId: snapshot.projectId, workItemId: snapshot.id, revision: snapshot.revision, field: 'Microsoft.VSTS.Common.AcceptanceCriteria', excerptHash: sha256('') }, message: `Requirement #${snapshot.id} has no Acceptance Criteria.` });
         continue;
       }
       const parts = raw.split(/\r?\n/).map((part) => part.trim().replace(/^(?:[-*•]\s*|\d+[.)]\s*)/, '').trim()).filter(Boolean);
@@ -857,7 +928,7 @@ export class DesktopController {
       const unmapped = scenarios.filter(({ layer }) => layer === 'repo').filter(({ id }) => !mapped.has(id)).map(({ id }) => id);
       if (unmapped.length) notes.push(`Map each Repository Scenario to exact JUnit testcase identities using scenarioMappings in .agentic-qa.yml, then refresh this plan: ${unmapped.join(', ')}`);
     }
-    const contract: QAContract = QAContractSchema.parse({ schemaVersion: 1, id: randomUUID(), revision: 1, criteria, scenarios });
+    const contract: QAContract = QAContractSchema.parse({ schemaVersion: 2, id: randomUUID(), revision: 1, sourceContext, taskCandidates, coverageGaps, criteria, scenarios });
     const startedAt = new Date().toISOString();
     const sourceRefs = snapshots.map((snapshot) => ({
       organization: snapshot.organization, projectId: snapshot.projectId, workItemId: snapshot.id, revision: snapshot.revision,
@@ -888,10 +959,25 @@ export class DesktopController {
     if (!original || JSON.stringify(original.manifest) !== JSON.stringify(input.manifest) || JSON.stringify(original.repositoryCommands ?? []) !== JSON.stringify(input.repositoryCommands ?? [])) throw new Error('This plan is no longer current. Create a fresh draft and review it again.');
     const contract = validateReadyContract({ ...input.contract, approvedAt: new Date().toISOString() });
     if (contract.id !== original.contract.id || contract.revision !== original.contract.revision) throw new Error('Contract identity cannot change while approving a plan.');
-    if (contract.criteria.length !== original.contract.criteria.length || contract.criteria.some((criterion) => {
-      const source = original.contract.criteria.find(({ id }) => id === criterion.id)?.source;
-      return !source || JSON.stringify(source) !== JSON.stringify(criterion.source);
+    if (JSON.stringify(contract.sourceContext) !== JSON.stringify(original.contract.sourceContext) || JSON.stringify(contract.coverageGaps) !== JSON.stringify(original.contract.coverageGaps)) throw new Error('ADO source context and coverage gaps are frozen. Refresh the source and create a new plan to change them.');
+    const originalCriteria = new Map(original.contract.criteria.map((criterion) => [criterion.id, criterion]));
+    if (original.contract.criteria.some((criterion) => {
+      const reviewed = contract.criteria.find(({ id }) => id === criterion.id);
+      return !reviewed || JSON.stringify(criterion.source) !== JSON.stringify(reviewed.source);
     })) throw new Error('Requirement identity and source revisions cannot change during review. Create a fresh plan to update sources.');
+    const candidateById = new Map(original.contract.taskCandidates.map((candidate) => [candidate.id, candidate]));
+    if (contract.taskCandidates.length !== original.contract.taskCandidates.length || contract.taskCandidates.some((candidate) => {
+      const before = candidateById.get(candidate.id);
+      return !before || before.text !== candidate.text || JSON.stringify(before.source) !== JSON.stringify(candidate.source) ||
+        (before.disposition !== 'PROPOSED' && (before.disposition !== candidate.disposition || before.criterionId !== candidate.criterionId));
+    })) throw new Error('Task candidate source text and provenance cannot change during review. Create a fresh plan to update sources.');
+    for (const criterion of contract.criteria.filter(({ id }) => !originalCriteria.has(id))) {
+      const derivedFrom = 'userAdded' in criterion.source ? criterion.source.derivedFrom : undefined;
+      if (!derivedFrom) throw new Error('A new criterion must be a user-added Task candidate with preserved source provenance.');
+      const candidate = original.contract.taskCandidates.find(({ source, disposition }) => disposition === 'PROPOSED' && JSON.stringify(source) === JSON.stringify(derivedFrom));
+      const reviewedCandidate = candidate && contract.taskCandidates.find(({ id }) => id === candidate.id);
+      if (!candidate || reviewedCandidate?.disposition !== 'ACCEPTED' || reviewedCandidate.criterionId !== criterion.id) throw new Error('Only a Task candidate explicitly accepted in this review can add a criterion.');
+    }
     await this.validateCurrentSourceRevisions(original.manifest);
     const target = await this.setting<TargetConfig>('run.target');
     if (!target || (await this.configFingerprint(target)).value !== original.manifest.configHash) throw new Error('Run target or repository config changed after plan creation. Create a new plan.');
@@ -900,7 +986,7 @@ export class DesktopController {
       try {
         let sourcePath = target.repositoryPath;
         if (!sourcePath) { await mkdir(this.scratchRoot, { recursive: true, mode: 0o700 }); temporary = await mkdtemp(join(this.scratchRoot, 'agentic-qa-config-')); sourcePath = await this.prepareRepositorySource(target, temporary); }
-        const { config } = await readRepositoryConfig(sourcePath);
+        const { config } = await this.loadRepositoryConfig(target, sourcePath);
         const mappings = new Set(config.tests.flatMap(({ scenarioMappings }) => scenarioMappings.map(({ scenarioId }) => scenarioId)));
         const missing = input.contract.scenarios.filter(({ layer }) => layer === 'repo').filter(({ id }) => !mappings.has(id)).map(({ id }) => id);
         if (missing.length) throw new Error(`Map all Repository Scenarios to JUnit tests in .agentic-qa.yml and refresh the plan before approval: ${missing.join(', ')}`);
@@ -952,7 +1038,7 @@ export class DesktopController {
     for (const { manifest, report } of initial) {
       if (report) continue;
       const partial = await this.store.getRun(manifest.runId);
-      if (!partial || (!partial.observations.length && !partial.findings.length && !partial.artifacts.length)) continue;
+      if (!partial || (!partial.observations.length && !partial.findings.length && !partial.artifacts.length && !partial.progress.length)) continue;
       const findings = [...partial.findings];
       for (const observation of partial.observations.filter(({ status }) => status !== 'PASSED')) {
         if (!findings.some(({ observationIds }) => observationIds.includes(observation.id))) {
@@ -978,6 +1064,7 @@ export class DesktopController {
         schemaVersion: 1, runId: manifest.runId, executionState: 'INTERRUPTED', criterionResults,
         findingIds: [], completedAt: new Date().toISOString(), explanation: 'The app stopped before this run completed. Its partial evidence is preserved; create a new run to retry.', findings,
       }));
+      await this.progress(manifest.runId, 'orchestrator', 'FAILED', 'interrupted-recovery', 'The app stopped before this run finished. Partial evidence is preserved; create a new run to retry.');
     }
     return this.store.listRuns();
   }
@@ -1005,7 +1092,20 @@ export class DesktopController {
   async getRun(runId: string) {
     const run = await this.store.getRun(z.string().uuid().parse(runId));
     if (!run) return undefined;
-    return { ...run, artifacts: run.artifacts.map(({ id, kind, sha256, bytes, redactionState }) => ({ id, kind, sha256, bytes, redactionState })) };
+    return { ...run, artifacts: run.artifacts.map(({ id, kind, sha256, bytes, redactionState, scenarioId, stepId, sequence }) => ({ id, kind, sha256, bytes, redactionState, ...(scenarioId ? { scenarioId } : {}), ...(stepId ? { stepId } : {}), ...(sequence ? { sequence } : {}) })) };
+  }
+
+  async getArtifactPreview(runIdInput: string, artifactIdInput: string): Promise<string> {
+    const runId = z.string().uuid().parse(runIdInput);
+    const artifactId = z.string().uuid().parse(artifactIdInput);
+    const run = await this.store.getRun(runId);
+    const artifact = run?.artifacts.find(({ id }) => id === artifactId);
+    if (!artifact || artifact.kind !== 'screenshot' || artifact.bytes > 8 * 1024 * 1024 || !this.evidenceRoot || !this.artifactKey) throw new Error('A previewable screenshot was not found or exceeds the preview limit.');
+    const contents = await decryptArtifact({ artifact, evidenceRoot: this.evidenceRoot, key: await this.artifactKey() });
+    try {
+      if (contents.byteLength > 8 * 1024 * 1024 || contents.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') throw new Error('Screenshot evidence is not a valid PNG or exceeds the preview limit.');
+      return `data:image/png;base64,${contents.toString('base64')}`;
+    } finally { contents.fill(0); }
   }
 
   async exportReport(runId: string, format: ReportFormat): Promise<boolean> {
@@ -1036,6 +1136,15 @@ export class DesktopController {
     if (!active) return false;
     active.abort();
     return true;
+  }
+
+  async getRunProgress(runIdInput: string): Promise<RunProgressEvent[]> {
+    return this.store.getProgress(z.string().uuid().parse(runIdInput));
+  }
+
+  private async progress(runId: string, worker: RunProgressEvent['worker'], state: RunProgressEvent['state'], stage: string, message: string): Promise<void> {
+    const event = { runId, worker, state, stage, message: message.slice(0, 500), at: new Date().toISOString() };
+    await this.store.appendProgress(event);
   }
 
   async classifyFinding(input: { runId: string; findingId: string; kind: Finding['kind']; author: string; reason: string }): Promise<QAReport> {
@@ -1077,6 +1186,7 @@ export class DesktopController {
           ? `A reviewer marked the requirement ambiguous. ${reason}`
           : `A reviewer classified the finding as ${kind.toLocaleLowerCase('en-US').replaceAll('_', ' ')}. Required evidence remains unchanged. ${reason}`,
       findings,
+      coverageGaps: run.contract.coverageGaps,
     });
     await this.store.finalizeReview(reviewed);
     return reviewed;
@@ -1113,6 +1223,7 @@ export class DesktopController {
     if (target.targetKind !== 'repository' && !(await this.isBrowserInstalled())) throw new Error('Install the local Chromium browser from Run setup before starting this site run.');
     const abort = new AbortController();
     this.activeRuns.set(runId, abort);
+    await this.progress(runId, 'orchestrator', 'RUNNING', 'run-approved', 'Orchestrator accepted the approved manifest and assigned deterministic worker lanes.');
     let scratch = '';
     const observations: Observation[] = [];
     const findings: Finding[] = [];
@@ -1126,6 +1237,7 @@ export class DesktopController {
     deadline.unref();
     try {
       scratch = await mkdtemp(join(this.scratchRoot, `agentic-qa-${runId}-`));
+      await this.progress(runId, 'orchestrator', 'RUNNING', 'preflight', 'Checking the frozen target, configuration, time budget, and approved origins.');
       if (manifest.targetKind !== target.targetKind) throw new Error('Run target does not match the approved manifest.');
       if (manifest.siteBaseUrl) {
         const manifestSite = new URL(manifest.siteBaseUrl);
@@ -1134,9 +1246,10 @@ export class DesktopController {
         catch (error) { executionState = 'BLOCKED'; siteBlocked = true; blockedReason = error instanceof Error ? error.message : 'Site preflight failed.'; }
       }
       if (target.targetKind !== 'site') {
+        await this.progress(runId, 'repo', 'RUNNING', 'repository-checks', 'Repository worker is snapshotting the configured files and running the approved command arrays.');
         try {
           const repositorySourcePath = target.repositoryPath ?? await this.prepareRepositorySource(target, join(scratch, 'ado-source'));
-          const { config } = await readRepositoryConfig(repositorySourcePath);
+          const { config } = await this.loadRepositoryConfig(target, repositorySourcePath);
           const repositoryScenarios = archived.contract.scenarios.filter(({ layer }) => layer === 'repo');
           const mapped = new Set(config.tests.flatMap(({ scenarioMappings }) => scenarioMappings.map(({ scenarioId }) => scenarioId)));
           const unmapped = repositoryScenarios.filter(({ id }) => !mapped.has(id));
@@ -1165,9 +1278,11 @@ export class DesktopController {
           if (abort.signal.aborted) { executionState = timedOut ? 'BLOCKED' : 'CANCELLED'; if (timedOut) blockedReason = 'The run exceeded its approved wall-clock limit.'; }
           if (result.blocked) throw new Error(result.blocked);
           if (result.observations.some(({ status }) => status === 'ERROR')) { executionState = 'BLOCKED'; blockedReason = 'A repository command timed out, was cancelled, or produced no mapped JUnit assertions.'; }
+          await this.progress(runId, 'repo', 'COMPLETED', 'repository-checks', `Repository worker recorded ${repositoryObservations.length} observation(s) and ${result.artifacts.length} artifact(s).`);
         } catch (error) {
           executionState = 'BLOCKED';
           blockedReason = error instanceof Error ? error.message : 'Repository worker could not start.';
+          await this.progress(runId, 'repo', 'FAILED', 'repository-checks', 'Repository worker could not complete the approved checks. Review the run report for the blocked reason.');
         }
       }
       const browserScenarios = archived.contract.scenarios.filter(({ layer }) => layer === 'browser');
@@ -1180,6 +1295,7 @@ export class DesktopController {
         if (remaining <= 0) {
           executionState = 'BLOCKED'; blockedReason = 'Browser action budget was exhausted.'; break;
         }
+        await this.progress(runId, 'browser', 'RUNNING', scenario.id, `Playwright worker started Scenario ${scenario.id} (${scenario.steps.length} bounded steps).`);
         try {
           const result: BrowserScenarioResult = await this.browserScenarioRunner({
             runId,
@@ -1189,6 +1305,7 @@ export class DesktopController {
             timeoutMs: Math.max(100, Math.min(15_000, deadlineAt - Date.now())),
             actionLimit: remaining,
             signal: abort.signal,
+            onStepProgress: async (step) => this.progress(runId, 'browser', step.status === 'PASSED' ? 'COMPLETED' : 'FAILED', step.stepId, `${step.status} · step ${step.order}/${scenario.steps.length} · ${step.action}`),
           });
           const artifactIds: string[] = [];
           for (const artifact of result.artifacts) {
@@ -1196,6 +1313,7 @@ export class DesktopController {
             const metadata = await encryptArtifact({
               runId, kind: artifact.kind, sourcePath: artifact.path, evidenceRoot: this.evidenceRoot,
               key: await this.artifactKey(), maxBytes: (manifest.limits.artifactMiB ?? 500) * 1024 * 1024,
+              ...(artifact.stepId ? { scenarioId: scenario.id, stepId: artifact.stepId, sequence: artifact.order } : {}),
             });
             await this.store.recordArtifact(metadata);
             artifactIds.push(metadata.id);
@@ -1203,12 +1321,14 @@ export class DesktopController {
           const browserObservation = ObservationSchema.parse({ ...result.observation, artifactIds });
           observations.push(browserObservation);
           await this.store.appendObservation(browserObservation);
+          await this.progress(runId, 'browser', browserObservation.status === 'PASSED' ? 'COMPLETED' : 'FAILED', scenario.id, `Playwright recorded ${result.steps?.length ?? scenario.steps.length} step result(s) and ${result.artifacts.filter(({ kind }) => kind === 'screenshot').length} ordered screenshot(s).`);
           actionsUsed += scenario.steps.length + 1;
           if (result.cancelled) { executionState = 'CANCELLED'; break; }
         } catch (error) {
           if (abort.signal.aborted) { executionState = 'CANCELLED'; break; }
           executionState = 'BLOCKED';
           blockedReason = error instanceof Error ? error.message : 'Browser worker could not start.';
+          await this.progress(runId, 'browser', 'FAILED', scenario.id, 'Playwright worker could not complete this Scenario. Review the run report for the failure.');
           break;
         }
       }
@@ -1238,19 +1358,21 @@ export class DesktopController {
         const findingIds = findings.filter((finding) => finding.observationIds.some((id) => linkedObservations.some((observation) => observation.id === id))).map(({ id }) => id);
         return { criterionId: criterion.id, state, observationIds: linkedObservations.map(({ id }) => id), missingEvidence, findingIds };
       });
-      const verdict = computeVerdict({ executionState, criterionResults, findings });
-      const explanation = verdict === 'PASS'
+      const verdict = computeVerdict({ executionState, criterionResults, findings, coverageGaps: archived.contract.coverageGaps });
+      let explanation = verdict === 'PASS'
         ? 'Every acceptance criterion has passing direct evidence for each required layer.'
         : verdict === 'FAIL'
           ? 'At least one criterion has a reviewer-confirmed product failure.'
           : verdict === 'BLOCKED'
             ? `One or more required checks were blocked or did not execute. ${blockedReason}`.trim()
             : 'At least one acceptance criterion remains unverified or has an unresolved finding.';
+      if (archived.contract.coverageGaps.length) explanation += ` ${archived.contract.coverageGaps.map(({ message }) => message).join(' ')}`;
       const report = buildReport({
         schemaVersion: 1, runId, executionState, criterionResults, findingIds: findings.map(({ id }) => id),
-        completedAt: new Date().toISOString(), explanation, findings,
+        completedAt: new Date().toISOString(), explanation, findings, coverageGaps: archived.contract.coverageGaps,
       });
       await this.store.finalizeRun(report);
+      await this.progress(runId, 'orchestrator', executionState === 'COMPLETED' ? 'COMPLETED' : executionState === 'CANCELLED' ? 'CANCELLED' : 'FAILED', 'run-finalized', `${report.executionState} · ${report.verdict}. Open the report for criterion evidence and findings.`);
       return report;
     } finally {
       this.activeRuns.delete(runId);
@@ -1338,13 +1460,31 @@ export class DesktopController {
           temporary = await mkdtemp(join(this.scratchRoot, 'agentic-qa-config-'));
           sourcePath = await this.prepareRepositorySource(target, temporary);
         }
-        const loaded = await readRepositoryConfig(sourcePath).catch(() => {
-          throw new Error('This repository needs a valid .agentic-qa.yml configuration. Review docs/spec/07-repository-config.md and map its JUnit checks to the approved repository scenario IDs.');
-        });
-        repositoryConfigHash = loaded.sha256;
+        const loaded = await this.loadRepositoryConfig(target, sourcePath);
+        repositoryConfigHash = sha256(JSON.stringify(loaded.config));
       } finally { if (temporary) await rm(temporary, { recursive: true, force: true }).catch(() => undefined); }
     }
     return { value: sha256(JSON.stringify({ target, ...(repositoryConfigHash ? { repositoryConfigHash } : {}) })), ...(repositoryConfigHash ? { repositoryConfigHash } : {}) };
+  }
+
+  private repositoryConfigSettingKey(target: TargetConfig): string {
+    const identity = target.adoRepository
+      ? `ado:${target.adoRepository.organization.toLocaleLowerCase('en-US')}:${target.adoRepository.projectId}:${target.adoRepository.id}`
+      : `local:${resolve(target.repositoryPath ?? '')}`;
+    return `repository.config.${sha256(identity)}`;
+  }
+
+  private async loadRepositoryConfig(target: TargetConfig, sourcePath: string): Promise<{ config: RepositoryConfig; sha256: string }> {
+    const saved = await this.rawSetting<unknown>(this.repositoryConfigSettingKey(target));
+    if (saved !== undefined) {
+      const config = RepositoryConfigSchema.parse(saved);
+      return { config, sha256: sha256(JSON.stringify(config)) };
+    }
+    try { return await readRepositoryConfig(sourcePath); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      throw new Error('No repository check configuration is available. Add a valid root .agentic-qa.yml or edit the local configuration JSON in Run setup, then review the plan again.');
+    }
   }
 
   private async prepareRepositorySource(target: TargetConfig, destination: string): Promise<string> {
@@ -1354,12 +1494,13 @@ export class DesktopController {
     const token = await this.accessToken();
     const items = await this.ado.listGitItems(token, source.organization, source.id, source.commit);
     const configItem = items.find((item) => !item.isFolder && item.path === '/.agentic-qa.yml');
-    if (!configItem) throw new Error('The selected ADO Git commit must contain a root .agentic-qa.yml file.');
     await mkdir(destination, { recursive: true, mode: 0o700 });
-    const configText = await this.ado.getGitItemContent(token, source.organization, source.id, source.commit, configItem.path);
-    if (Buffer.byteLength(configText, 'utf8') > 256 * 1024) throw new Error('The repository configuration exceeds the 256 KiB limit.');
-    await writeFile(join(destination, '.agentic-qa.yml'), configText, { mode: 0o600, flag: 'wx' });
-    const { config } = await readRepositoryConfig(destination);
+    if (configItem) {
+      const configText = await this.ado.getGitItemContent(token, source.organization, source.id, source.commit, configItem.path);
+      if (Buffer.byteLength(configText, 'utf8') > 256 * 1024) throw new Error('The repository configuration exceeds the 256 KiB limit.');
+      await writeFile(join(destination, '.agentic-qa.yml'), configText, { mode: 0o600, flag: 'wx' });
+    }
+    const { config } = await this.loadRepositoryConfig(target, destination);
     const paths = items.filter((item) => !item.isFolder).map((item) => item.path.slice(1)).filter((path) => path && !path.startsWith('/') && !path.split('/').includes('..') && !path.includes('\\'));
     const included = new Set(config.repository.include.flatMap((pattern) => micromatch(paths, pattern, { dot: true })));
     for (const pattern of config.repository.exclude) for (const path of micromatch([...included], pattern, { dot: true })) included.delete(path);
