@@ -1,0 +1,8 @@
+{
+  "name": "@agentic-qa/browser-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": { "./runner": "./src/runner.ts" },
+  "dependencies": { "@agentic-qa/domain": "*", "playwright": "1.63.0" }
+}

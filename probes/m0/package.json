@@ -1,0 +1,48 @@
+{
+  "name": "agentic-qa-m0-probes",
+  "version": "0.1.0",
+  "description": "Disposable M0 feasibility probes for the Agentic QA desktop app",
+  "author": "Agentic QA Framework",
+  "private": true,
+  "type": "module",
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build:ui": "vite build",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build:main": "esbuild electron/main.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist-electron/main.cjs && esbuild electron/preload.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist-electron/preload.cjs",
+    "build": "npm run build:ui && npm run build:main",
+    "start:electron": "electron .",
+    "package:electron:mac": "npm run build && electron-builder --mac dir dmg",
+    "package:electron:win": "npm run build && electron-builder --win nsis --x64"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.9.1",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.0.4",
+    "electron": "^44.4.5",
+    "electron-builder": "^26.0.12",
+    "esbuild": "^0.28.2",
+    "jsdom": "^26.1.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.1",
+    "vitest": "^5.0.2"
+  },
+  "build": {
+    "appId": "local.agenticqa.probe",
+    "productName": "Agentic QA Probe",
+    "directories": { "output": "release" },
+    "files": ["dist/**/*", "dist-electron/**/*", "package.json"],
+    "mac": { "target": ["dir", "dmg"], "category": "public.app-category.developer-tools" },
+    "win": { "target": ["nsis"], "signAndEditExecutable": false, "artifactName": "Agentic-QA-Probe-${version}-${arch}.${ext}" },
+    "nsis": { "oneClick": false, "perMachine": false, "allowToChangeInstallationDirectory": true }
+  }
+}

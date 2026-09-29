@@ -16,6 +16,7 @@ type CriterionState = 'VERIFIED' | 'FAILED' | 'UNVERIFIED' | 'BLOCKED';
 type FindingKind = 'PRODUCT_FAILURE' | 'TEST_FAILURE' | 'ENVIRONMENT_FAILURE'
   | 'FLAKY_TEST' | 'AMBIGUOUS_REQUIREMENT' | 'INSUFFICIENT_EVIDENCE';
 type Verdict = 'PASS' | 'FAIL' | 'NEEDS_REVIEW' | 'BLOCKED';
+type ExecutionState = 'COMPLETED' | 'CANCELLED' | 'INTERRUPTED' | 'BLOCKED';
 
 interface SourceRef {
   organization: string; projectId: string; workItemId: number; revision: number;
@@ -47,9 +48,14 @@ interface Artifact { id: string; runId: string; kind: 'trace' | 'screenshot'
   sha256: string; bytes: number; redactionState: 'redacted' | 'restricted'; }
 interface CriterionResult { criterionId: string; state: CriterionState;
   observationIds: string[]; missingEvidence: string[]; findingIds: string[]; }
+interface QAReport { schemaVersion: number; runId: string; executionState: ExecutionState;
+  verdict: Verdict; criterionResults: CriterionResult[]; findingIds: string[];
+  completedAt: string; }
 ```
 
 IDs remain stable within a contract revision. Editing expected behavior or required layers creates a new revision. A rerun always creates a new `runId` and manifest. Raw work-item content is captured as a source snapshot, not silently refetched while a run is active.
+
+Contract validation rejects a criterion with no required layer, no linked scenario for a required layer, or no expected observation. Every scenario must reference at least one existing criterion and a layer required by that criterion. A contract with no criteria can be saved for review but cannot enter `READY`.
 
 ## Planning rules
 
@@ -87,11 +93,11 @@ Criterion rules:
 - `BLOCKED`: a required check could not execute because of auth, target, environment, policy or unavailable worker.
 - `UNVERIFIED`: ambiguity, missing proof, test failure, flaky result, or an unapproved/omitted scenario leaves the criterion unresolved.
 
-Run verdict precedence: **`FAIL`** if any criterion is `FAILED`; otherwise **`BLOCKED`** if any criterion is `BLOCKED`; otherwise **`NEEDS_REVIEW`** if any criterion is `UNVERIFIED` or an unresolved high-risk finding exists; otherwise **`PASS`** if every approved criterion is `VERIFIED` and at least one criterion exists. A cancelled or interrupted run is `BLOCKED`. Reports show all secondary issues even when a higher-precedence status wins. No criterion, empty source requirement, or zero executed assertions cannot produce `PASS`.
+Run verdict precedence: **`FAIL`** if any criterion is `FAILED`; otherwise **`BLOCKED`** if execution is cancelled, interrupted or blocked, or any criterion is `BLOCKED`; otherwise **`NEEDS_REVIEW`** if any criterion is `UNVERIFIED` or an unresolved high-risk finding exists; otherwise **`PASS`** if execution completed and every criterion is `VERIFIED`. This keeps `executionState` separate from `verdict`: if a confirmed product failure was observed before cancellation, the report is `CANCELLED` with verdict `FAIL`; without a confirmed failure, a cancelled run is `BLOCKED`. Reports show all secondary issues even when a higher-precedence status wins. No criterion, empty source requirement, or zero executed assertions cannot produce `PASS`.
 
 ## Report contents
 
-Header: verdict, selected ADO items/revisions, target/source identity, run time, tools/model, run limits, and whether provider context was transmitted. Body: criterion coverage matrix with scenario and artifact links; test summary by layer; findings with expected/actual/reproduction/classification; blocked and unverified list; regression risks; accessibility scope if run; redaction/export status. Include a plain-language explanation of **why** the verdict followed policy. Reports are immutable; corrections are appended as a review annotation with local author identity and reason, or recorded in a new run.
+Header: verdict, selected ADO items/revisions, target/source identity, run time, tools/model, run limits, and whether provider context was transmitted. Body: criterion coverage matrix with direct observations and artifact identities; test summary by layer; findings with expected/actual/reproduction/classification; blocked and unverified list; regression risks; accessibility scope if run; redaction/export status. The desktop app can decrypt and save an artifact only after an explicit restricted-evidence warning and native save dialog; report exports contain evidence identities and assertions, never restricted artifact bytes. Include a plain-language explanation of **why** the verdict followed policy. Reports are immutable; corrections are appended as a review annotation with local author identity and reason, or recorded in a new run.
 
 ## Deterministic verification suite
 

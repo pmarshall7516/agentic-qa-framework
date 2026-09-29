@@ -1,0 +1,8 @@
+.command-preview { margin-bottom: 12px; padding: 16px; }
+.command-preview .panel-title-row { align-items: flex-start; }
+.command-preview .panel-title-row h2 { margin: 2px 0 5px; font-size: 13px; }
+.command-preview .panel-title-row p { color: #929ba8; font-size: 11px; }
+.command-preview-row { display: grid; gap: 5px; padding: 10px 0; border-top: 1px solid #2e333d; }
+.command-preview-row strong { color: #d5dae3; font-size: 11px; }
+.command-preview-row code { overflow-wrap: anywhere; color: #a9c3e1; font-size: 11px; }
+.command-preview-row small { color: #858e9c; font-size: 10px; line-height: 1.5; }

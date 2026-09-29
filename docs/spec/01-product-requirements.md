@@ -26,17 +26,18 @@ Each requirement ID is stable for planning and verification. `M` is required for
 
 | ID | Priority | Requirement | Acceptance test |
 |---|---|---|---|
-| FR-01 | M | Sign in to ADO Services with delegated Entra identity and sign out | User can complete system-browser sign-in, reopen app without plaintext token storage, and revoke local session |
-| FR-02 | M | Select an accessible organization and project | App lists accessible projects for chosen org; forbidden org/project yields an actionable error without leaking data |
-| FR-03 | M | Search and filter requirement work items by ID, title, state and type; browse child tasks | Results include actual ADO type/state/ID; parent-child relationship is shown; paging and empty/error states work |
-| FR-04 | M | Add/remove work items to a persistent local QA queue | Selection survives restart; duplicates are prevented by org/project/work-item ID; inaccessible items are marked stale |
+| FR-01 | M | On first launch, sign in to ADO Services through the user's Azure CLI account, then disconnect from the app | User can use **Sign in with Azure DevOps** to complete `az login` in the system browser without an app registration or client ID; an Entra-backed ADO token is used only in the main process; disconnect does not run `az logout` |
+| FR-02 | M | Discover, add, validate and switch among accessible organizations for the signed-in account; select a project | App lists organizations where membership discovery succeeds, validates a manually added organization before saving, remembers choices per account, and lists accessible projects; forbidden org/project yields an actionable error without leaking data |
+| FR-03 | M | Search and filter requirement/Story work items by ID, title, state and type; browse child Tasks and filter sprint Tasks by taskboard column | Results include actual ADO type/state/ID and revision; child Tasks are shown under their parent with sprint-board columns; ID/title and multi-select column filters narrow Tasks without hiding a matching parent Story; paging and empty/error states work |
+| FR-04 | M | Add/remove a Requirement/Story and selected child Tasks to a persistent local QA Queue | Selection survives restart; each queued Story is the main row with associated queued Tasks nested as separate rows; standalone Tasks remain visible; duplicates are prevented by org/project/work-item ID; inaccessible items are marked stale; no ADO write occurs |
+| FR-13 | M | Save, edit, validate and switch among account-scoped Azure DevOps run profiles | Settings supports multiple org/project/team/taskboard-column/Story-ID profiles; selecting one loads configured Stories and current-sprint Tasks from the chosen board column; metadata remains encrypted locally |
 | FR-05 | M | Choose repository, site URL, or both per run | Preflight requires at least one reachable/configured target; report states what was and was not exercised |
 | FR-06 | M | Select local repository folder or ADO Git repository/ref and freeze source identity | Run records commit SHA or immutable copied snapshot hash; dirty local tree is identified; original working tree is not modified |
 | FR-07 | M | Extract acceptance criteria and task context into a reviewable QA contract | Each criterion has stable ID, source reference, expected behavior, scenarios and evidence requirements; user can edit before run |
 | FR-08 | M | Show provider disclosure preview and enforce configured model budget | User sees fields/files/snippets to be sent, can exclude them, and can stop before transmission; over-budget preflight blocks or asks for new user-set limit |
 | FR-09 | M | Run configured existing repository tests in constrained disposable workspace | Only allowlisted commands from reviewed config execute; exit, stdout/stderr excerpts and test result files are captured; timeout/cancel kill descendants |
 | FR-10 | M | Execute criterion-linked browser checks using Playwright | Browser worker performs repeatable steps and assertions against allowlisted origin; failed checks keep trace/screenshot and assertion output |
-| FR-11 | M | Map observations to criteria and distinguish failure causes | Each criterion shows evidence links and `VERIFIED`, `FAILED`, `UNVERIFIED`, or `BLOCKED`; product/test/environment/ambiguous classifications are explicit |
+| FR-11 | M | Map observations to criteria and distinguish failure causes | Each criterion shows its direct observations and allows restricted encrypted artifacts to be saved through a warning and native file picker; `VERIFIED`, `FAILED`, `UNVERIFIED`, or `BLOCKED` is explicit; product/test/environment/ambiguous classifications are explicit |
 | FR-12 | M | Compute auditable run verdict and export report | `PASS`, `FAIL`, `NEEDS_REVIEW`, `BLOCKED` policy matches [engine spec](03-qa-engine.md); HTML/Markdown/JSON export excludes secrets |
 | FR-13 | M | Cancel/retry runs and inspect history | Cancellation leaves a partial report; retry creates a new manifest linked to prior run; user can delete run and artifacts |
 | FR-14 | L | Generate new tests and bounded exploratory flows | Generated tests stay in disposable workspace until user explicitly exports; no healer silently changes assertions |
@@ -47,14 +48,14 @@ Each requirement ID is stable for planning and verification. `M` is required for
 
 | ID | Requirement | Verification gate |
 |---|---|---|
-| NFR-01 | Windows 11 and supported macOS versions for current Electron release; x64 and arm64 where build chain permits | Signed installer smoke test on clean Windows and macOS VMs; architecture matrix recorded before release |
+| NFR-01 | Windows 11 and supported macOS versions for current Electron release; x64 and arm64 where build chain permits | Launchable Windows `.exe` and macOS app smoke tests on clean hosts; record OS/architecture matrix. Code signing/notarization is outside v1; show users the OS trust warning where applicable. |
 | NFR-02 | No first-party hosted storage or telemetry by default | Network test shows only Microsoft identity/ADO, approved AI provider, approved site, explicitly approved dependency registries and update endpoint traffic; telemetry opt-in only if later added |
 | NFR-03 | Credentials never appear in renderer, prompts, logs, reports or worker environments | Automated secret-canary tests across all outputs plus manual trace inspection |
 | NFR-04 | Runs are reproducible enough to audit | Manifest contains ADO revision, source identity, URL, contract/config/tool/model versions and time; report references manifest |
 | NFR-05 | Runs respect user-set limits | Tests prove wall-time, action, token, artifact-size and child-process cancellation limits |
 | NFR-06 | A failed or uncertain check cannot turn into pass through test regeneration | Fault-injection cases in verdict test suite; changed assertion invalidates prior observation |
 | NFR-07 | Local data is recoverable and deletable | Schema migration/backup and delete-run tests; interrupted run leaves readable partial report |
-| NFR-08 | Accessibility of desktop workflow | Keyboard-only completion of connect, search, queue, run and report; labeled controls and focus behavior reviewed |
+| NFR-08 | Accessibility and responsive desktop workflow | Keyboard-only completion of sign-in, organization/project selection, search, queue, run and report; labeled controls and visible focus reviewed; first-run and work-selection screens fit an 800px-wide window without horizontal scrolling |
 | NFR-09 | Useful performance on ordinary developer hardware | Pilot target: search results within 3 seconds after ADO response; app UI stays responsive during 30-minute run; exact hardware and measurements published with release |
 | NFR-10 | Confidential local work-item and evidence storage | Database and retained artifacts are encrypted at rest with OS-protected keys; file permissions are private; temporary plaintext lifetime is bounded and disclosed |
 
@@ -67,6 +68,7 @@ Each requirement ID is stable for planning and verification. `M` is required for
 5. **Disputed failure:** a generated UI locator breaks while the product works; classify test failure, preserve trace and prior assertion, and avoid a product-failure claim.
 6. **Unsafe target:** URL redirects to a new origin or the selected repo config contains an unapproved command; worker stops and reports `BLOCKED` with the reason.
 7. **Stale source:** ADO item revision or repository ref changes between selection and run; app warns and freezes the latest user-approved snapshot.
+8. **First-run onboarding and queue:** user signs in with the ADO-branded action, chooses a discovered organization or adds a validated one, selects a project, expands a Story's child Tasks and adds the Story, selected Tasks or both to the local queue. The parent acceptance criteria remain distinct from Task context.
 
 ## Success measures for pilot
 

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "profiles": [
+    {
+      "name": "Derse QA",
+      "organization": "https://dev.azure.com/Xorbix",
+      "project": {
+        "name": "Derse"
+      },
+      "team": "Derse Team",
+      "boardColumn": "QA / Dev Env",
+      "storyIds": [20024, 19997]
+    }
+  ]
+}

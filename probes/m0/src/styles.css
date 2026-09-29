@@ -1,0 +1,37 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  color: #f2f5f9;
+  background: #0c1118;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 540px; min-height: 100vh; }
+.shell { width: min(100%, 840px); margin: 0 auto; padding: 30px 42px 26px; }
+.topbar { display: flex; align-items: center; gap: 12px; border-bottom: 1px solid #222d3a; padding-bottom: 21px; }
+.brand-mark { width: 36px; height: 36px; display: grid; place-items: center; background: #9ef0dc; color: #0c2625; border-radius: 11px; font-weight: 800; font-size: 12px; letter-spacing: -.4px; }
+.brand-copy { display: flex; flex-direction: column; gap: 1px; }
+.brand-copy strong { font-size: 13px; letter-spacing: .15px; }
+.brand-copy span, .label { color: #91a0b1; font-size: 11px; }
+.status-pill { margin-left: auto; display: flex; align-items: center; gap: 7px; border: 1px solid #31443f; padding: 6px 10px; border-radius: 20px; color: #a7d6c8; font-size: 10px; letter-spacing: .2px; }
+.status-pill i { width: 6px; height: 6px; border-radius: 50%; background: #80d6b9; }
+.intro { padding: 37px 0 27px; }
+.eyebrow { margin: 0 0 11px; color: #87ceb9; font-size: 9px; font-weight: 700; letter-spacing: 1.2px; }
+h1, h2 { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; letter-spacing: -.7px; }
+h1 { max-width: 610px; font-size: 27px; line-height: 1.18; }
+.description { max-width: 530px; color: #9caabb; font-size: 12px; line-height: 1.65; margin: 11px 0 0; }
+.runtime-card { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; padding: 17px 18px; background: #141d27; border: 1px solid #273442; border-radius: 12px; }
+.runtime-card > div { display: flex; flex-direction: column; gap: 7px; }
+.runtime-card strong { font-size: 12px; font-weight: 600; }
+.gates { margin-top: 25px; }
+.section-heading { display: flex; justify-content: space-between; align-items: end; margin-bottom: 11px; }
+h2 { font-size: 17px; }
+.not-run-count { color: #a6b3c1; font-size: 10px; padding: 5px 8px; border-radius: 6px; background: #18232e; }
+.gates ul { list-style: none; margin: 0; padding: 0; border: 1px solid #273442; border-radius: 11px; overflow: hidden; }
+.gates li { min-height: 43px; display: flex; align-items: center; gap: 10px; padding: 0 13px; color: #d4dbe4; font-size: 11px; border-bottom: 1px solid #222d39; }
+.gates li:last-child { border-bottom: 0; }
+.gate-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; border: 1px solid #637386; }
+.not-run { margin-left: auto; color: #8392a4; font-size: 10px; }
+footer { padding-top: 20px; color: #718195; font-size: 10px; }
