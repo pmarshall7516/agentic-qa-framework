@@ -12,7 +12,7 @@ import type { AdoClient } from '@agentic-qa/ado/client';
 
 const execFile = promisify(execFileCallback);
 
-function fixture(browserStatus: 'PASSED' | 'FAILED' = 'PASSED', chooseModelKeyFile?: () => Promise<string | undefined>, signOutChoice: () => Promise<'keep' | 'delete' | 'cancel'> = async () => 'keep', evidenceRoot?: string) {
+function fixture(browserStatus: 'PASSED' | 'FAILED' = 'PASSED', chooseModelKeyFile?: () => Promise<string | undefined>, signOutChoice: () => Promise<'keep' | 'delete' | 'cancel'> = async () => 'keep', evidenceRoot?: string, saveAdoProfilesConfig?: (contents: string) => Promise<boolean>) {
   const settings = new Map<string, unknown>();
   const queue: any[] = [];
   const snapshots = new Map<string, any>();
@@ -58,6 +58,11 @@ function fixture(browserStatus: 'PASSED' | 'FAILED' = 'PASSED', chooseModelKeyFi
     listOrganizations: vi.fn(async () => [{ id: 'org-id-1', name: 'org' }]),
     listProjects: vi.fn(async () => [{ id: 'project-1', name: 'Project One' }]),
     getWorkItemTypes: vi.fn(async () => ['User Story', 'Task']),
+    listTeams: vi.fn(async () => [{ id: 'team-1', name: 'QA Team' }]),
+    listTeamIterations: vi.fn(async () => []),
+    getTaskboardItems: vi.fn(async () => []),
+    getChildIds: vi.fn(async () => []),
+    getWorkItemTypeStates: vi.fn(async () => []),
     search: vi.fn(async () => [{ id: 17, organization: 'org', projectId: 'project-1' }]),
     fetchWorkItems: vi.fn(async (_token: string, input: any) => input.ids.map((id: number) => ({
       organization: input.organization, projectId: input.projectId, projectName: input.projectName,
@@ -70,7 +75,7 @@ function fixture(browserStatus: 'PASSED' | 'FAILED' = 'PASSED', chooseModelKeyFi
     observation: { id: randomUUID(), runId: input.runId, scenarioId: input.scenario.id, status: browserStatus, worker: 'browser', startedAt: '2026-09-27T12:00:00.000Z', endedAt: '2026-09-27T12:00:01.000Z', assertion: browserStatus === 'PASSED' ? 'Expected text is visible.' : 'Expected text was not visible.', artifactIds: [], sourceIdentity: new URL(input.target.siteBaseUrl).origin },
     artifacts: [], cancelled: false,
   }));
-  const controller = new DesktopController({ store, authFactory: async () => auth, ado, browserScenarioRunner: browserScenarioRunner as any, sitePreflight: async () => undefined, browserExecutablePath: () => process.execPath, confirmDeleteRun: async () => true, selectSignOutDataAction: signOutChoice, chooseModelKeyFile, evidenceRoot });
+  const controller = new DesktopController({ store, authFactory: async () => auth, ado, browserScenarioRunner: browserScenarioRunner as any, sitePreflight: async () => undefined, browserExecutablePath: () => process.execPath, confirmDeleteRun: async () => true, selectSignOutDataAction: signOutChoice, chooseModelKeyFile, evidenceRoot, saveAdoProfilesConfig });
   return { controller, settings, store, auth, ado, queue, snapshots, runRecords, browserScenarioRunner };
 }
 
@@ -207,6 +212,140 @@ describe('desktop controller', () => {
     }));
   });
 
+  it('loads teams from the organization and project currently entered in the profile form', async () => {
+    const { controller, ado } = fixture();
+
+    await expect(controller.listAdoTeams({ organization: 'other-org', project: { name: 'Project One' } })).resolves.toEqual([{ id: 'team-1', name: 'QA Team' }]);
+
+    expect(ado.listProjects).toHaveBeenCalledWith('secret-token', 'other-org');
+    expect(ado.listTeams).toHaveBeenCalledWith('secret-token', 'other-org', 'project-1');
+  });
+
+  it('lists iterations only for the active validated profile team', async () => {
+    const { controller, settings, ado } = fixture();
+    const profileId = '55555555-5555-4555-8555-555555555555';
+    settings.set('ado.profiles.account-1', [{ id: profileId, name: 'QA', organization: 'org', project: { id: 'project-1', name: 'Project One' }, team: 'QA Team', boardColumn: 'Ready', storyIds: [] }]);
+    settings.set('ado.activeProfile.account-1', profileId);
+    (ado.listTeamIterations as any).mockResolvedValue([{ id: '11111111-1111-4111-8111-111111111111', name: 'Sprint 1', path: 'Project One\\Sprint 1' }]);
+
+    await expect((controller as any).listProfileIterations()).resolves.toEqual([{ id: '11111111-1111-4111-8111-111111111111', name: 'Sprint 1', path: 'Project One\\Sprint 1' }]);
+    expect(ado.listTeamIterations).toHaveBeenCalledWith('secret-token', 'org', 'project-1', 'QA Team');
+  });
+
+  it('loads taskboard columns only for a sprint available to the active profile team', async () => {
+    const { controller, settings, ado } = fixture();
+    const profileId = '55555555-5555-4555-8555-555555555555';
+    const iterationId = '11111111-1111-4111-8111-111111111111';
+    settings.set('ado.profiles.account-1', [{ id: profileId, name: 'QA', organization: 'org', project: { id: 'project-1', name: 'Project One' }, team: 'QA Team', boardColumn: '', storyIds: [] }]);
+    settings.set('ado.activeProfile.account-1', profileId);
+    (ado.listTeamIterations as any).mockResolvedValue([{ id: iterationId, name: 'Sprint 1', path: 'Project One\\Sprint 1' }]);
+    (ado.getTaskboardItems as any).mockResolvedValue([{ workItemId: 17, column: 'In Progress', state: 'Active' }]);
+
+    await expect(controller.listSprintTaskboard(iterationId)).resolves.toEqual([{ workItemId: 17, column: 'In Progress', state: 'Active' }]);
+    expect(ado.getTaskboardItems).toHaveBeenCalledWith('secret-token', 'org', 'project-1', 'QA Team', iterationId);
+    await expect(controller.listSprintTaskboard('22222222-2222-4222-8222-222222222222')).rejects.toThrow('not available to the active profile team');
+    expect(ado.getTaskboardItems).toHaveBeenCalledOnce();
+  });
+
+  it('searches a sprint for Requirements in proposed or in-progress states by their actual type', async () => {
+    const { controller, settings, ado } = fixture();
+    const profileId = '55555555-5555-4555-8555-555555555555';
+    settings.set('ado.profiles.account-1', [{ id: profileId, name: 'QA', organization: 'org', project: { id: 'project-1', name: 'Project One' }, team: 'QA Team', boardColumn: 'Ready', storyIds: [] }]);
+    settings.set('ado.activeProfile.account-1', profileId);
+    (ado.listTeamIterations as any).mockResolvedValue([{ id: '11111111-1111-4111-8111-111111111111', name: 'Sprint 1', path: 'Project One\\Sprint 1' }]);
+    (ado.getWorkItemTypeStates as any).mockResolvedValue([{ name: 'New', category: 'Proposed' }, { name: 'Doing', category: 'InProgress' }, { name: 'Done', category: 'Completed' }]);
+    (ado.search as any).mockResolvedValue({ items: [] });
+
+    await (controller as any).searchActiveStories('11111111-1111-4111-8111-111111111111');
+
+    expect(ado.search).toHaveBeenCalledWith('secret-token', expect.objectContaining({
+      organization: 'org', projectId: 'project-1', iterationPath: 'Project One\\Sprint 1',
+      statesByType: { 'User Story': ['New', 'Doing'] },
+    }));
+  });
+
+  it('adds a bounded, unique selection to the queue with one batched work-item fetch', async () => {
+    const { controller, store, ado } = fixture();
+    await controller.selectOrganization('org');
+    await controller.selectProject({ id: 'project-1', name: 'Project One' });
+
+    await controller.addQueueItems([{ workItemId: 17 }, { workItemId: 18 }, { workItemId: 17 }]);
+
+    expect(ado.fetchWorkItems).toHaveBeenCalledTimes(1);
+    expect(ado.fetchWorkItems).toHaveBeenCalledWith('secret-token', expect.objectContaining({ ids: [17, 18] }));
+    expect(store.addToQueue).toHaveBeenCalledTimes(2);
+  });
+
+  it('persists a validated Task-to-Story relationship when batch ADO details omit parent relations', async () => {
+    const { controller, store, ado } = fixture();
+    await controller.selectOrganization('org');
+    await controller.selectProject({ id: 'project-1', name: 'Project One' });
+    (ado.fetchWorkItems as any).mockImplementationOnce(async (_token: string, input: any) => input.ids.map((id: number) => ({
+      organization: input.organization, projectId: input.projectId, projectName: input.projectName, id, revision: 1,
+      type: id === 17 ? 'User Story' : 'Task', kind: id === 17 ? 'REQUIREMENT' : 'TASK', title: `Item ${id}`, state: 'New',
+      url: `https://dev.azure.com/${input.organization}/${input.projectId}/_workitems/edit/${id}`, retrievedAt: '2026-01-01T00:00:00.000Z',
+    })));
+    (ado.getChildIds as any).mockResolvedValue([18]);
+
+    await controller.addQueueItems([{ workItemId: 18, parentId: 17 }]);
+
+    expect(ado.fetchWorkItems).toHaveBeenCalledWith('secret-token', expect.objectContaining({ ids: [18, 17] }));
+    expect(ado.getChildIds).toHaveBeenCalledWith('secret-token', { organization: 'org', parentId: 17 });
+    expect(store.addToQueue).toHaveBeenCalledWith(expect.objectContaining({ id: 18, kind: 'TASK', parentId: 17 }));
+  });
+
+  it('rejects a forged or stale Task-to-Story relationship before adding any selected item', async () => {
+    const { controller, store, ado } = fixture();
+    await controller.selectOrganization('org');
+    await controller.selectProject({ id: 'project-1', name: 'Project One' });
+    (ado.fetchWorkItems as any).mockImplementationOnce(async (_token: string, input: any) => input.ids.map((id: number) => ({
+      organization: input.organization, projectId: input.projectId, projectName: input.projectName, id, revision: 1,
+      type: id === 17 ? 'User Story' : 'Task', kind: id === 17 ? 'REQUIREMENT' : 'TASK', title: `Item ${id}`, state: 'New',
+      url: `https://dev.azure.com/${input.organization}/${input.projectId}/_workitems/edit/${id}`, retrievedAt: '2026-01-01T00:00:00.000Z',
+    })));
+
+    await expect(controller.addQueueItems([{ workItemId: 18, parentId: 17 }])).rejects.toThrow('no longer linked');
+    expect(store.addToQueue).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unsupported selected work item before writing any of the batch to the queue', async () => {
+    const { controller, store, ado } = fixture();
+    await controller.selectOrganization('org');
+    await controller.selectProject({ id: 'project-1', name: 'Project One' });
+    (ado.fetchWorkItems as any).mockImplementationOnce(async (_token: string, input: any) => input.ids.map((id: number) => ({
+      organization: input.organization, projectId: input.projectId, projectName: input.projectName,
+      id, revision: 1, type: id === 18 ? 'Bug' : 'User Story', kind: id === 18 ? 'OTHER' : 'REQUIREMENT', title: `Item ${id}`, state: 'New',
+      url: `https://dev.azure.com/${input.organization}/${input.projectId}/_workitems/edit/${id}`, retrievedAt: '2026-01-01T00:00:00.000Z',
+    })));
+
+    await expect(controller.addQueueItems([{ workItemId: 17 }, { workItemId: 18 }])).rejects.toThrow('No selected items were added');
+
+    expect(store.addToQueue).not.toHaveBeenCalled();
+  });
+
+  it('exports saved profile settings without app secrets or work-item payloads', async () => {
+    const serialized: string[] = [];
+    const { controller, settings } = fixture('PASSED', undefined, undefined, undefined, async (contents) => {
+      serialized.push(contents);
+      return true;
+    });
+    settings.set('ado.profiles.account-1', [{
+      id: '55555555-5555-4555-8555-555555555555', name: 'Portal QA', organization: 'contoso',
+      project: { id: 'project-1', name: 'Portal', state: 'wellFormed' }, team: 'Portal Team',
+      boardColumn: 'Ready for QA', storyIds: [42, 43],
+    }]);
+    settings.set('model.apiKey', 'secret-key-canary');
+
+    await expect((controller as any).exportAdoProfilesConfig()).resolves.toBe(true);
+
+    expect(JSON.parse(serialized[0]!)).toEqual({ schemaVersion: 1, profiles: [{
+      name: 'Portal QA', organization: 'contoso',
+      project: { id: 'project-1', name: 'Portal', state: 'wellFormed' },
+      team: 'Portal Team', boardColumn: 'Ready for QA', storyIds: [42, 43],
+    }] });
+    expect(serialized[0]).not.toContain('secret-key-canary');
+  });
+
   it('persists project-scoped custom work item mappings and applies them to searches', async () => {
     const { controller, ado } = fixture();
     (ado.getWorkItemTypes as any).mockResolvedValue(['Feature Request', 'Task']);
@@ -326,6 +465,26 @@ describe('desktop controller', () => {
     expect(rerun.contract.scenarios.every(({ approved: isApproved }) => !isApproved)).toBe(true);
     expect(store.createRun).toHaveBeenCalledOnce();
     expect(runRecords.get(first.manifest.runId).report.verdict).toBe('PASS');
+  });
+
+  it('restores verified Story and Task grouping when refreshing an older queue without parent links', async () => {
+    const { controller, queue, snapshots, ado, store } = fixture();
+    const story = { organization: 'org', projectId: 'project-1', projectName: 'Project One', id: 48, revision: 2, type: 'User Story', kind: 'REQUIREMENT', title: 'Search', state: 'Active', acceptanceCriteria: 'Results appear', url: 'https://dev.azure.com/org/project-1/_workitems/edit/48', retrievedAt: '2026-09-27T12:00:00.000Z' };
+    const task = { ...story, id: 49, revision: 1, type: 'Task', kind: 'TASK', title: 'Build search UI', acceptanceCriteria: undefined, url: 'https://dev.azure.com/org/project-1/_workitems/edit/49' };
+    queue.push(
+      { key: 'org:project-1:48', organization: 'org', projectId: 'project-1', workItemId: 48, queuedAt: '2026-09-27T12:00:00.000Z', stale: false },
+      { key: 'org:project-1:49', organization: 'org', projectId: 'project-1', workItemId: 49, queuedAt: '2026-09-27T12:00:00.000Z', stale: false },
+    );
+    snapshots.set('org:project-1:48', story);
+    snapshots.set('org:project-1:49', task);
+    (store.getQueue as any).mockResolvedValueOnce([...queue]);
+    (ado.getChildIds as any).mockResolvedValue([49]);
+    (ado.fetchWorkItems as any).mockImplementation(async (_token: string, input: any) => input.ids.map((id: number) => id === 48 ? story : task));
+
+    await controller.refreshQueue();
+
+    expect(ado.getChildIds).toHaveBeenCalledWith('secret-token', { organization: 'org', parentId: 48 });
+    expect(store.addToQueue).toHaveBeenCalledWith({ ...task, parentId: 48 });
   });
 
   it('marks an ADO item stale when its revision changes after draft creation and refuses approval', async () => {

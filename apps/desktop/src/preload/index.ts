@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { DesktopApi, DraftPlan, SearchItemsInput, TargetConfig } from '../shared/ipc.js';
+import type { DesktopApi, DraftPlan, QueueWorkItemSelection, SearchItemsInput, TargetConfig } from '../shared/ipc.js';
 import type { AdoProject } from '@agentic-qa/ado/client';
 
 const api: DesktopApi = Object.freeze({
@@ -15,11 +15,17 @@ const api: DesktopApi = Object.freeze({
   activateAdoProfile: (profileId: string) => ipcRenderer.invoke('qa:activate-ado-profile', profileId),
   deleteAdoProfile: (profileId: string) => ipcRenderer.invoke('qa:delete-ado-profile', profileId),
   importAdoProfilesConfig: () => ipcRenderer.invoke('qa:import-ado-profiles'),
+  exportAdoProfilesConfig: () => ipcRenderer.invoke('qa:export-ado-profiles-config'),
   loadActiveProfileWorkItems: () => ipcRenderer.invoke('qa:load-profile-work-items'),
+  listProfileIterations: () => ipcRenderer.invoke('qa:list-profile-iterations'),
+  listSprintTaskboard: (iterationId: string) => ipcRenderer.invoke('qa:list-sprint-taskboard', iterationId),
+  listAdoTeams: (input: Parameters<DesktopApi['listAdoTeams']>[0]) => ipcRenderer.invoke('qa:list-ado-teams', input),
+  searchActiveStories: (iterationId: string, afterId?: number) => ipcRenderer.invoke('qa:search-active-stories', iterationId, afterId),
   listWorkItemTypes: () => ipcRenderer.invoke('qa:list-work-item-types'),
   saveWorkItemTypeMapping: (type: string, kind: 'REQUIREMENT' | 'TASK' | 'OTHER') => ipcRenderer.invoke('qa:save-work-item-type-mapping', type, kind),
   searchItems: (input: SearchItemsInput) => ipcRenderer.invoke('qa:search-items', input),
   addQueueItem: (workItemId: number) => ipcRenderer.invoke('qa:add-queue-item', workItemId),
+  addQueueItems: (items: QueueWorkItemSelection[]) => ipcRenderer.invoke('qa:add-queue-items', items),
   removeQueueItem: (key: string) => ipcRenderer.invoke('qa:remove-queue-item', key),
   moveQueueItem: (key: string, direction: 'up' | 'down') => ipcRenderer.invoke('qa:move-queue-item', key, direction),
   refreshQueue: () => ipcRenderer.invoke('qa:refresh-queue'),

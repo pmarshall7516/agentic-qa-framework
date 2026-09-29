@@ -27,12 +27,13 @@ The requirements and security rules constrain the architecture. If docs conflict
 ## Implementation workflow
 
 1. Inspect the current branch, working tree, relevant code, package scripts and all applicable `AGENTS.md` files before editing. Keep user changes intact.
-2. Identify the milestone and requirement IDs this change delivers. Check that it fits the first-release scope and its documented exit gate.
-3. Define or confirm the interface before parallel implementation: domain types, IPC messages, worker messages, storage migrations and adapter contracts. Keep contracts versioned where workers or persisted data cross a process boundary.
-4. Implement the smallest end-to-end slice that demonstrates the requirement. Keep deterministic execution, data collection and verdict calculation in ordinary code; use an LLM only for bounded interpretation/planning/review.
-5. Add behavior-focused tests for the changed contract, including relevant failure, privacy and cancellation paths. Run the targeted checks and platform build checks required by the milestone. Report the exact commands and outcomes; do not claim a check passed without fresh output.
-6. Update the relevant spec and this file when an approved implementation decision changes product behavior, permissions, data handling, platform support or package ownership.
-7. Hand off with changed paths, requirement IDs, interface changes, checks run, known limitations and the next dependency. Leave unrelated files untouched.
+2. Work directly in this repository's current checkout for this user. Do not create or use Git worktrees unless the user explicitly changes this preference.
+3. Identify the milestone and requirement IDs this change delivers. Check that it fits the first-release scope and its documented exit gate.
+4. Define or confirm the interface before parallel implementation: domain types, IPC messages, worker messages, storage migrations and adapter contracts. Keep contracts versioned where workers or persisted data cross a process boundary.
+5. Implement the smallest end-to-end slice that demonstrates the requirement. Keep deterministic execution, data collection and verdict calculation in ordinary code; use an LLM only for bounded interpretation/planning/review.
+6. Add behavior-focused tests for the changed contract, including relevant failure, privacy and cancellation paths. Run the targeted checks and platform build checks required by the milestone. Report the exact commands and outcomes; do not claim a check passed without fresh output.
+7. Update the relevant spec and this file when an approved implementation decision changes product behavior, permissions, data handling, platform support or package ownership.
+8. Hand off with changed paths, requirement IDs, interface changes, checks run, known limitations and the next dependency. Leave unrelated files untouched.
 
 ## Delegation and parallel work
 

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "profiles": [
+    {
+      "name": "Derse QA",
+      "organization": "Xorbix",
+      "project": {
+        "id": "5f257ac2-0738-4fe5-85a8-f3d031607db2",
+        "name": "Derse",
+        "state": "wellFormed"
+      },
+      "team": "Derse Team",
+      "boardColumn": "",
+      "storyIds": []
+    }
+  ]
+}

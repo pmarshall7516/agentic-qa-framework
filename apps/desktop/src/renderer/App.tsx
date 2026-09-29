@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { AdoGitRef, AdoGitRepository, AdoProject } from '@agentic-qa/ado/client';
+import type { AdoGitRef, AdoGitRepository, AdoProject, AdoTeam } from '@agentic-qa/ado/client';
 import type { WorkItemSnapshot } from '@agentic-qa/domain/work-item';
 import type { Scenario } from '@agentic-qa/domain/qa-contract';
 import type { AppScreen, DesktopApi, DesktopState, DraftPlan, ModelPayloadPreview, QueueItemView, TargetConfig } from '../shared/ipc.js';
+import { errorMessage } from './error-message.js';
+import { SprintWorkPicker } from './SprintWorkPicker.js';
 
 const navigation: Array<{ id: AppScreen; label: string }> = [
   { id: 'work-items', label: 'Work items' },
@@ -20,14 +22,6 @@ const EMPTY_STATE: DesktopState = {
   modelId: 'gpt-5.6-terra',
   modelMaxOutputTokens: 1200,
 };
-
-function errorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : '';
-  if (/AdoRequestError|Azure DevOps request failed|Error invoking remote method/i.test(message)) {
-    return 'Azure DevOps could not complete this request. Check your connection and organization access, then try again.';
-  }
-  return message || 'The requested operation could not be completed.';
-}
 
 function projectLabel(project?: AdoProject): string {
   return project?.name ?? 'Choose a project';
@@ -100,13 +94,51 @@ function WorkItemCard({
       <button
         className={queued ? 'button quiet' : 'button outline'}
         type="button"
-        disabled={queued}
+        disabled={queued || (item.kind !== 'REQUIREMENT' && item.kind !== 'TASK')}
         onClick={() => onAdd(item.id)}
       >
         {queued ? 'Queued' : 'Add to queue'}
       </button>
     </article>
   );
+}
+
+function QueueWorkItemRow({ view, index, queueLength, busy, onMove, onRemove }: {
+  view: QueueItemView;
+  index: number;
+  queueLength: number;
+  busy: boolean;
+  onMove: (key: string, direction: 'up' | 'down') => void;
+  onRemove: (key: string) => void;
+}) {
+  const { entry, snapshot } = view;
+  const task = snapshot?.kind === 'TASK';
+  return <article className={`queue-card ${task ? 'queue-card-task' : 'queue-card-story'}`}>
+    <span className="queue-index">{String(index + 1).padStart(2, '0')}</span>
+    <div className="queue-copy"><div className="work-meta"><span>{snapshot?.type ?? 'Work item'}</span><span>#{entry.workItemId}</span><span>{snapshot?.projectName ?? entry.projectId}</span>{snapshot?.parentId ? <span>Parent #{snapshot.parentId}</span> : null}</div><h3>{snapshot?.title ?? 'Work item details unavailable'}</h3><p>{entry.organization} · {snapshot?.state ?? 'Unknown state'} · Revision {snapshot?.revision ?? '—'}</p>{entry.stale ? <span className="stale-badge">Source changed or inaccessible · refresh before run</span> : null}</div>
+    <div className="queue-actions"><button aria-label={`Move item ${entry.workItemId} up`} className="icon-button" disabled={busy || index === 0} onClick={() => onMove(entry.key, 'up')}>↑</button><button aria-label={`Move item ${entry.workItemId} down`} className="icon-button" disabled={busy || index === queueLength - 1} onClick={() => onMove(entry.key, 'down')}>↓</button><button className="text-button remove-button" type="button" disabled={busy} onClick={() => onRemove(entry.key)}>Remove</button></div>
+  </article>;
+}
+
+function buildQueueProjectGroups(queue: QueueItemView[]) {
+  const projects = new Map<string, { key: string; label: string; items: Array<{ view: QueueItemView; index: number }> }>();
+  queue.forEach((view, index) => {
+    const { entry } = view;
+    const key = `${entry.organization.toLocaleLowerCase('en-US')}:${entry.projectId.toLocaleLowerCase('en-US')}`;
+    const project = projects.get(key) ?? { key, label: `${entry.organization} / ${view.snapshot?.projectName ?? entry.projectId}`, items: [] };
+    project.items.push({ view, index });
+    projects.set(key, project);
+  });
+  return [...projects.values()].map((project) => {
+    const stories = project.items.filter(({ view }) => view.snapshot?.kind === 'REQUIREMENT').map((story) => {
+      const tasks = project.items.filter(({ view }) => view.snapshot?.kind === 'TASK' && view.snapshot.parentId === story.view.entry.workItemId);
+      return { story, tasks };
+    });
+    const nestedTaskKeys = new Set(stories.flatMap(({ tasks }) => tasks.map(({ view }) => view.entry.key)));
+    const storyKeys = new Set(stories.map(({ story }) => story.view.entry.key));
+    const otherItems = project.items.filter(({ view }) => !storyKeys.has(view.entry.key) && !nestedTaskKeys.has(view.entry.key));
+    return { ...project, stories, otherItems };
+  });
 }
 
 function PlanSummary({ draftPlan, queue, target }: { draftPlan?: DraftPlan; queue: QueueItemView[]; target?: TargetConfig }) {
@@ -152,6 +184,7 @@ export function App({
   const [organizations, setOrganizations] = useState<Array<{ id: string; name: string }>>([]);
   const [projects, setProjects] = useState<AdoProject[]>([]);
   const [workItemTypes, setWorkItemTypes] = useState<string[]>([]);
+  const [adoTeams, setAdoTeams] = useState<AdoTeam[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [typeFilter, setTypeFilter] = useState('');
   const [stateFilter, setStateFilter] = useState('');
@@ -197,9 +230,10 @@ export function App({
   const [reviewReason, setReviewReason] = useState('');
 
   const queuedIds = useMemo(
-    () => new Set(state.queue.map(({ entry }) => `${entry.organization}:${entry.projectId}:${entry.workItemId}`)),
+    () => new Set(state.queue.map(({ entry }) => `${entry.organization.toLowerCase()}:${entry.projectId}:${entry.workItemId}`)),
     [state.queue],
   );
+  const queueProjectGroups = useMemo(() => buildQueueProjectGroups(state.queue), [state.queue]);
 
   useEffect(() => {
     if (initialState) return;
@@ -772,6 +806,7 @@ export function App({
             <section className="page-section">
               <div className="page-heading"><div><p className="eyebrow">WORK ITEMS</p><h1>Find work to verify</h1></div></div>
               <p className="page-description">Search Stories and Tasks in <strong>{projectLabel(state.selectedProject)}</strong>. Add a Story, its child Tasks, or both to the local QA Queue.</p>
+              <SprintWorkPicker api={api} activeAdoProfileId={state.activeAdoProfileId} queuedIds={queuedIds} onQueueChanged={updateState} onError={setError} onNotice={setNotice} />
               <div className="search-panel">
                 {state.activeAdoProfileId ? <div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void loadConfiguredStories()}>{busy ? 'Loading…' : 'Load configured Stories and sprint tasks'}</button><span className="field-help">Uses the active profile's Story IDs, team, current sprint and board column.</span></div> : <p className="field-help">Save and select a configuration profile in Settings to load configured Stories and tasks automatically.</p>}
                 <label className="field-label" htmlFor="work-search">Work item ID or title</label>
@@ -789,8 +824,8 @@ export function App({
             <section className="page-section">
               <div className="page-heading"><div><p className="eyebrow">READY TO REVIEW</p><h1>Your QA Queue</h1></div><span className="step-count">{state.queue.length} items</span></div>
               <p className="page-description">Selected work stays on this device. Queue order changes presentation only; it does not affect verdict priority.</p>
-              <div className="queue-toolbar"><div><strong>{state.queue.length} selected</strong><span>Grouped by Azure DevOps project</span></div><div className="button-row"><button className="button outline" type="button" disabled={busy || !state.queue.length} onClick={() => void mutateQueue(() => api.refreshQueue())}>{busy ? 'Refreshing…' : 'Refresh source revisions'}</button><button className="button primary" type="button" disabled={!state.queue.length} onClick={() => setScreen('run-setup')}>Start QA</button></div></div>
-              <div className="queue-list">{state.queue.map(({ entry, snapshot }, index) => <article className="queue-card" key={entry.key}><span className="queue-index">{String(index + 1).padStart(2, '0')}</span><div className="queue-copy"><div className="work-meta"><span>{snapshot?.type ?? 'Work item'}</span><span>#{entry.workItemId}</span><span>{snapshot?.projectName ?? entry.projectId}</span></div><h3>{snapshot?.title ?? 'Work item details unavailable'}</h3><p>{entry.organization} · {snapshot?.state ?? 'Unknown state'} · Revision {snapshot?.revision ?? '—'}</p>{entry.stale ? <span className="stale-badge">Source changed or inaccessible · refresh before run</span> : null}</div><div className="queue-actions"><button aria-label={`Move item ${entry.workItemId} up`} className="icon-button" disabled={busy || index === 0} onClick={() => void mutateQueue(() => api.moveQueueItem(entry.key, 'up'))}>↑</button><button aria-label={`Move item ${entry.workItemId} down`} className="icon-button" disabled={busy || index === state.queue.length - 1} onClick={() => void mutateQueue(() => api.moveQueueItem(entry.key, 'down'))}>↓</button><button className="text-button remove-button" type="button" disabled={busy} onClick={() => void mutateQueue(() => api.removeQueueItem(entry.key))}>Remove</button></div></article>)}{!state.queue.length ? <div className="empty-card"><span className="empty-icon">＋</span><strong>Your queue is ready for requirements</strong><p>Search a project and add work items. A task can inform QA scope, but it does not prove its parent’s acceptance criteria.</p><button className="button outline" type="button" onClick={() => setScreen('work-items')}>Find work items</button></div> : null}</div>
+              <div className="queue-toolbar"><div><strong>{state.queue.length} selected</strong><span>Stories with their queued Tasks · grouped by Azure DevOps project</span></div><div className="button-row"><button className="button outline" type="button" disabled={busy || !state.queue.length} onClick={() => void mutateQueue(() => api.refreshQueue())}>{busy ? 'Refreshing…' : 'Refresh source revisions'}</button><button className="button primary" type="button" disabled={!state.queue.length} onClick={() => setScreen('run-setup')}>Start QA</button></div></div>
+              <div className="queue-list">{queueProjectGroups.map((project) => <section className="queue-project-group" aria-label={project.label} key={project.key}><h2>{project.label}</h2>{project.stories.map(({ story, tasks }) => <section className="queue-story-group" aria-label={`Story #${story.view.entry.workItemId} ${story.view.snapshot?.title ?? 'Work item details unavailable'}`} key={story.view.entry.key}><QueueWorkItemRow view={story.view} index={story.index} queueLength={state.queue.length} busy={busy} onMove={(key, direction) => void mutateQueue(() => api.moveQueueItem(key, direction))} onRemove={(key) => void mutateQueue(() => api.removeQueueItem(key))} />{tasks.length ? <div className="queue-task-rows" aria-label={`Tasks under Story #${story.view.entry.workItemId}`}>{tasks.map(({ view, index }) => <QueueWorkItemRow key={view.entry.key} view={view} index={index} queueLength={state.queue.length} busy={busy} onMove={(key, direction) => void mutateQueue(() => api.moveQueueItem(key, direction))} onRemove={(key) => void mutateQueue(() => api.removeQueueItem(key))} />)}</div> : null}</section>)}{project.otherItems.length ? <div className="queue-other-items">{project.stories.length ? <h3>Other queued work</h3> : null}{project.otherItems.map(({ view, index }) => <QueueWorkItemRow key={view.entry.key} view={view} index={index} queueLength={state.queue.length} busy={busy} onMove={(key, direction) => void mutateQueue(() => api.moveQueueItem(key, direction))} onRemove={(key) => void mutateQueue(() => api.removeQueueItem(key))} />)}</div> : null}</section>)}{!state.queue.length ? <div className="empty-card"><span className="empty-icon">＋</span><strong>Your queue is ready for requirements</strong><p>Search a project and add work items. A task can inform QA scope, but it does not prove its parent’s acceptance criteria.</p><button className="button outline" type="button" onClick={() => setScreen('work-items')}>Find work items</button></div> : null}</div>
             </section>
           ) : null}
 
@@ -851,12 +886,13 @@ export function App({
               </div>
               <div className="panel selection-panel">
                 <div className="panel-title-row"><div><h2>Azure DevOps configuration profiles</h2><p>Save each organization/project/team/board-column setup once, then switch profiles before runs. These settings stay encrypted with this app's local data.</p></div></div>
-                <div className="button-row"><button className="button outline" type="button" disabled={busy || !state.selectedAccountId} onClick={() => void importAdoProfilesConfig()}>Import profiles config file…</button><span className="field-help">Load a version 1 JSON file; credentials are never included.</span></div>
+                <div className="button-row"><button className="button outline" type="button" disabled={busy || !state.selectedAccountId} onClick={() => void importAdoProfilesConfig()}>Import profiles config file…</button><button className="button outline" type="button" disabled={busy || !state.adoProfiles?.length} onClick={() => void run(async () => { const saved = await api.exportAdoProfilesConfig(); setNotice(saved ? 'Configuration exported from your saved app settings.' : 'Configuration export canceled.'); })}>Export current settings…</button><span className="field-help">Import or export version 1 JSON; credentials are never included.</span></div>
                 {state.adoProfiles?.length ? <div className="saved-organizations">{state.adoProfiles.map((profile) => <div className="profile-card" key={profile.id}><div><strong>{profile.name}{state.activeAdoProfileId === profile.id ? ' · Active' : ''}</strong><span>{profile.organization} / {profile.project.name} · {profile.team} · {profile.boardColumn} · {profile.storyIds.length} Stories</span></div><div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void run(() => api.activateAdoProfile(profile.id), updateState)}>{state.activeAdoProfileId === profile.id ? 'Selected' : 'Use for runs'}</button><button className="button quiet" type="button" disabled={busy} onClick={() => editAdoProfile(profile)}>Edit</button><button className="button quiet" type="button" disabled={busy} onClick={() => void run(() => api.deleteAdoProfile(profile.id), updateState)}>Remove</button></div></div>)}</div> : <p className="field-help">No profiles saved. Create one from the configuration file values you use for QA.</p>}
                 <div className="filters-row settings-fields"><label>Profile name<input className="text-input" value={profileName} maxLength={100} onChange={(event) => setProfileName(event.target.value)} placeholder="Derse QA" /></label><label>Organization URL or name<input className="text-input" value={profileOrganization} maxLength={500} onChange={(event) => setProfileOrganization(event.target.value)} placeholder="https://dev.azure.com/Xorbix" /></label></div>
                 <div className="filters-row settings-fields"><label>Project name<input className="text-input" value={profileProjectName} maxLength={200} onChange={(event) => setProfileProjectName(event.target.value)} placeholder="Derse" /></label><label>Project ID <span className="field-help">Optional · resolves from project name</span><input className="text-input" value={profileProjectId} maxLength={200} onChange={(event) => setProfileProjectId(event.target.value)} placeholder="Project ID" /></label><label>Team<input className="text-input" value={profileTeam} maxLength={200} onChange={(event) => setProfileTeam(event.target.value)} placeholder="Derse Team" /></label></div>
-                <div className="filters-row settings-fields"><label>Taskboard column<input className="text-input" value={profileColumn} maxLength={120} onChange={(event) => setProfileColumn(event.target.value)} placeholder="QA / Dev Env" /></label><label>Story IDs<input className="text-input" value={profileStoryIds} maxLength={1600} onChange={(event) => setProfileStoryIds(event.target.value)} placeholder="20024, 19997" /></label></div>
-                <div className="button-row"><button className="button primary" type="button" disabled={busy || !profileName.trim() || !profileOrganization.trim() || !profileProjectName.trim() || !profileTeam.trim() || !profileColumn.trim()} onClick={() => void saveAdoProfile()}>{profileId ? 'Save profile' : 'Add profile'}</button>{profileId ? <button className="button quiet" type="button" onClick={() => { setProfileId(''); setProfileName(''); }}>Cancel edit</button> : null}</div>
+              <div className="button-row"><button className="button outline" type="button" disabled={busy || !profileOrganization.trim() || !profileProjectName.trim()} onClick={() => void run(async () => { const teams = await api.listAdoTeams({ organization: profileOrganization.trim(), project: { ...(profileProjectId.trim() ? { id: profileProjectId.trim() } : {}), name: profileProjectName.trim() } }); setAdoTeams(teams); if (teams.length) setProfileTeam((current) => teams.some(({ name }) => name === current) ? current : teams.find(({ name }) => name.toLocaleLowerCase('en-US') === profileProjectName.toLocaleLowerCase('en-US'))?.name ?? teams[0]!.name); setNotice(teams.length ? `Loaded ${teams.length} teams from the selected Azure DevOps project.` : 'No teams were returned for this project.'); })}>Load project teams</button>{adoTeams.length ? <label>Team<select className="text-input" value={profileTeam} onChange={(event) => setProfileTeam(event.target.value)}><option value="">Choose a team</option>{adoTeams.map(({ id, name }) => <option key={id} value={name}>{name}</option>)}</select></label> : <label>Team<input className="text-input" value={profileTeam} maxLength={200} onChange={(event) => setProfileTeam(event.target.value)} placeholder="Load teams or enter a team name" /></label>}</div>
+                <div className="filters-row settings-fields"><label>Taskboard column <span className="field-help">Optional · used by the legacy configured task loader</span><input className="text-input" value={profileColumn} maxLength={120} onChange={(event) => setProfileColumn(event.target.value)} placeholder="Leave blank to include all sprint Tasks" /></label><label>Story IDs <span className="field-help">Optional · sprint browsing finds Stories automatically</span><input className="text-input" value={profileStoryIds} maxLength={1600} onChange={(event) => setProfileStoryIds(event.target.value)} placeholder="20024, 19997" /></label></div>
+                <div className="button-row"><button className="button primary" type="button" disabled={busy || !profileName.trim() || !profileOrganization.trim() || !profileProjectName.trim() || !profileTeam.trim()} onClick={() => void saveAdoProfile()}>{profileId ? 'Save profile' : 'Add profile'}</button>{profileId ? <button className="button quiet" type="button" onClick={() => { setProfileId(''); setProfileName(''); }}>Cancel edit</button> : null}</div>
               </div>
               <div className="panel selection-panel">
                 <div className="panel-title-row"><div><h2>Organizations</h2><p>Saved separately for each signed-in account.</p></div><button className="button outline" type="button" onClick={() => setScreen('project')}>Manage organizations</button></div>

@@ -64,7 +64,7 @@ describe('repository worker config boundary', () => {
     const root = await mkdtemp(join(tmpdir(), 'qa-repo-runner-'));
     const sourcePath = join(root, 'source'); const snapshotPath = join(root, 'snapshot'); const dockerLog = join(root, 'docker.log'); const docker = join(root, 'docker');
     await mkdir(sourcePath); await writeFile(join(sourcePath, 'package.json'), '{}');
-    await writeFile(docker, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(dockerLog)}\nif [ "$1" = "create" ]; then printf '%064d\\n' 0; fi\nexit 0\n`); await chmod(docker, 0o700);
+    await writeFile(docker, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(dockerLog)}\nif [ "$1" = "create" ]; then printf '%064d\\n' 0; fi\nif [ "$1" = "exec" ] && [ "$2" = "--interactive" ]; then cat >/dev/null; fi\nexit 0\n`); await chmod(docker, 0o700);
     const config = RepositoryConfigSchema.parse(validConfig);
     try {
       const result = await runRepositoryChecks({ runId: randomUUID(), repositoryPath: sourcePath, config, snapshotPath, timeoutMs: 5000, dockerPath: docker });
@@ -117,6 +117,7 @@ if [ "$1" = image ]; then exit 0; fi
 if [ "$1" = create ]; then printf '%064d\\n' 0; exit 0; fi
 if [ "$1" = exec ]; then
   if [ "$2" = --interactive ]; then cat >/dev/null; exit 0; fi
+  if [ "$3" = wc ]; then printf '72 /workspace/results.xml\\n'; exit 0; fi
   if [ "$3" = node ]; then head -c 1000 /dev/zero | tr '\\0' x; exit 0; fi
   exit 0
 fi
@@ -128,7 +129,7 @@ exit 0
       tests: [{ ...validConfig.tests[0], resultFormat: 'junit', resultPaths: ['results.xml'] }],
     });
     try {
-      const result = await runRepositoryChecks({ runId: randomUUID(), repositoryPath: sourcePath, config, snapshotPath, timeoutMs: 5000, maxArtifactBytes: 200, dockerPath: docker });
+      const result = await runRepositoryChecks({ runId: randomUUID(), repositoryPath: sourcePath, config, snapshotPath, artifactDirectory: join(root, 'artifacts'), timeoutMs: 5000, maxArtifactBytes: 100, dockerPath: docker });
       expect(result.blocked).toMatch(/JUnit output exceeds the remaining evidence size limit/i);
       expect(result.artifacts).toHaveLength(1);
       expect(await readFile(dockerLog, 'utf8')).not.toMatch(/^cp /m);

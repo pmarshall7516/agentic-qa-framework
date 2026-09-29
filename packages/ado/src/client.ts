@@ -36,7 +36,15 @@ export interface AdoProject {
 }
 
 export interface AdoTeam { id: string; name: string }
-export interface AdoIteration { id: string; name: string; path?: string }
+export interface AdoIteration {
+  id: string;
+  name: string;
+  path?: string;
+  timeFrame?: string;
+  startDate?: string;
+  finishDate?: string;
+}
+export interface AdoWorkItemState { name: string; category: string }
 export interface AdoTaskboardItem { workItemId: number; column: string; state?: string }
 
 export interface AdoOrganization {
@@ -55,6 +63,8 @@ export interface SearchInput {
   term: string;
   types?: string[];
   states?: string[];
+  iterationPath?: string;
+  statesByType?: Record<string, string[]>;
   afterId?: number;
   customTypeMappings?: WorkItemTypeMappings;
 }
@@ -123,7 +133,27 @@ function quoteWiql(value: string): string {
   return `'${value.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 120).replace(/'/g, "''")}'`;
 }
 
-function responseError(status: number): AdoRequestError {
+function iterationValues(data: JsonResponse): Array<Record<string, unknown>> {
+  const values = Array.isArray(data.values) ? data.values : Array.isArray(data.value) ? data.value : [];
+  return values.filter((entry): entry is Record<string, unknown> => Boolean(entry && typeof entry === 'object'));
+}
+
+function normalizeIteration(value: Record<string, unknown>): AdoIteration {
+  const attributes = value.attributes && typeof value.attributes === 'object'
+    ? value.attributes as Record<string, unknown>
+    : {};
+  const timeFrame = attributes.timeFrame ?? attributes.timeframe;
+  return {
+    id: String(value.id),
+    name: typeof value.name === 'string' ? value.name : '',
+    ...(typeof value.path === 'string' ? { path: value.path } : {}),
+    ...(typeof timeFrame === 'string' ? { timeFrame } : {}),
+    ...(typeof attributes.startDate === 'string' ? { startDate: attributes.startDate } : {}),
+    ...(typeof attributes.finishDate === 'string' ? { finishDate: attributes.finishDate } : {}),
+  };
+}
+
+function responseError(status: number, operation: string): AdoRequestError {
   if (status === 401) {
     return new AdoRequestError('authentication', 'Azure DevOps sign-in expired. Sign in again.', status);
   }
@@ -133,7 +163,23 @@ function responseError(status: number): AdoRequestError {
   if (status === 429) {
     return new AdoRequestError('rate-limited', 'Azure DevOps is rate limiting requests. Try again shortly.', status, true);
   }
+  if (status === 400) {
+    return new AdoRequestError('service', `Azure DevOps rejected the ${operation} request (HTTP 400). Check the selected project, sprint, filters, and work item types.`, status);
+  }
   return new AdoRequestError('service', `Azure DevOps request failed with status ${status}.`, status, status >= 500);
+}
+
+function operationForUrl(url: string): string {
+  let path = '';
+  try { path = new URL(url).pathname.toLocaleLowerCase('en-US'); } catch { return 'request'; }
+  if (path.endsWith('/_apis/wit/wiql')) return 'work item query';
+  if (path.endsWith('/_apis/wit/workitemsbatch')) return 'work item details';
+  if (path.includes('/_apis/work/teamsettings/iterations')) return 'sprint list';
+  if (path.includes('/_apis/work/taskboardworkitems/')) return 'sprint task board';
+  if (path.includes('/_apis/wit/workitemtypes/') && path.endsWith('/states')) return 'work item state list';
+  if (path.includes('/_apis/projects/') && path.endsWith('/teams')) return 'team list';
+  if (path.endsWith('/_apis/projects')) return 'project list';
+  return 'request';
 }
 
 function retryDelay(response: Response, attempt: number): number {
@@ -244,9 +290,31 @@ export class AdoClient {
     url.searchParams.set('$timeframe', 'current');
     url.searchParams.set('api-version', ADO_API_VERSION);
     const data = await this.requestJson(url.toString(), accessToken);
-    if (!Array.isArray(data.value)) return undefined;
-    const item = data.value.find((entry) => entry && typeof entry === 'object' && typeof (entry as Record<string, unknown>).id === 'string') as Record<string, unknown> | undefined;
-    return item ? { id: String(item.id), name: typeof item.name === 'string' ? item.name : '', ...(typeof item.path === 'string' ? { path: item.path } : {}) } : undefined;
+    const item = iterationValues(data).find((entry) => typeof entry.id === 'string');
+    return item ? normalizeIteration(item) : undefined;
+  }
+
+  async listTeamIterations(accessToken: string, organizationInput: string, projectId: string, team: string): Promise<AdoIteration[]> {
+    const organization = resolveOrganization(organizationInput);
+    const url = new URL(`https://dev.azure.com/${encodeURIComponent(organization)}/${encodeURIComponent(projectId)}/${encodeURIComponent(team)}/_apis/work/teamsettings/iterations`);
+    url.searchParams.set('api-version', ADO_API_VERSION);
+    const data = await this.requestJson(url.toString(), accessToken);
+    return iterationValues(data).flatMap((item) => typeof item.id === 'string' ? [normalizeIteration(item)] : []);
+  }
+
+  async getWorkItemTypeStates(accessToken: string, organizationInput: string, projectId: string, type: string): Promise<AdoWorkItemState[]> {
+    const organization = resolveOrganization(organizationInput);
+    const url = new URL(`https://dev.azure.com/${encodeURIComponent(organization)}/${encodeURIComponent(projectId)}/_apis/wit/workitemtypes/${encodeURIComponent(type)}/states`);
+    url.searchParams.set('api-version', ADO_API_VERSION);
+    const data = await this.requestJson(url.toString(), accessToken);
+    if (!Array.isArray(data.value)) return [];
+    return data.value.flatMap((entry) => {
+      if (!entry || typeof entry !== 'object') return [];
+      const state = entry as Record<string, unknown>;
+      return typeof state.name === 'string' && typeof state.category === 'string'
+        ? [{ name: state.name, category: state.category }]
+        : [];
+    });
   }
 
   async getTaskboardItems(accessToken: string, organizationInput: string, projectId: string, team: string, iterationId: string): Promise<AdoTaskboardItem[]> {
@@ -381,12 +449,17 @@ export class AdoClient {
       if (term) predicates.push(`[System.Title] CONTAINS ${quoteWiql(term)}`);
       if (input.afterId !== undefined) predicates.push(`[System.Id] > ${input.afterId}`);
     }
-    if (input.types?.length) {
+    if (input.iterationPath) predicates.push(`[System.IterationPath] = ${quoteWiql(input.iterationPath)}`);
+    const typedStates = Object.entries(input.statesByType ?? {}).filter(([, states]) => states.length > 0);
+    if (input.statesByType) {
+      if (!typedStates.length) throw new Error('No active work item states are available for the selected sprint. Check the project work item type mappings.');
+      predicates.push(`(${typedStates.map(([type, states]) => `([System.WorkItemType] = ${quoteWiql(type)} AND [System.State] IN (${states.map(quoteWiql).join(', ')}))`).join(' OR ')})`);
+    } else if (input.types?.length) {
       predicates.push(
         `[System.WorkItemType] IN (${input.types.map(quoteWiql).join(', ')})`,
       );
     }
-    if (input.states?.length) {
+    if (!input.statesByType && input.states?.length) {
       predicates.push(`[System.State] IN (${input.states.map(quoteWiql).join(', ')})`);
     }
 
@@ -440,11 +513,27 @@ export class AdoClient {
         `https://dev.azure.com/${encodeURIComponent(organization)}/_apis/wit/workitemsbatch`,
       );
       url.searchParams.set('api-version', ADO_API_VERSION);
-      const data = await this.requestJson(url.toString(), accessToken, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ ids: batch, fields, $expand: 'Relations' }),
-      });
+      const requestBatch = (bodyFields: string[], expandRelations: boolean) => this.requestJson(url.toString(), accessToken, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ ids: batch, fields: bodyFields, ...(expandRelations ? { $expand: 'Relations' } : {}) }),
+        });
+      let data: JsonResponse;
+      try {
+        data = await requestBatch(fields, true);
+      } catch (error) {
+        const optionalField = 'Microsoft.VSTS.Common.AcceptanceCriteria';
+        if (!(error instanceof AdoRequestError) || error.status !== 400 || !fields.includes(optionalField)) throw error;
+        const compatibleFields = fields.filter((field) => field !== optionalField);
+        try {
+          data = await requestBatch(compatibleFields, true);
+        } catch (retryError) {
+          if (!(retryError instanceof AdoRequestError) || retryError.status !== 400) throw retryError;
+          // Some Azure DevOps processes reject relation expansion on batch reads. Relations
+          // are loaded through the dedicated child-item endpoint when users expand a Story.
+          data = await requestBatch(compatibleFields, false);
+        }
+      }
       if (!Array.isArray(data.value)) continue;
       for (const item of data.value) {
         if (!item || typeof item !== 'object') continue;
@@ -499,6 +588,7 @@ export class AdoClient {
     accessToken: string,
     init: RequestInit = {},
   ): Promise<{ data: JsonResponse; response: Response }> {
+    const operation = operationForUrl(url);
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
       let response: Response;
       try {
@@ -511,7 +601,7 @@ export class AdoClient {
           },
         });
       } catch {
-        throw new AdoRequestError('network', 'Could not reach Azure DevOps. Check the connection and try again.', undefined, true);
+        throw new AdoRequestError('network', `Could not reach Azure DevOps while loading the ${operation}. Check your connection and try again.`, undefined, true);
       }
 
       if (response.ok) {
@@ -526,7 +616,7 @@ export class AdoClient {
         }
       }
 
-      const error = responseError(response.status);
+      const error = responseError(response.status, operation);
       const retryable = response.status === 429 || [500, 502, 503, 504].includes(response.status);
       if (!retryable || attempt === MAX_RETRIES) throw error;
       await this.sleep(retryDelay(response, attempt));

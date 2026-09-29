@@ -7,9 +7,9 @@ import { tmpdir } from 'node:os';
 import { join, resolve, relative, isAbsolute, sep } from 'node:path';
 import type { AccountSummary, AdoAuthService } from '@agentic-qa/ado/auth';
 import { AzureCliAdoAuthService } from '@agentic-qa/ado/azure-cli-auth';
-import { AdoClient, resolveOrganization, type AdoProject, type WorkItemSearchPage } from '@agentic-qa/ado/client';
+import { AdoClient, resolveOrganization, type AdoIteration, type AdoProject, type AdoTaskboardItem, type WorkItemSearchPage } from '@agentic-qa/ado/client';
 import type { QueueEntry } from '@agentic-qa/domain/queue';
-import type { WorkItemKind, WorkItemSnapshot, WorkItemTypeMappings } from '@agentic-qa/domain/work-item';
+import { classifyWorkItemType, type WorkItemKind, type WorkItemSnapshot, type WorkItemTypeMappings } from '@agentic-qa/domain/work-item';
 import { QAContractSchema, validateReadyContract, type QAContract } from '@agentic-qa/domain/qa-contract';
 import { buildReport, computeVerdict, FindingSchema, ObservationSchema, RunManifestSchema, type CriterionResult, type Finding, type Observation, type QAReport, type RunManifest } from '@agentic-qa/domain/run';
 import type { QaStore } from '@agentic-qa/storage/database';
@@ -45,7 +45,7 @@ const AdoRunProfileSchema = z.object({
   organization: z.string().min(1).max(500),
   project: ProjectSchema,
   team: z.string().trim().min(1).max(200),
-  boardColumn: z.string().trim().min(1).max(120),
+  boardColumn: z.string().trim().max(120),
   storyIds: z.array(z.number().int().positive().max(2_147_483_647)).max(200),
 }).strict();
 const AdoRunProfileInputSchema = AdoRunProfileSchema.extend({ project: z.object({ id: z.string().min(1).max(200).optional(), name: z.string().min(1).max(200), state: z.string().max(80).optional() }).strict() }).omit({ id: true }).extend({ id: z.string().uuid().optional() });
@@ -106,6 +106,7 @@ export class DesktopController {
   private readonly repoWorkerImageInstaller?: () => Promise<void>;
   private readonly chooseModelKeyFile?: () => Promise<string | undefined>;
   private readonly readAdoProfilesConfig?: () => Promise<string | undefined>;
+  private readonly saveAdoProfilesConfig?: (contents: string) => Promise<boolean>;
   private readonly pendingModelPreviews = new Map<string, { runId: string; draftHash: string; preview: ReturnType<typeof buildModelPayload>; includedCriterionIds: string[]; expiresAt: number }>();
 
   constructor(options: {
@@ -129,6 +130,7 @@ export class DesktopController {
     installRepoWorkerImage?: () => Promise<void>;
     chooseModelKeyFile?: () => Promise<string | undefined>;
     readAdoProfilesConfig?: () => Promise<string | undefined>;
+    saveAdoProfilesConfig?: (contents: string) => Promise<boolean>;
   }) {
     this.store = options.store;
     this.ado = options.ado ?? new AdoClient();
@@ -155,6 +157,7 @@ export class DesktopController {
     this.repoWorkerImageInstaller = options.installRepoWorkerImage;
     this.chooseModelKeyFile = options.chooseModelKeyFile;
     this.readAdoProfilesConfig = options.readAdoProfilesConfig;
+    this.saveAdoProfilesConfig = options.saveAdoProfilesConfig;
   }
 
   async getState(): Promise<DesktopState> {
@@ -425,6 +428,26 @@ export class DesktopController {
     return this.getState();
   }
 
+  async exportAdoProfilesConfig(): Promise<boolean> {
+    await this.requireAccount();
+    const profiles = await this.setting<AdoRunProfile[]>(SETTING.profiles) ?? [];
+    if (!profiles.length) throw new Error('Save an Azure DevOps configuration profile before exporting it.');
+    if (!this.saveAdoProfilesConfig) throw new Error('Configuration file export is unavailable in this desktop build.');
+    const contents = `${JSON.stringify({
+      schemaVersion: 1,
+      profiles: profiles.map(({ name, organization, project, team, boardColumn, storyIds }) => ({
+        name,
+        organization,
+        project: { id: project.id, name: project.name, ...(project.state ? { state: project.state } : {}) },
+        team,
+        boardColumn,
+        storyIds,
+      })),
+    }, null, 2)}\n`;
+    return this.saveAdoProfilesConfig(contents);
+  }
+
+
   async loadActiveProfileWorkItems() {
     const profileId = await this.setting<string>(SETTING.activeProfile);
     const profiles = await this.setting<AdoRunProfile[]>(SETTING.profiles) ?? [];
@@ -434,7 +457,7 @@ export class DesktopController {
     const iteration = await this.ado.getCurrentIteration(token, profile.organization, profile.project.id, profile.team);
     if (!iteration) throw new Error(`No current sprint was found for ${profile.team}. Check the team's iteration settings in Azure DevOps.`);
     const taskboard = await this.ado.getTaskboardItems(token, profile.organization, profile.project.id, profile.team, iteration.id);
-    const targetIds = new Set(taskboard.filter(({ column }) => column.trim().toLocaleLowerCase('en-US') === profile.boardColumn.trim().toLocaleLowerCase('en-US')).map(({ workItemId }) => workItemId));
+    const targetIds = new Set(taskboard.filter(({ column }) => !profile.boardColumn.trim() || column.trim().toLocaleLowerCase('en-US') === profile.boardColumn.trim().toLocaleLowerCase('en-US')).map(({ workItemId }) => workItemId));
     const context = { organization: profile.organization, projectId: profile.project.id, projectName: profile.project.name, customTypeMappings: await this.typeMappings(profile.organization, profile.project.id) };
     const childIdsByStory: Record<number, number[]> = {};
     for (const storyId of profile.storyIds) {
@@ -458,6 +481,64 @@ export class DesktopController {
       stories,
       tasksByStory: Object.fromEntries(Object.entries(childIdsByStory).map(([id, children]) => [id, children.map((childId) => byId.get(childId)).filter((item): item is WorkItemSnapshot => Boolean(item && item.kind === 'TASK'))])),
     };
+  }
+
+  async listProfileIterations(): Promise<AdoIteration[]> {
+    const profile = await this.activeAdoProfile();
+    return this.ado.listTeamIterations(await this.accessToken(), profile.organization, profile.project.id, profile.team);
+  }
+
+  async listSprintTaskboard(iterationIdInput: string): Promise<AdoTaskboardItem[]> {
+    const iterationId = z.string().uuid().parse(iterationIdInput);
+    const profile = await this.activeAdoProfile();
+    const token = await this.accessToken();
+    const iterations = await this.ado.listTeamIterations(token, profile.organization, profile.project.id, profile.team);
+    if (!iterations.some(({ id }) => id === iterationId)) throw new Error('That sprint is not available to the active profile team. Refresh the sprint list and try again.');
+    return this.ado.getTaskboardItems(token, profile.organization, profile.project.id, profile.team, iterationId);
+  }
+
+  async listAdoTeams(input: { organization: string; project: { id?: string; name: string } }) {
+    const { organization, project: requestedProject } = z.object({
+      organization: z.string().trim().min(1).max(500),
+      project: z.object({ id: z.string().trim().min(1).max(200).optional(), name: z.string().trim().min(1).max(200) }).strict(),
+    }).strict().parse(input);
+    const token = await this.accessToken();
+    const projects = await this.ado.listProjects(token, organization);
+    const project = projects.find(({ id, name }) => requestedProject.id ? id === requestedProject.id : name.toLocaleLowerCase('en-US') === requestedProject.name.toLocaleLowerCase('en-US'));
+    if (!project) throw new Error('That project is not available in the selected organization. Refresh project access and try again.');
+    return this.ado.listTeams(token, organization, project.id);
+  }
+
+  async searchActiveStories(iterationIdInput: string, afterId?: number): Promise<WorkItemSearchPage> {
+    const iterationId = z.string().uuid().parse(iterationIdInput);
+    const profile = await this.activeAdoProfile();
+    const token = await this.accessToken();
+    const iterations = await this.ado.listTeamIterations(token, profile.organization, profile.project.id, profile.team);
+    const iteration = iterations.find(({ id }) => id === iterationId);
+    if (!iteration?.path) throw new Error('That sprint is not available to the active profile team. Refresh the sprint list and try again.');
+
+    const customTypeMappings = await this.typeMappings(profile.organization, profile.project.id);
+    const types = await this.ado.getWorkItemTypes(token, profile.organization, profile.project.id);
+    const requirementTypes = types.filter((type) => classifyWorkItemType(type, customTypeMappings) === 'REQUIREMENT');
+    if (!requirementTypes.length) throw new Error('No work item types are mapped as Requirements for this project. Map a Story type in Settings, then refresh.');
+
+    const stateEntries = await Promise.all(requirementTypes.map(async (type) => {
+      const states = await this.ado.getWorkItemTypeStates(token, profile.organization, profile.project.id, type);
+      const activeStates = states.filter(({ category }) => category === 'Proposed' || category === 'InProgress').map(({ name }) => name);
+      return [type, activeStates] as const;
+    }));
+    const statesByType = Object.fromEntries(stateEntries.filter(([, states]) => states.length > 0));
+    if (!Object.keys(statesByType).length) throw new Error('Azure DevOps returned no active state categories for the mapped Requirement types. Check the project process configuration.');
+    return this.ado.search(token, {
+      organization: profile.organization,
+      projectId: profile.project.id,
+      projectName: profile.project.name,
+      term: '',
+      iterationPath: iteration.path,
+      statesByType,
+      afterId,
+      customTypeMappings,
+    });
   }
 
   async listWorkItemTypes(): Promise<string[]> {
@@ -515,7 +596,58 @@ export class DesktopController {
       customTypeMappings: await this.typeMappings(organization, project.id),
     });
     if (!snapshot) throw new Error('Azure DevOps did not return that work item. It may have been deleted or access may have changed.');
+    if (snapshot.kind !== 'REQUIREMENT' && snapshot.kind !== 'TASK') throw new Error('Only Requirements and Tasks can be added to the QA Queue.');
     await this.store.addToQueue(snapshot);
+    return this.getState();
+  }
+
+  async addQueueItems(selectionsInput: Array<{ workItemId: number; parentId?: number }>): Promise<DesktopState> {
+    const selections = z.array(z.object({
+      workItemId: z.number().int().positive().max(2_147_483_647),
+      parentId: z.number().int().positive().max(2_147_483_647).optional(),
+    }).strict()).min(1).max(200).parse(selectionsInput);
+    const bySelectedId = new Map<number, { workItemId: number; parentId?: number }>();
+    for (const selection of selections) {
+      const current = bySelectedId.get(selection.workItemId);
+      if (current?.parentId && selection.parentId && current.parentId !== selection.parentId) throw new Error(`Task #${selection.workItemId} was associated with more than one Story.`);
+      bySelectedId.set(selection.workItemId, { ...selection, parentId: selection.parentId ?? current?.parentId });
+    }
+    const uniqueSelections = [...bySelectedId.values()];
+    const uniqueIds = uniqueSelections.map(({ workItemId }) => workItemId);
+    const parentIds = [...new Set(uniqueSelections.flatMap(({ parentId }) => parentId ? [parentId] : []))];
+    const [organization, project, token] = await Promise.all([
+      this.setting<string>(SETTING.organization),
+      this.setting<AdoProject>(SETTING.project),
+      this.accessToken(),
+    ]);
+    if (!organization || !project) throw new Error('Choose an Azure DevOps project before adding work items to the queue.');
+    const fetchedItems = await this.ado.fetchWorkItems(token, {
+      organization,
+      projectId: project.id,
+      projectName: project.name,
+      ids: [...new Set([...uniqueIds, ...parentIds])],
+      customTypeMappings: await this.typeMappings(organization, project.id),
+    });
+    const byId = new Map(fetchedItems.map((snapshot) => [snapshot.id, snapshot]));
+    const missingIds = uniqueIds.filter((id) => !byId.has(id));
+    if (missingIds.length) throw new Error(`Azure DevOps could not load selected work item${missingIds.length === 1 ? '' : 's'} ${missingIds.join(', ')}. Refresh the sprint results and try again.`);
+    if (uniqueIds.some((id) => byId.get(id)!.kind !== 'REQUIREMENT' && byId.get(id)!.kind !== 'TASK')) throw new Error('Only Requirements and Tasks can be added to the QA Queue. No selected items were added.');
+    if (parentIds.some((id) => !byId.has(id) || byId.get(id)!.kind !== 'REQUIREMENT')) throw new Error('A selected Task references a Story that Azure DevOps could not validate. No selected items were added.');
+    const verifiedParentByTaskId = new Map<number, number>();
+    for (const selection of uniqueSelections) {
+      if (!selection.parentId) continue;
+      if (byId.get(selection.workItemId)!.kind !== 'TASK') throw new Error(`Only a Task can be nested under Story #${selection.parentId}. No selected items were added.`);
+      if (!verifiedParentByTaskId.has(selection.workItemId)) {
+        const childIds = await this.ado.getChildIds(token, { organization, parentId: selection.parentId });
+        if (!childIds.includes(selection.workItemId)) throw new Error(`Task #${selection.workItemId} is no longer linked to Story #${selection.parentId}. Refresh the sprint results and try again.`);
+        verifiedParentByTaskId.set(selection.workItemId, selection.parentId);
+      }
+    }
+    for (const id of uniqueIds) {
+      const parentId = verifiedParentByTaskId.get(id);
+      const snapshot = byId.get(id)!;
+      await this.store.addToQueue(parentId && snapshot.parentId !== parentId ? { ...snapshot, parentId } : snapshot);
+    }
     return this.getState();
   }
 
@@ -551,12 +683,32 @@ export class DesktopController {
 
   async refreshQueue(): Promise<DesktopState> {
     const entries = await this.store.getQueue();
+    const snapshots = new Map(await Promise.all(entries.map(async (entry) => [entry.key, await this.store.getSnapshot(entry.key)] as const)));
+    const parentByTaskKey = new Map<string, number>();
+    const stories = entries.filter((entry) => snapshots.get(entry.key)?.kind === 'REQUIREMENT');
+    const tasks = entries.filter((entry) => snapshots.get(entry.key)?.kind === 'TASK');
+    for (const story of stories) {
+      const relatedTasks = tasks.filter((task) => task.organization === story.organization && task.projectId === story.projectId);
+      if (!relatedTasks.length) continue;
+      try {
+        const childIds = await this.ado.getChildIds(await this.accessToken(), {
+          organization: story.organization,
+          parentId: story.workItemId,
+        });
+        for (const task of relatedTasks) {
+          if (childIds.includes(task.workItemId)) parentByTaskKey.set(task.key, story.workItemId);
+        }
+      } catch {
+        // A relationship lookup is only needed to group existing queue entries.
+        // Continue refreshing the actual work items if that optional lookup fails.
+      }
+    }
     for (const entry of entries) {
       try {
         const [token] = await Promise.all([
           this.accessToken(),
         ]);
-        const snapshot = await this.store.getSnapshot(entry.key);
+        const snapshot = snapshots.get(entry.key);
         if (!snapshot) {
           await this.store.markStale(entry.key, true);
           continue;
@@ -570,7 +722,8 @@ export class DesktopController {
         });
         if (!fresh) await this.store.markStale(entry.key, true);
         else {
-          await this.store.addToQueue(fresh);
+          const parentId = parentByTaskKey.get(entry.key) ?? snapshot.parentId ?? fresh.parentId;
+          await this.store.addToQueue(parentId && fresh.parentId !== parentId ? { ...fresh, parentId } : fresh);
           await this.store.markStale(entry.key, false);
         }
       } catch {
@@ -1160,6 +1313,14 @@ export class DesktopController {
 
   private typeMappingsSettingKey(organization: string, projectId: string): string {
     return `ado.customTypeMappings.${encodeURIComponent(organization.toLocaleLowerCase('en-US'))}.${encodeURIComponent(projectId)}`;
+  }
+
+  private async activeAdoProfile(): Promise<AdoRunProfile> {
+    const profileId = await this.setting<string>(SETTING.activeProfile);
+    const profiles = await this.setting<AdoRunProfile[]>(SETTING.profiles) ?? [];
+    const profile = profiles.find(({ id }) => id === profileId);
+    if (!profile) throw new Error('Choose an Azure DevOps configuration profile in Settings first.');
+    return profile;
   }
 
   private async typeMappings(organization: string, projectId: string): Promise<WorkItemTypeMappings> {

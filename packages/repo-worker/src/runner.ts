@@ -165,6 +165,10 @@ export async function runRepositoryChecks(options: RepoRunnerOptions): Promise<R
         await mkdir(resultRoot, { recursive: true, mode: 0o700 });
         for (const [index, path] of mappedResultPaths.entries()) {
           const resultPath = join(resultRoot, `${command.id}-${index}.xml`);
+          const sizeProbe = await runProcess(docker, ['exec', containerId, 'wc', '-c', `/workspace/${path}`], 15_000, options.signal);
+          const size = /^(\d+)\s/.exec(sizeProbe.output.trim());
+          const remainingBytes = (options.maxArtifactBytes ?? 500 * 1024 * 1024) - capturedArtifactBytes;
+          if (size && Number(size[1]) > remainingBytes) throw new Error('JUnit output exceeds the remaining evidence size limit.');
           const copiedResult = await runProcess(docker, ['cp', `${containerId}:/workspace/${path}`, resultPath], 15_000, options.signal);
           if (copiedResult.code !== 0) continue;
           let content: string | undefined;
@@ -174,7 +178,10 @@ export async function runRepositoryChecks(options: RepoRunnerOptions): Promise<R
             content = await readFile(resultPath, 'utf8');
             cases.push(...await parseJUnit(content));
           } catch { /* missing or invalid reports are represented as missing evidence */ }
-          if (content !== undefined) await captureArtifact('test-result', `${command.id}-${index}`, scenarioIds, content);
+          if (content !== undefined) {
+            if (capturedArtifactBytes + Buffer.byteLength(content) > (options.maxArtifactBytes ?? 500 * 1024 * 1024)) throw new Error('JUnit output exceeds the remaining evidence size limit.');
+            await captureArtifact('test-result', `${command.id}-${index}`, scenarioIds, content);
+          }
         }
         if (!cases.length) {
           for (const mapping of command.scenarioMappings) observations.push(observationFor(mapping.scenarioId, 'ERROR', 'JUnit output was empty or missing; a zero process exit cannot verify a criterion.', startedAt));

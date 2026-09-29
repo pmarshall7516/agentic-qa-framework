@@ -149,6 +149,16 @@ async function createWindow(): Promise<void> {
       if ((await stat(filePath)).size > 128 * 1024) throw new Error('The selected Azure DevOps profile config file is too large.');
       return readFile(filePath, 'utf8');
     },
+    saveAdoProfilesConfig: async (contents) => {
+      const result = await dialog.showSaveDialog(window, {
+        defaultPath: 'ado-profiles.json',
+        filters: [{ name: 'Azure DevOps profiles', extensions: ['json'] }],
+      });
+      if (result.canceled || !result.filePath) return false;
+      await writeFile(result.filePath, contents, { mode: 0o600 });
+      await chmod(result.filePath, 0o600);
+      return true;
+    },
     saveReportFile: async (filename, contents, format) => {
       const extension = format === 'markdown' ? 'md' : format;
       const result = await dialog.showSaveDialog(window, {

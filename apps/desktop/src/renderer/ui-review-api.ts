@@ -197,7 +197,12 @@ export function createUiReviewFixture(scenarioName: string): { api: DesktopApi; 
     activateAdoProfile: async (id) => withState({ activeAdoProfileId: id }),
     deleteAdoProfile: async (id) => withState({ adoProfiles: (state.adoProfiles ?? []).filter((item) => item.id !== id) }),
     importAdoProfilesConfig: async () => currentState(),
+    exportAdoProfilesConfig: async () => true,
     loadActiveProfileWorkItems: async () => ({ iterationName: 'Sprint 14', stories: [requirement], tasksByStory: { [requirement.id]: [task] } }),
+    listProfileIterations: async () => [{ id: '11111111-1111-4111-8111-111111111111', name: 'Sprint 14', path: 'Portal\\Sprint 14', timeFrame: 'current' }],
+    listSprintTaskboard: async () => [{ workItemId: task.id, column: 'In Progress', state: task.state }],
+    listAdoTeams: async () => [{ id: 'team-1', name: 'Portal Experience Team' }],
+    searchActiveStories: async () => ({ items: [requirement] }),
     listWorkItemTypes: async () => ['User Story', 'Task', 'Feature Request'],
     saveWorkItemTypeMapping: async () => currentState(),
     searchItems: async (): Promise<WorkItemSearchPage> => ({ items: [requirement] }),
@@ -207,6 +212,10 @@ export function createUiReviewFixture(scenarioName: string): { api: DesktopApi; 
       const entry: QueueEntry = { ...queueEntry, key: `${organization.toLowerCase()}:${project.id}:${id}`, workItemId: id, queuedAt: new Date().toISOString() };
       const queue = state.queue.some(({ entry: existing }) => existing.key === entry.key) ? state.queue : [...state.queue, { entry, snapshot }];
       return withState({ queue });
+    },
+    addQueueItems: async (items) => {
+      for (const { workItemId } of items) await api.addQueueItem(workItemId);
+      return currentState();
     },
     removeQueueItem: async (key) => withState({ queue: state.queue.filter(({ entry }) => entry.key !== key) }),
     moveQueueItem: async (key, direction) => {

@@ -1,4 +1,4 @@
-import type { AdoGitRef, AdoGitRepository, AdoOrganization, AdoProject, WorkItemSearchPage } from '@agentic-qa/ado/client';
+import type { AdoGitRef, AdoGitRepository, AdoIteration, AdoOrganization, AdoProject, AdoTaskboardItem, AdoTeam, WorkItemSearchPage } from '@agentic-qa/ado/client';
 import type { AccountSummary } from '@agentic-qa/ado/auth';
 import type { QueueEntry } from '@agentic-qa/domain/queue';
 import type { WorkItemSnapshot } from '@agentic-qa/domain/work-item';
@@ -27,6 +27,11 @@ export interface DraftPlan {
 export interface QueueItemView {
   entry: QueueEntry;
   snapshot?: WorkItemSnapshot;
+}
+
+export interface QueueWorkItemSelection {
+  workItemId: number;
+  parentId?: number;
 }
 
 export interface AdoRunProfile {
@@ -80,12 +85,6 @@ export interface SearchItemsInput {
   afterId?: number;
 }
 
-export interface SearchItemsInput {
-  term: string;
-  types: string[];
-  states: string[];
-}
-
 export interface DesktopApi {
   getState(): Promise<DesktopState>;
   signIn(): Promise<DesktopState>;
@@ -99,12 +98,18 @@ export interface DesktopApi {
   activateAdoProfile(profileId: string): Promise<DesktopState>;
   deleteAdoProfile(profileId: string): Promise<DesktopState>;
   importAdoProfilesConfig(): Promise<DesktopState>;
+  exportAdoProfilesConfig(): Promise<boolean>;
   loadActiveProfileWorkItems(): Promise<ProfileWorkItemsResult>;
+  listProfileIterations(): Promise<AdoIteration[]>;
+  listSprintTaskboard(iterationId: string): Promise<AdoTaskboardItem[]>;
+  listAdoTeams(input: { organization: string; project: { id?: string; name: string } }): Promise<AdoTeam[]>;
+  searchActiveStories(iterationId: string, afterId?: number): Promise<WorkItemSearchPage>;
   listWorkItemTypes(): Promise<string[]>;
   saveWorkItemTypeMapping(type: string, kind: WorkItemKind): Promise<DesktopState>;
   searchItems(input: SearchItemsInput): Promise<WorkItemSearchPage>;
   getChildren(parentWorkItemId: number): Promise<WorkItemSnapshot[]>;
   addQueueItem(workItemId: number): Promise<DesktopState>;
+  addQueueItems(items: QueueWorkItemSelection[]): Promise<DesktopState>;
   removeQueueItem(key: string): Promise<DesktopState>;
   moveQueueItem(key: string, direction: 'up' | 'down'): Promise<DesktopState>;
   refreshQueue(): Promise<DesktopState>;

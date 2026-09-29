@@ -31,6 +31,55 @@ describe('read-only ADO client', () => {
     expect(requests[0]?.authorization).toBe('Bearer test-token');
   });
 
+  it('lists every iteration returned by the selected team and normalizes the documented values shape', async () => {
+    let requestedUrl = '';
+    const client = new AdoClient({ fetcher: async (input) => {
+      requestedUrl = String(input);
+      return jsonResponse({ values: [{
+        id: 'sprint-12', name: 'Sprint 12', path: 'Portal\\Sprint 12',
+        attributes: { startDate: '2026-09-01T00:00:00Z', finishDate: '2026-09-14T00:00:00Z', timeFrame: 'past' },
+      }] });
+    } });
+
+    await expect(client.listTeamIterations('token', 'contoso', 'project-1', 'Portal Team')).resolves.toEqual([
+      { id: 'sprint-12', name: 'Sprint 12', path: 'Portal\\Sprint 12', timeFrame: 'past', startDate: '2026-09-01T00:00:00Z', finishDate: '2026-09-14T00:00:00Z' },
+    ]);
+    expect(requestedUrl).toContain('/project-1/Portal%20Team/_apis/work/teamsettings/iterations?');
+    expect(new URL(requestedUrl).searchParams.has('$timeframe')).toBe(false);
+  });
+
+  it('lists work item states with their process state categories', async () => {
+    const client = new AdoClient({ fetcher: async () => jsonResponse({ value: [
+      { name: 'New', category: 'Proposed' },
+      { name: 'Working', category: 'InProgress' },
+      { name: 'Done', category: 'Completed' },
+    ] }) });
+    await expect(client.getWorkItemTypeStates('token', 'contoso', 'project-1', 'User Story')).resolves.toEqual([
+      { name: 'New', category: 'Proposed' },
+      { name: 'Working', category: 'InProgress' },
+      { name: 'Done', category: 'Completed' },
+    ]);
+  });
+
+  it('normalizes sprint taskboard work item columns and ignores malformed rows', async () => {
+    let requestedUrl = '';
+    const client = new AdoClient({ fetcher: async (input) => {
+      requestedUrl = String(input);
+      return jsonResponse({ workItems: [
+        { workItemId: 43, column: 'In Progress', state: 'Active' },
+        { workItemId: 44, column: 'Ready' },
+        { workItemId: 'bad', column: 'Hidden' },
+        { workItemId: 45 },
+      ] });
+    } });
+
+    await expect(client.getTaskboardItems('token', 'contoso', 'project-1', 'QA Team', '11111111-1111-4111-8111-111111111111')).resolves.toEqual([
+      { workItemId: 43, column: 'In Progress', state: 'Active' },
+      { workItemId: 44, column: 'Ready' },
+    ]);
+    expect(requestedUrl).toContain('/project-1/QA%20Team/_apis/work/taskboardworkitems/11111111-1111-4111-8111-111111111111');
+  });
+
   it('rejects malformed organization account responses', async () => {
     const client = new AdoClient({ fetcher: async () => jsonResponse({ value: 'not-an-array' }) });
     await expect(client.listOrganizations('test-token', '11111111-1111-4111-8111-111111111111'))
@@ -131,6 +180,46 @@ describe('read-only ADO client', () => {
     expect(children.map(({ id, kind }) => ({ id, kind }))).toEqual([{ id: 43, kind: 'TASK' }]);
   });
 
+  it('retries a work-item batch without Acceptance Criteria when the selected process does not expose that field', async () => {
+    const batchBodies: Array<Record<string, unknown>> = [];
+    const client = new AdoClient({ fetcher: async (input, init) => {
+      if (String(input).includes('/wiql?')) return jsonResponse({ workItems: [{ id: 42 }] });
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      batchBodies.push(body);
+      if (batchBodies.length === 1) return new Response('', { status: 400 });
+      return jsonResponse({ value: [{ id: 42, rev: 1, fields: {
+        'System.WorkItemType': 'User Story',
+        'System.Title': 'Search works',
+        'System.State': 'Active',
+      } }] });
+    } });
+
+    await expect(client.search('token', {
+      organization: 'contoso', projectId: 'p1', projectName: 'Portal', term: 'search',
+    })).resolves.toMatchObject({ items: [{ id: 42, type: 'User Story', title: 'Search works' }] });
+
+    expect(batchBodies).toHaveLength(2);
+    expect(batchBodies[0]?.fields).toContain('Microsoft.VSTS.Common.AcceptanceCriteria');
+    expect(batchBodies[1]?.fields).not.toContain('Microsoft.VSTS.Common.AcceptanceCriteria');
+  });
+
+  it('falls back without relation expansion when a process rejects both batch variants', async () => {
+    const batchBodies: Array<Record<string, unknown>> = [];
+    const client = new AdoClient({ fetcher: async (input, init) => {
+      if (String(input).includes('/wiql?')) return jsonResponse({ workItems: [{ id: 42 }] });
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      batchBodies.push(body);
+      if (body.$expand === 'Relations') return new Response('', { status: 400 });
+      return jsonResponse({ value: [{ id: 42, rev: 1, fields: { 'System.WorkItemType': 'User Story', 'System.Title': 'Search works', 'System.State': 'Active' } }] });
+    } });
+
+    await expect(client.search('token', { organization: 'contoso', projectId: 'p1', projectName: 'Portal', term: 'search' }))
+      .resolves.toMatchObject({ items: [{ id: 42, title: 'Search works' }] });
+    expect(batchBodies).toHaveLength(3);
+    expect(batchBodies[1]?.fields).not.toContain('Microsoft.VSTS.Common.AcceptanceCriteria');
+    expect(batchBodies[2]).not.toHaveProperty('$expand');
+  });
+
   it('pages search results by immutable work item ID cursor', async () => {
     const queries: string[] = [];
     const client = new AdoClient({ fetcher: async (input, init) => {
@@ -175,6 +264,27 @@ describe('read-only ADO client', () => {
     expect(requests.every((request) => new URL(request.url).hostname === 'dev.azure.com')).toBe(true);
   });
 
+  it('scopes active sprint search by escaped iteration path and each type’s active state categories', async () => {
+    let query = '';
+    const client = new AdoClient({ fetcher: async (input, init) => {
+      if (String(input).includes('/wiql?')) {
+        query = (JSON.parse(String(init?.body)) as { query: string }).query;
+        return jsonResponse({ workItems: [] });
+      }
+      return jsonResponse({ value: [] });
+    } });
+
+    await client.search('token', {
+      organization: 'contoso', projectId: 'project-1', projectName: 'Portal', term: '',
+      iterationPath: "Portal\\Sprint O'Neil",
+      statesByType: { 'User Story': ['New', 'Working'], 'Custom Feature': ['Ready'] },
+    });
+
+    expect(query).toContain("[System.IterationPath] = 'Portal\\Sprint O''Neil'");
+    expect(query).toContain("(([System.WorkItemType] = 'User Story' AND [System.State] IN ('New', 'Working')) OR ([System.WorkItemType] = 'Custom Feature' AND [System.State] IN ('Ready')))");
+    expect(query).not.toContain("[System.State] IN ()");
+  });
+
   it.each([
     [401, 'authentication'],
     [403, 'permission'],
@@ -183,6 +293,19 @@ describe('read-only ADO client', () => {
     const client = new AdoClient({ fetcher });
 
     await expect(client.getProfile('token')).rejects.toMatchObject({ kind });
+  });
+
+  it('reports which ADO operation rejected a malformed request without exposing a response body', async () => {
+    const client = new AdoClient({ fetcher: async () => new Response(JSON.stringify({ message: 'private server payload' }), { status: 400 }) });
+    await expect(client.search('token', {
+      organization: 'contoso', projectId: 'p1', projectName: 'Portal', term: 'story',
+    })).rejects.toMatchObject({
+      status: 400,
+      message: expect.stringContaining('work item query'),
+    });
+    await expect(client.search('token', {
+      organization: 'contoso', projectId: 'p1', projectName: 'Portal', term: 'story',
+    })).rejects.not.toThrow('private server payload');
   });
 
   it('retries a bounded read after a rate limit and honors Retry-After', async () => {
