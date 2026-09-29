@@ -379,17 +379,6 @@ export function App({
     });
   }
 
-  async function loadConfiguredStories() {
-    await run(async () => {
-      const result = await api.loadActiveProfileWorkItems();
-      setResults(result.stories);
-      setChildrenByParent(result.tasksByStory);
-      setExpandedParents(new Set(result.stories.map(({ id }) => id)));
-      setSearchHasMore(false);
-      setNotice(`Loaded configured Stories and tasks in “${state.adoProfiles?.find(({ id }) => id === state.activeAdoProfileId)?.boardColumn ?? 'the selected board column'}” for ${result.iterationName}.`);
-    });
-  }
-
   async function loadMoreSearchResults() {
     if (!activeSearch || searchAfterId === undefined) return;
     await run(async () => {
@@ -808,7 +797,6 @@ export function App({
               <p className="page-description">Search Stories and Tasks in <strong>{projectLabel(state.selectedProject)}</strong>. Add a Story, its child Tasks, or both to the local QA Queue.</p>
               <SprintWorkPicker api={api} activeAdoProfileId={state.activeAdoProfileId} queuedIds={queuedIds} onQueueChanged={updateState} onError={setError} onNotice={setNotice} />
               <div className="search-panel">
-                {state.activeAdoProfileId ? <div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void loadConfiguredStories()}>{busy ? 'Loading…' : 'Load configured Stories and sprint tasks'}</button><span className="field-help">Uses the active profile's Story IDs, team, current sprint and board column.</span></div> : <p className="field-help">Save and select a configuration profile in Settings to load configured Stories and tasks automatically.</p>}
                 <label className="field-label" htmlFor="work-search">Work item ID or title</label>
                 <div className="search-line"><div className="search-input-wrap"><span aria-hidden="true">⌕</span><input id="work-search" className="search-input" value={searchTerm} onChange={(event) => { setSearchTerm(event.target.value); setSearchHasMore(false); }} onKeyDown={(event) => { if (event.key === 'Enter') void search(); }} placeholder="e.g. 4821 or remember filters" /></div><button className="button primary" type="button" disabled={busy || !state.selectedProject} onClick={() => void search()}>{busy ? 'Searching…' : 'Search work items'}</button></div>
                 <div className="filters-row"><label>Type <select aria-label="Filter by work item type" value={typeFilter} onChange={(event) => { setTypeFilter(event.target.value); setSearchHasMore(false); }}><option value="">All types</option>{workItemTypes.map((type) => <option key={type}>{type}</option>)}</select></label><label>State <select aria-label="Filter by state" value={stateFilter} onChange={(event) => { setStateFilter(event.target.value); setSearchHasMore(false); }}><option value="">All states</option>{['New', 'Active', 'Resolved', 'Closed', 'To Do', 'Doing', 'Done'].map((value) => <option key={value}>{value}</option>)}</select></label></div>
