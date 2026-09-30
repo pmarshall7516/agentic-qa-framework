@@ -147,7 +147,7 @@ function fixture(browserStatus: 'PASSED' | 'FAILED' = 'PASSED', chooseModelKeyFi
 }
 
 describe('desktop controller', () => {
-  it('saves models into a safe catalog and tests reachability with a fixed minimal prompt', async () => {
+  it('automatically tests a saved model with a fixed minimal prompt', async () => {
     const { store, settings } = fixture();
     settings.delete('model.catalog');
     const adapter = {
@@ -158,20 +158,27 @@ describe('desktop controller', () => {
     };
     const controller = new DesktopController({ store, providerFetch: providerFetch as typeof fetch, providerAdapterFactory: () => adapter });
     await controller.saveAgentModelSettings({ providerId: 'openai', modelId: 'gpt-6-luna', maxOutputTokens: 1200 });
-    await controller.saveAgentModelSettings({ providerId: 'openai', modelId: 'gpt-6-luna', maxOutputTokens: 2400 });
     const saved = await controller.getSavedModels();
     expect(saved).toHaveLength(1);
-    expect(saved[0]).toMatchObject({ providerId: 'openai', modelId: 'gpt-6-luna', testStatus: 'untested', maxOutputTokens: 2400 });
+    expect(saved[0]).toMatchObject({ providerId: 'openai', modelId: 'gpt-6-luna', testStatus: 'reachable', maxOutputTokens: 1200 });
     expect(JSON.stringify(saved)).not.toContain('test-provider-key-with-enough-entropy');
-    const result = await controller.testSavedModel(saved[0]!.id);
-    expect(result).toMatchObject({ reachable: true, testStatus: 'reachable' });
+
     expect(adapter.probe).toHaveBeenCalledTimes(1);
     expect(adapter.probe.mock.calls[0]![1]).toBe('gpt-6-luna');
+
+    await controller.saveAgentModelSettings({ providerId: 'openai', modelId: 'gpt-6-luna', maxOutputTokens: 2400 });
+    expect((await controller.getSavedModels())[0]).toMatchObject({ testStatus: 'reachable', maxOutputTokens: 2400 });
+    expect(adapter.probe).toHaveBeenCalledTimes(2);
+
+    const result = await controller.testSavedModel(saved[0]!.id);
+    expect(result).toMatchObject({ reachable: true, testStatus: 'reachable' });
+    expect(adapter.probe).toHaveBeenCalledTimes(3);
     expect((await controller.getSavedModels())[0]).toMatchObject({ testStatus: 'reachable' });
   });
 
   it('marks saved model checks stale after the provider credential generation changes', async () => {
     const { store, settings } = fixture();
+    settings.delete('model.catalog');
     const adapter = {
       providerId: 'openai' as const,
       listModels: vi.fn(async () => [{ providerId: 'openai' as const, modelId: 'gpt-6-luna', displayName: 'GPT-6 Luna', capabilities: { structuredOutput: true, toolUse: true } }]),
@@ -198,6 +205,7 @@ describe('desktop controller', () => {
     const controller = new DesktopController({ store, providerAdapterFactory: () => adapter });
     await controller.saveAgentModelSettings({ providerId: 'openai', modelId: 'gpt-6-luna', maxOutputTokens: 1200 });
     const model = (await controller.getSavedModels())[0]!;
+    expect(model.testStatus).toBe('unreachable');
     const result = await controller.testSavedModel(model.id);
     expect(result).toMatchObject({ reachable: false, testStatus: 'unreachable' });
     expect(JSON.stringify(result)).not.toContain('secret-key-canary');
@@ -313,9 +321,10 @@ describe('desktop controller', () => {
 
   it('connects a Claude plan account, discovers curated models and configures the required agent without storing a key', async () => {
     const login = vi.fn(async () => undefined);
+    let claudeConnected = false;
     const { store, settings } = fixture('PASSED', undefined, undefined, undefined, undefined, { connected: false, login });
     const claudeModels = ['sonnet', 'opus', 'haiku'].map((modelId) => ({ providerId: 'claude-code' as const, modelId, displayName: `Claude ${modelId}`, capabilities: { structuredOutput: true, toolUse: true } }));
-    const controller = new DesktopController({ store, isClaudeAccountConnected: async () => true, startClaudeLogin: login, providerAdapterFactory: () => ({
+    const controller = new DesktopController({ store, isClaudeAccountConnected: async () => claudeConnected, startClaudeLogin: async () => { await login(); claudeConnected = true; }, providerAdapterFactory: () => ({
       providerId: 'claude-code',
       async listModels() { return claudeModels; },
       async discoverModels() { return claudeModels; },
@@ -353,7 +362,7 @@ describe('desktop controller', () => {
       expect(state.modelProviderConfigured).toBe(true);
       expect(state.modelId).toBe('gpt-6-luna');
       expect(JSON.stringify(state)).not.toContain(keyText);
-      expect(providerFetch).toHaveBeenCalledTimes(2);
+      expect(providerFetch).toHaveBeenCalledTimes(3);
     } finally { await rm(keyDirectory, { recursive: true, force: true }); }
   });
 

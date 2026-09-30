@@ -9,11 +9,24 @@ const CATALOG: ProviderModel[] = [
   { providerId: 'claude-code', modelId: 'opus', displayName: 'Claude Opus (subscription)', capabilities: { structuredOutput: true, toolUse: true, inputUsdPerMillionTokens: 4, outputUsdPerMillionTokens: 20 } },
   { providerId: 'claude-code', modelId: 'haiku', displayName: 'Claude Haiku (subscription)', capabilities: { structuredOutput: true, toolUse: true, inputUsdPerMillionTokens: 1, outputUsdPerMillionTokens: 5 } },
 ];
-const CliResponseSchema = z.object({ result: z.string().max(1_000_000), usage: z.object({ input_tokens: z.number().int().nonnegative().optional(), output_tokens: z.number().int().nonnegative().optional() }).passthrough().optional() }).passthrough();
+const CliResponseSchema = z.object({ result: z.string().max(1_000_000), is_error: z.boolean().optional(), usage: z.object({ input_tokens: z.number().int().nonnegative().optional(), output_tokens: z.number().int().nonnegative().optional() }).passthrough().optional() }).passthrough();
+
+function cliResponseError(raw: string): string | undefined {
+  try {
+    const response = CliResponseSchema.parse(JSON.parse(raw));
+    if (!response.is_error) return undefined;
+    if (/not logged in|please run \/login/i.test(response.result)) return 'Claude Code says this CLI is not signed in. Sign in again in Claude Code, then retry model discovery.';
+    if (/rate.?limit|usage limit|limit reached|out of.*(?:usage|messages)/i.test(response.result)) return 'Claude Code reports that this account has reached a usage limit. Wait for the limit to reset, then retry.';
+    if (/model.{0,40}(?:not found|not available|no access|does not have access)|(?:not found|not available).{0,40}model/i.test(response.result)) return 'Claude Code reports that this account cannot access this model.';
+    return 'Claude Code returned an error instead of a model response. Check the account and retry.';
+  } catch {
+    return undefined;
+  }
+}
 
 async function runClaudeCli(args: string[], input: string, timeoutMs = 120_000): Promise<string> {
   const result = await runClaudeCliCommand(args, input, { timeoutMs, maxOutputBytes: 5_000_000 });
-  if (result.code !== 0) throw new Error(`Claude Code request failed (exit ${result.code}). Check the signed-in account, selected model access and plan limits.`);
+  if (result.code !== 0) throw new Error(cliResponseError(result.output) ?? `Claude Code request failed (exit ${result.code}). Check the signed-in account, selected model access and plan limits.`);
   return result.output;
 }
 
@@ -33,7 +46,7 @@ async function complete<T>(runner: CliRunner, request: AgentCompletionRequest): 
   if (Buffer.byteLength(outputSchema) > 24_000) throw new Error('Claude Code result schema exceeded the safe CLI argument limit.');
   const args = [
     '--print', '--output-format', 'json', '--no-session-persistence', '--disable-slash-commands',
-    '--strict-mcp-config', '--mcp-config', '{}', '--setting-sources', '', '--tools', '',
+    '--strict-mcp-config', '--setting-sources', '', '--tools', '',
     '--permission-mode', 'dontAsk', '--model', model.modelId, '--json-schema', outputSchema,
   ];
   let raw: string;
@@ -57,14 +70,17 @@ async function probe(runner: CliRunner, modelId: string, timeoutMs = 30_000): Pr
   if (!model) throw new Error('The selected model is not in the Claude Code model catalog.');
   const raw = await runner([
     '--print', '--output-format', 'json', '--no-session-persistence', '--disable-slash-commands',
-    '--strict-mcp-config', '--mcp-config', '{}', '--setting-sources', '', '--tools', '',
+    '--strict-mcp-config', '--setting-sources', '', '--tools', '',
     '--permission-mode', 'dontAsk', '--model', model.modelId,
   ], 'Reply with OK.', timeoutMs);
   let decoded: unknown;
   try { decoded = JSON.parse(raw); }
   catch { throw new Error('Claude Code returned an invalid reachability response.'); }
   const response = CliResponseSchema.safeParse(decoded);
-  if (!response.success || !response.data.result.trim()) throw new Error('Claude Code returned no text for the reachability prompt.');
+  if (!response.success) throw new Error('Claude Code returned an invalid reachability response.');
+  const responseError = cliResponseError(raw);
+  if (responseError) throw new Error(responseError);
+  if (!response.data.result.trim()) throw new Error('Claude Code returned no text for the reachability prompt.');
 }
 
 function createAdapter(runner: CliRunner) {
@@ -76,14 +92,17 @@ function createAdapter(runner: CliRunner) {
       const results = await Promise.all(CATALOG.map(async (model) => {
         try {
           await probe(runner, model.modelId, 30_000);
-          return structuredClone(model);
-        } catch {
+          return { model: structuredClone(model) };
+        } catch (error) {
           // A model is shown only when the connected Claude Code account can use it.
-          return undefined;
+          return { error: error instanceof Error ? error.message : 'Claude Code did not complete the model check.' };
         }
       }));
-      const available = results.filter((model): model is ProviderModel => model !== undefined);
-      if (!available.length) throw new Error('No supported Claude models could be verified for this account. Check Claude Code sign-in and plan access, then try again.');
+      const available = results.flatMap((result) => result.model ? [result.model] : []);
+      if (!available.length) {
+        const failure = results.find((result) => result.error?.includes('not signed in'))?.error ?? results.find((result) => result.error)?.error;
+        throw new Error(failure ?? 'No supported Claude models responded to the prompt check. Check account access and plan limits, then retry.');
+      }
       return available;
     },
     complete<T>(_apiKey: string, request: AgentCompletionRequest) { return complete<T>(runner, request); },

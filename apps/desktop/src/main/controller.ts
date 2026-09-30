@@ -323,6 +323,7 @@ export class DesktopController {
     await this.store.setSetting('model.provider', settings.providerId);
     await this.store.setSetting('model.settings', settings);
     this.pendingModelPreviews.clear();
+    await this.testSavedModel(savedModel.id);
     return this.getSavedModels();
   }
 

@@ -299,6 +299,8 @@ export function App({
   const [busy, setBusy] = useState(false);
   const [isConnectingClaude, setIsConnectingClaude] = useState(false);
   const [isCheckingClaudeModels, setIsCheckingClaudeModels] = useState(false);
+  const [isSavingModel, setIsSavingModel] = useState(false);
+  const [testingSavedModelId, setTestingSavedModelId] = useState<string>();
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [targetKind, setTargetKind] = useState<TargetConfig['targetKind']>(initialState?.target?.targetKind ?? 'site');
@@ -722,19 +724,34 @@ export function App({
   }
 
   async function saveModelSettings() {
-    await run(async () => {
-      await api.saveAgentModelSettings({ providerId: modelProvider, modelId: modelId.trim(), maxOutputTokens: modelMaxOutputTokens });
-      updateState(await api.getState());
-      setNotice('Saved model added to the local catalog. Test it before selecting it for a QA plan.');
-    });
+    setIsSavingModel(true);
+    try {
+      await run(async () => {
+        setNotice('Saving the model and checking it with a short prompt…');
+        const savedModels = await api.saveAgentModelSettings({ providerId: modelProvider, modelId: modelId.trim(), maxOutputTokens: modelMaxOutputTokens });
+        updateState(await api.getState());
+        const savedModel = savedModels.find((model) => model.providerId === modelProvider && model.modelId === modelId.trim());
+        setNotice(savedModel?.testStatus === 'reachable'
+          ? `${savedModel.displayName}: Test Success.`
+          : `${savedModel?.displayName ?? 'Model'}: Test Fail. You can retest it after checking the connection.`);
+      });
+    } finally {
+      setIsSavingModel(false);
+    }
   }
 
   async function testSavedModel(id: string) {
-    await run(async () => {
-      const result = await api.testSavedModel(id);
-      updateState(await api.getState());
-      setNotice(result.message);
-    });
+    setTestingSavedModelId(id);
+    try {
+      await run(async () => {
+        setNotice('Sending a short prompt to the saved model…');
+        const result = await api.testSavedModel(id);
+        updateState(await api.getState());
+        setNotice(result.reachable ? 'Test Success. The model returned a response.' : 'Test Fail. The model did not return a response; you can retest it.');
+      });
+    } finally {
+      setTestingSavedModelId(undefined);
+    }
   }
 
   async function removeSavedModel(id: string) {
@@ -1164,10 +1181,19 @@ export function App({
                 <div className="filters-row settings-fields"><label>Provider<select className="text-input" value={modelProvider} onChange={(event) => { const next = event.target.value as 'openai' | 'anthropic' | 'openrouter' | 'claude-code'; setModelProvider(next); setProviderModels([]); setModelId(''); }}><option value="openai">OpenAI API</option><option value="anthropic">Anthropic API key</option><option value="openrouter">OpenRouter API key · multi-model catalog</option><option value="claude-code">Claude account · Claude Code plan</option></select></label><button className="button outline" type="button" disabled={busy} onClick={() => void connectProvider()}>{isConnectingClaude ? 'Checking Claude connection…' : isCheckingClaudeModels ? 'Checking models…' : modelProvider === 'claude-code' && selectedProviderConnected ? 'Check Claude account' : modelProvider === 'claude-code' ? 'Connect Claude account…' : 'Import key and discover models…'}</button></div>
                 {modelProvider === 'claude-code' && selectedProviderConnected ? <p className="connected-account" role="status"><span className="connected-indicator" aria-hidden="true" />Connected Claude account <strong>{state.modelProviderAccountEmail ?? 'Email not provided by Claude Code'}</strong></p> : null}
                 <div className="filters-row settings-fields model-settings-fields"><label>Model<ModelCombobox models={providerModels} value={modelId} disabled={busy} onChange={setModelId} /></label><label>Max output tokens<input className="text-input" type="number" min={256} max={32000} step={256} value={modelMaxOutputTokens} onChange={(event) => setModelMaxOutputTokens(Number(event.target.value))} /></label></div>
-                <div className="button-row"><button className="button outline" type="button" disabled={busy || !selectedProviderConnected} onClick={() => void discoverProviderModels()}>{isCheckingClaudeModels ? 'Checking 3 models…' : modelProvider === 'claude-code' ? 'Check account models' : 'Refresh model list'}</button><button className="button primary" type="button" disabled={busy || !selectedProviderConnected || !modelId} onClick={() => void saveModelSettings()}>Save model to catalog</button></div>
-                <div className="saved-model-list"><h3>Saved models</h3>{(state.savedModels ?? []).map((model) => <div className="profile-card" key={model.id}><div><strong>{model.displayName}</strong><span>{model.providerId} / {model.modelId} · {model.capabilities.structuredOutput ? 'structured output' : 'no structured output'} · {model.capabilities.toolUse ? 'tool use' : 'no tool use'} · {model.testStatus === 'reachable' ? `reachable${model.testedAt ? ` · ${new Date(model.testedAt).toLocaleString()}` : ''}` : model.testStatus === 'unreachable' ? 'unreachable' : model.testStatus === 'stale' ? 'test stale after credential change' : 'not tested'}{model.testMessage ? ` · ${model.testMessage}` : ''}</span></div><div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void testSavedModel(model.id)}>Test model</button><button className="button quiet" type="button" disabled={busy} onClick={() => void removeSavedModel(model.id)}>Remove</button></div></div>)}{!(state.savedModels ?? []).length ? <p className="field-help">Models you save appear here. Test a model to confirm the provider can reach it.</p> : null}</div>
+                <div className="button-row"><button className="button outline" type="button" disabled={busy || !selectedProviderConnected} onClick={() => void discoverProviderModels()}>{isCheckingClaudeModels ? 'Checking 3 models…' : modelProvider === 'claude-code' ? 'Check account models' : 'Refresh model list'}</button><button className="button primary" type="button" disabled={busy || !selectedProviderConnected || !modelId} onClick={() => void saveModelSettings()}>{isSavingModel ? 'Saving and testing…' : 'Save and test model'}</button></div>
+                <div className="saved-model-list"><h3>Saved models</h3>{(state.savedModels ?? []).map((model) => {
+                  const isTesting = testingSavedModelId === model.id;
+                  const statusLabel = isTesting ? 'Testing…' : model.testStatus === 'reachable' ? 'Test Success' : model.testStatus === 'unreachable' ? 'Test Fail' : model.testStatus === 'stale' ? 'Retest required' : 'Not tested';
+                  const statusClass = isTesting ? 'test-status-pending' : model.testStatus === 'reachable' ? 'test-status-success' : model.testStatus === 'unreachable' ? 'test-status-fail' : 'test-status-pending';
+                  return <div className="saved-model-row" key={model.id}>
+                    <div className="saved-model-copy"><strong>{model.displayName}</strong><span>{model.providerId} / {model.modelId}</span></div>
+                    <span className={`saved-model-status ${statusClass}`} role="status">{statusLabel}</span>
+                    <div className="saved-model-actions"><button className="button outline" type="button" disabled={busy} onClick={() => void testSavedModel(model.id)}>{isTesting ? 'Testing…' : model.testStatus === 'untested' ? 'Test now' : 'Retest'}</button><button className="button quiet" type="button" disabled={busy} onClick={() => void removeSavedModel(model.id)}>Remove</button></div>
+                  </div>;
+                })}{!(state.savedModels ?? []).length ? <p className="field-help">Models you save appear here with their latest prompt-test result.</p> : null}</div>
                 {selectedProviderConnected ? <button className="button quiet" type="button" disabled={busy} onClick={() => void run(async () => { await api.clearModelKey(); setProviderModels([]); setModelId(''); updateState(await api.getState()); setNotice(modelProvider === 'claude-code' ? 'Claude model selection cleared. Your Claude Code account remains signed in.' : 'Provider key and selected agent model removed from encrypted local storage.'); })}>{modelProvider === 'claude-code' ? 'Clear selected Claude model' : 'Remove provider connection'}</button> : null}
-                <small>{modelProvider === 'claude-code' ? 'Sign-in runs through Claude Code. Checking account models sends one short prompt to each supported model; Test model sends one short prompt to a saved model. Both use your Claude plan allowance. Prices shown are API-equivalent estimates and do not represent Claude plan billing.' : 'Choose a private one-line key file in the native picker. The main process reads it, stores it in encrypted local settings, and never sends it to the renderer. The model catalog lists models that report structured output, tool use and pricing. OpenRouter provides a broad catalog behind one key.'}</small>
+                <small>{modelProvider === 'claude-code' ? 'Saving or retesting a model sends one short prompt with no project data and uses your Claude plan allowance. Checking account models sends one short prompt per candidate model. Prices shown are API-equivalent estimates only.' : 'Choose a private one-line key file in the native picker. Saving or retesting a model sends one short prompt with no project data; standard provider charges may apply. The key is stored in encrypted local settings and never returned to the renderer.'}</small>
               </div>
             </section>
           ) : null}
