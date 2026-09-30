@@ -297,6 +297,8 @@ export function App({
   const [childrenByParent, setChildrenByParent] = useState<Record<number, WorkItemSnapshot[]>>({});
   const [expandedParents, setExpandedParents] = useState<Set<number>>(new Set());
   const [busy, setBusy] = useState(false);
+  const [isConnectingClaude, setIsConnectingClaude] = useState(false);
+  const [isCheckingClaudeModels, setIsCheckingClaudeModels] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [targetKind, setTargetKind] = useState<TargetConfig['targetKind']>(initialState?.target?.targetKind ?? 'site');
@@ -669,42 +671,54 @@ export function App({
   }
 
   async function connectProvider() {
-    await run(async () => {
-      if (modelProvider === 'claude-code') {
-        setNotice('Opening Claude Code sign-in. Complete the sign-in in your browser; this window will confirm the connected account.');
-        const connected = await api.connectClaudeAccount();
-        if (!connected) { setNotice('Claude Code connection canceled.'); return; }
-        const next = await api.getState();
-        updateState(next);
-        setProviderModels([]);
-        setModelId(modelProvider === state.modelProvider ? state.modelId ?? '' : '');
-        setNotice(next.modelProviderAccountEmail
-          ? `Claude Code connected as ${next.modelProviderAccountEmail}. Check this account’s available models before choosing one.`
-          : 'Claude Code connected. Check the account’s available models before choosing one.');
-        return;
-      } else {
-        const imported = await api.importProviderKey(modelProvider);
-        if (!imported) { setNotice('Provider key import canceled.'); return; }
-      }
-      const models = await api.listProviderModels(modelProvider);
-      setProviderModels(models);
-      const priorModel = modelProvider === state.modelProvider ? state.modelId ?? '' : '';
-      updateState(await api.getState());
-      setModelId(models.some(({ modelId: id }) => id === priorModel) ? priorModel : '');
-      setNotice(`${modelProvider === 'openai' ? 'OpenAI' : modelProvider === 'anthropic' ? 'Anthropic' : 'OpenRouter'} connected. ${models.length} supported models discovered.`);
-    });
+    const connectingClaude = modelProvider === 'claude-code';
+    if (connectingClaude) setIsConnectingClaude(true);
+    try {
+      await run(async () => {
+        if (modelProvider === 'claude-code') {
+          setNotice('Opening Claude Code sign-in. Complete the sign-in in your browser; this window will confirm the connected account.');
+          const connected = await api.connectClaudeAccount();
+          if (!connected) { setNotice('Claude Code connection canceled.'); return; }
+          const next = await api.getState();
+          updateState(next);
+          setProviderModels([]);
+          setModelId(modelProvider === state.modelProvider ? state.modelId ?? '' : '');
+          setNotice(next.modelProviderAccountEmail
+            ? `Claude Code connected as ${next.modelProviderAccountEmail}. Check this account’s available models before choosing one.`
+            : 'Claude Code connected. Check the account’s available models before choosing one.');
+          return;
+        } else {
+          const imported = await api.importProviderKey(modelProvider);
+          if (!imported) { setNotice('Provider key import canceled.'); return; }
+        }
+        const models = await api.listProviderModels(modelProvider);
+        setProviderModels(models);
+        const priorModel = modelProvider === state.modelProvider ? state.modelId ?? '' : '';
+        updateState(await api.getState());
+        setModelId(models.some(({ modelId: id }) => id === priorModel) ? priorModel : '');
+        setNotice(`${modelProvider === 'openai' ? 'OpenAI' : modelProvider === 'anthropic' ? 'Anthropic' : 'OpenRouter'} connected. ${models.length} supported models discovered.`);
+      });
+    } finally {
+      if (connectingClaude) setIsConnectingClaude(false);
+    }
   }
 
   async function discoverProviderModels() {
-    await run(async () => {
-      if (modelProvider === 'claude-code') setNotice('Checking supported Claude models with short prompts. This uses your Claude plan allowance.');
-      const models = await api.listProviderModels(modelProvider);
-      setProviderModels(models);
-      if (modelProvider === 'claude-code' && !models.some(({ modelId: id }) => id === modelId)) setModelId('');
-      setNotice(modelProvider === 'claude-code'
-        ? `${models.length} Claude models are available to ${state.modelProviderAccountEmail ?? 'this account'}.`
-        : `${models.length} supported models discovered.`);
-    });
+    const checkingClaudeModels = modelProvider === 'claude-code';
+    if (checkingClaudeModels) setIsCheckingClaudeModels(true);
+    try {
+      await run(async () => {
+        if (checkingClaudeModels) setNotice('Checking 3 Claude models in parallel. This may take up to 30 seconds and uses your Claude plan allowance.');
+        const models = await api.listProviderModels(modelProvider);
+        setProviderModels(models);
+        if (modelProvider === 'claude-code' && !models.some(({ modelId: id }) => id === modelId)) setModelId('');
+        setNotice(modelProvider === 'claude-code'
+          ? `${models.length} Claude models are available to ${state.modelProviderAccountEmail ?? 'this account'}.`
+          : `${models.length} supported models discovered.`);
+      });
+    } finally {
+      if (checkingClaudeModels) setIsCheckingClaudeModels(false);
+    }
   }
 
   async function saveModelSettings() {
@@ -993,7 +1007,7 @@ export function App({
 
         <main className="content-area">
           {error ? <div className="message error-message" role="alert">{error}</div> : null}
-          {notice ? <div className="message success-message" role="status">{notice}</div> : null}
+          {notice ? <div className={`message ${isCheckingClaudeModels ? 'info-message' : 'success-message'}`} role="status">{notice}</div> : null}
 
           {screen === 'connections' ? (
             <section className="page-section">
@@ -1147,10 +1161,10 @@ export function App({
               </div>
               <div className="panel selection-panel model-settings">
                 <div className="panel-title-row"><div><h2>Required AI agent provider</h2><p>{selectedProviderConnected ? modelProvider === 'claude-code' ? 'Claude Code is connected. Its credentials stay in Claude Code and are never returned to the renderer or sent to QA workers.' : `${modelProvider === 'openai' ? 'OpenAI' : modelProvider === 'anthropic' ? 'Anthropic' : 'OpenRouter'} API key is stored locally. The key is never returned to the renderer or sent to workers.` : 'Connect a provider before planning or running QA. No deterministic plan fallback is available.'}</p></div><span className="security-tag">{selectedProviderConnected ? 'CONNECTED' : 'REQUIRED'}</span></div>
-                <div className="filters-row settings-fields"><label>Provider<select className="text-input" value={modelProvider} onChange={(event) => { const next = event.target.value as 'openai' | 'anthropic' | 'openrouter' | 'claude-code'; setModelProvider(next); setProviderModels([]); setModelId(''); }}><option value="openai">OpenAI API</option><option value="anthropic">Anthropic API key</option><option value="openrouter">OpenRouter API key · multi-model catalog</option><option value="claude-code">Claude account · Claude Code plan</option></select></label><button className="button outline" type="button" disabled={busy} onClick={() => void connectProvider()}>{busy && modelProvider === 'claude-code' ? 'Connecting Claude account…' : modelProvider === 'claude-code' && selectedProviderConnected ? 'Check Claude account' : modelProvider === 'claude-code' ? 'Connect Claude account…' : 'Import key and discover models…'}</button></div>
+                <div className="filters-row settings-fields"><label>Provider<select className="text-input" value={modelProvider} onChange={(event) => { const next = event.target.value as 'openai' | 'anthropic' | 'openrouter' | 'claude-code'; setModelProvider(next); setProviderModels([]); setModelId(''); }}><option value="openai">OpenAI API</option><option value="anthropic">Anthropic API key</option><option value="openrouter">OpenRouter API key · multi-model catalog</option><option value="claude-code">Claude account · Claude Code plan</option></select></label><button className="button outline" type="button" disabled={busy} onClick={() => void connectProvider()}>{isConnectingClaude ? 'Checking Claude connection…' : isCheckingClaudeModels ? 'Checking models…' : modelProvider === 'claude-code' && selectedProviderConnected ? 'Check Claude account' : modelProvider === 'claude-code' ? 'Connect Claude account…' : 'Import key and discover models…'}</button></div>
                 {modelProvider === 'claude-code' && selectedProviderConnected ? <p className="connected-account" role="status"><span className="connected-indicator" aria-hidden="true" />Connected Claude account <strong>{state.modelProviderAccountEmail ?? 'Email not provided by Claude Code'}</strong></p> : null}
                 <div className="filters-row settings-fields model-settings-fields"><label>Model<ModelCombobox models={providerModels} value={modelId} disabled={busy} onChange={setModelId} /></label><label>Max output tokens<input className="text-input" type="number" min={256} max={32000} step={256} value={modelMaxOutputTokens} onChange={(event) => setModelMaxOutputTokens(Number(event.target.value))} /></label></div>
-                <div className="button-row"><button className="button outline" type="button" disabled={busy || !selectedProviderConnected} onClick={() => void discoverProviderModels()}>{modelProvider === 'claude-code' ? 'Check account models' : 'Refresh model list'}</button><button className="button primary" type="button" disabled={busy || !selectedProviderConnected || !modelId} onClick={() => void saveModelSettings()}>Save model to catalog</button></div>
+                <div className="button-row"><button className="button outline" type="button" disabled={busy || !selectedProviderConnected} onClick={() => void discoverProviderModels()}>{isCheckingClaudeModels ? 'Checking 3 models…' : modelProvider === 'claude-code' ? 'Check account models' : 'Refresh model list'}</button><button className="button primary" type="button" disabled={busy || !selectedProviderConnected || !modelId} onClick={() => void saveModelSettings()}>Save model to catalog</button></div>
                 <div className="saved-model-list"><h3>Saved models</h3>{(state.savedModels ?? []).map((model) => <div className="profile-card" key={model.id}><div><strong>{model.displayName}</strong><span>{model.providerId} / {model.modelId} · {model.capabilities.structuredOutput ? 'structured output' : 'no structured output'} · {model.capabilities.toolUse ? 'tool use' : 'no tool use'} · {model.testStatus === 'reachable' ? `reachable${model.testedAt ? ` · ${new Date(model.testedAt).toLocaleString()}` : ''}` : model.testStatus === 'unreachable' ? 'unreachable' : model.testStatus === 'stale' ? 'test stale after credential change' : 'not tested'}{model.testMessage ? ` · ${model.testMessage}` : ''}</span></div><div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void testSavedModel(model.id)}>Test model</button><button className="button quiet" type="button" disabled={busy} onClick={() => void removeSavedModel(model.id)}>Remove</button></div></div>)}{!(state.savedModels ?? []).length ? <p className="field-help">Models you save appear here. Test a model to confirm the provider can reach it.</p> : null}</div>
                 {selectedProviderConnected ? <button className="button quiet" type="button" disabled={busy} onClick={() => void run(async () => { await api.clearModelKey(); setProviderModels([]); setModelId(''); updateState(await api.getState()); setNotice(modelProvider === 'claude-code' ? 'Claude model selection cleared. Your Claude Code account remains signed in.' : 'Provider key and selected agent model removed from encrypted local storage.'); })}>{modelProvider === 'claude-code' ? 'Clear selected Claude model' : 'Remove provider connection'}</button> : null}
                 <small>{modelProvider === 'claude-code' ? 'Sign-in runs through Claude Code. Checking account models sends one short prompt to each supported model; Test model sends one short prompt to a saved model. Both use your Claude plan allowance. Prices shown are API-equivalent estimates and do not represent Claude plan billing.' : 'Choose a private one-line key file in the native picker. The main process reads it, stores it in encrypted local settings, and never sends it to the renderer. The model catalog lists models that report structured output, tool use and pricing. OpenRouter provides a broad catalog behind one key.'}</small>

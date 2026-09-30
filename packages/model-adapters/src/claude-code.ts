@@ -52,14 +52,14 @@ async function complete<T>(runner: CliRunner, request: AgentCompletionRequest): 
   return { value: validated.data as T, inputTokens, outputTokens };
 }
 
-async function probe(runner: CliRunner, modelId: string): Promise<void> {
+async function probe(runner: CliRunner, modelId: string, timeoutMs = 30_000): Promise<void> {
   const model = CATALOG.find(({ modelId: supportedId }) => supportedId === modelId);
   if (!model) throw new Error('The selected model is not in the Claude Code model catalog.');
   const raw = await runner([
     '--print', '--output-format', 'json', '--no-session-persistence', '--disable-slash-commands',
     '--strict-mcp-config', '--mcp-config', '{}', '--setting-sources', '', '--tools', '',
     '--permission-mode', 'dontAsk', '--model', model.modelId,
-  ], 'Reply with OK.', 45_000);
+  ], 'Reply with OK.', timeoutMs);
   let decoded: unknown;
   try { decoded = JSON.parse(raw); }
   catch { throw new Error('Claude Code returned an invalid reachability response.'); }
@@ -73,15 +73,16 @@ function createAdapter(runner: CliRunner) {
     async listModels(_apiKey: string): Promise<ProviderModel[]> { return CATALOG.map((model) => structuredClone(model)); },
     async probe(_apiKey: string, modelId: string): Promise<void> { await probe(runner, modelId); },
     async discoverModels(): Promise<ProviderModel[]> {
-      const available: ProviderModel[] = [];
-      for (const model of CATALOG) {
+      const results = await Promise.all(CATALOG.map(async (model) => {
         try {
-          await probe(runner, model.modelId);
-          available.push(structuredClone(model));
+          await probe(runner, model.modelId, 30_000);
+          return structuredClone(model);
         } catch {
           // A model is shown only when the connected Claude Code account can use it.
+          return undefined;
         }
-      }
+      }));
+      const available = results.filter((model): model is ProviderModel => model !== undefined);
       if (!available.length) throw new Error('No supported Claude models could be verified for this account. Check Claude Code sign-in and plan access, then try again.');
       return available;
     },
