@@ -31,6 +31,7 @@ export type ReviewUsage = { inputTokens: number; outputTokens: number; providerC
 
 export interface ReviewQaRunInput {
   provider: ModelProviderAdapter;
+  onModelText?: (phase: string, chunk: string) => void;
   apiKey: string;
   model: ProviderModel;
   modelId: string;
@@ -144,6 +145,7 @@ export async function reviewQaRun(input: ReviewQaRunInput): Promise<ReviewedQaRu
     input: inputText,
     maxOutputTokens: outputTokens,
     schema: EvidenceLinkedReviewSchema,
+    onText: (chunk) => input.onModelText?.('evidence-review', chunk),
   }, input.fetcher);
   const report = validateReview(EvidenceLinkedReviewSchema.parse(completion.value), input);
   const costUsd = estimateCost(completion.inputTokens, completion.outputTokens, input.model);

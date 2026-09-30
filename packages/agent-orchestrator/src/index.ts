@@ -60,6 +60,7 @@ export interface PlanningInput {
   testAccounts?: Array<{ id: string; label: string; origin: string; hasUsername: boolean; hasPassword: boolean }>;
   apiKey: string;
   provider: ModelProviderAdapter;
+  onModelText?: (phase: string, chunk: string) => void;
   fetcher?: typeof fetch;
   now?: () => Date;
 }
@@ -84,6 +85,7 @@ export type WorkItemSynthesis = z.infer<typeof WorkItemSynthesisSchema>;
 
 export async function synthesizeWorkItemPlan(input: {
   provider: ModelProviderAdapter;
+  onModelText?: (phase: string, chunk: string) => void;
   apiKey: string;
   modelId: string;
   items: Array<{ id: number; parentId?: number; kind: string; type: string; title: string; state?: string; description?: string; acceptanceCriteria?: string; comments?: string[] }>;
@@ -106,6 +108,7 @@ export async function synthesizeWorkItemPlan(input: {
     input: prompt,
     maxOutputTokens: 6000,
     schema: WorkItemSynthesisSchema,
+    onText: (chunk) => input.onModelText?.('work-item-synthesis', chunk),
   }, input.fetcher);
   const result = WorkItemSynthesisSchema.parse(response.value);
   const proposalIds = new Set(result.proposals.map(({ id }) => id));
@@ -327,6 +330,7 @@ export async function planQaRun(input: PlanningInput): Promise<PlannedQaRun> {
     input: orchestratorInput,
     maxOutputTokens: envelope.budget.maxOutputTokens,
     schema: OrchestratorPlanSchema,
+    onText: (chunk) => input.onModelText?.('orchestrator-plan', chunk),
   }, input.fetcher);
   const delegationPlan = DelegationPlanSchema.parse(OrchestratorPlanSchema.parse(planned.value));
   validatePlanAgainstEnvelope(delegationPlan, envelope, contract, availableLayers);
@@ -358,6 +362,7 @@ export async function planQaRun(input: PlanningInput): Promise<PlannedQaRun> {
       input: browserInput,
       maxOutputTokens: specialistOutputAllowance,
       schema: z.object({ browserScenarios: z.array(BrowserScenarioDraftSchema).min(1).max(100) }).strict(),
+      onText: (chunk) => input.onModelText?.(`frontend-${assignment.id}`, chunk),
     }, input.fetcher);
     const scenarios = z.array(BrowserScenarioDraftSchema).max(100).parse((result.value as { browserScenarios?: unknown }).browserScenarios);
     const expectedIds = criteria.map(({ id }) => id);
@@ -410,6 +415,7 @@ export async function planQaRun(input: PlanningInput): Promise<PlannedQaRun> {
         input: backendInput,
         maxOutputTokens: specialistOutputAllowance,
         schema: z.object({ tests: z.array(RepositoryTestDraftSchema).min(1).max(20) }).strict(),
+        onText: (chunk) => input.onModelText?.(`backend-${assignment.id}`, chunk),
       }, input.fetcher);
       specialistUsage = {
         inputTokens: specialistUsage.inputTokens + generated.inputTokens,

@@ -33,7 +33,7 @@ import type { ProviderModel, SavedModelView } from '@agentic-qa/domain/agent';
 import { buildDelegationDiagram, DelegationDiagramSchema, DelegationPlanSchema, ProviderModelSchema, RunBudgetSchema, RunEnvelopeSchema, SavedModelSchema, SavedModelViewSchema } from '@agentic-qa/domain/agent';
 import type { ModelProviderAdapter } from '@agentic-qa/model-adapters/provider';
 import { EvidenceLinkedReviewSchema, planQaRun, RepositoryTestDraftSchema, reviewQaRun, synthesizeWorkItemPlan } from '@agentic-qa/agent-orchestrator';
-import type { AdoRunProfile, AdoRunProfileInput, BrowserTestAccountInput, BrowserTestAccountSummary, DesktopState, DraftPlan, QueueItemView, SearchItemsInput, TargetConfig } from '../shared/ipc.js';
+import type { AdoRunProfile, AdoRunProfileInput, BrowserTestAccountInput, BrowserTestAccountSummary, DesktopState, DraftPlan, ModelStreamEvent, QueueItemView, SearchItemsInput, TargetConfig } from '../shared/ipc.js';
 
 const SETTING = {
   accountId: 'entra.selectedAccountId',
@@ -152,6 +152,7 @@ export class DesktopController {
   private readonly saveAdoProfilesConfig?: (contents: string) => Promise<boolean>;
   private readonly providerFetch: typeof fetch;
   private readonly getProviderAdapter: (providerId: SupportedProviderId) => ModelProviderAdapter;
+  private readonly emitModelStream: (event: ModelStreamEvent) => void;
   private readonly pendingModelPreviews = new Map<string, { runId: string; draftHash: string; preview: ReturnType<typeof buildModelPayload>; includedCriterionIds: string[]; expiresAt: number }>();
 
   constructor(options: {
@@ -181,6 +182,7 @@ export class DesktopController {
     saveAdoProfilesConfig?: (contents: string) => Promise<boolean>;
     providerFetch?: typeof fetch;
     providerAdapterFactory?: (providerId: SupportedProviderId) => ModelProviderAdapter;
+    emitModelStream?: (event: ModelStreamEvent) => void;
   }) {
     this.store = options.store;
     this.ado = options.ado ?? new AdoClient();
@@ -213,6 +215,7 @@ export class DesktopController {
     this.saveAdoProfilesConfig = options.saveAdoProfilesConfig;
     this.providerFetch = options.providerFetch ?? fetch;
     this.getProviderAdapter = options.providerAdapterFactory ?? providerAdapter;
+    this.emitModelStream = options.emitModelStream ?? (() => undefined);
   }
 
   async getState(): Promise<DesktopState> {
@@ -1126,7 +1129,8 @@ export class DesktopController {
     await this.setSetting(this.repositoryConfigSettingKey(target), config);
   }
 
-  async createDraftPlan(previousRunId?: string): Promise<DraftPlan> {
+  async createDraftPlan(previousRunId?: string, streamIdInput?: string): Promise<DraftPlan> {
+    const streamId = z.string().uuid().parse(streamIdInput ?? randomUUID());
     const configuredAgent = await this.requireConfiguredAgent();
     this.pendingPlans.clear();
     let target = TargetSchema.parse(await this.setting<TargetConfig>('run.target'));
@@ -1220,6 +1224,7 @@ export class DesktopController {
     const synthesis = await synthesizeWorkItemPlan({
       provider: this.getProviderAdapter(configuredAgent.providerId), apiKey: configuredAgent.apiKey,
       modelId: configuredAgent.modelId,
+      onModelText: (phase, chunk) => this.streamModelText(streamId, 'planning', phase, chunk),
       items: snapshots.map(({ id, parentId, kind, type, title, state, description, acceptanceCriteria, comments }) => ({ id, ...(parentId ? { parentId } : {}), kind, type, title, state, ...(description ? { description } : {}), ...(acceptanceCriteria ? { acceptanceCriteria } : {}), ...(comments?.length ? { comments } : {}) })),
       fetcher: this.providerFetch,
     });
@@ -1354,6 +1359,7 @@ export class DesktopController {
       contract,
       apiKey: configuredAgent.apiKey,
       provider: providerAdapter(configuredAgent.providerId),
+      onModelText: (phase, chunk) => this.streamModelText(original.manifest.runId, 'run', phase, chunk),
       repositoryContext: approvedRepositoryContext,
       repositoryCommands: approvedRepositoryConfig?.tests.map(({ id, resultFormat, resultPaths }) => ({ id, resultFormat, resultPaths })) ?? [],
       runInstructions: target.runInstructions,
@@ -1596,6 +1602,12 @@ export class DesktopController {
   private async progress(runId: string, worker: RunProgressEvent['worker'], state: RunProgressEvent['state'], stage: string, message: string): Promise<void> {
     const event = { runId, worker, state, stage, message: message.slice(0, 500), at: new Date().toISOString() };
     await this.store.appendProgress(event);
+  }
+
+  private streamModelText(streamId: string, scope: ModelStreamEvent['scope'], phase: string, chunk: string): void {
+    if (!chunk) return;
+    try { this.emitModelStream({ streamId, scope, phase, chunk, at: new Date().toISOString() }); }
+    catch { /* A closed renderer cannot interrupt planning or change QA results. */ }
   }
 
   async classifyFinding(input: { runId: string; findingId: string; kind: Finding['kind']; author: string; reason: string }): Promise<QAReport> {
@@ -1894,6 +1906,7 @@ export class DesktopController {
         const reviewerModel = ProviderModelSchema.parse(agentData.selectedModelDetails?.reviewer);
         const reviewed = await reviewQaRun({
           provider: providerAdapter(configuredAgent.providerId), apiKey: configuredAgent.apiKey, model: reviewerModel, modelId: reviewerModelId,
+          onModelText: (phase, chunk) => this.streamModelText(runId, 'run', phase, chunk),
           runId, criteria: archived.contract.criteria.map(({ id, expectedBehavior, scenarioIds }) => ({ id, expectedBehavior, scenarioIds })),
           criterionResults, observations, findings, repositoryTests: (agentData.repositoryTests ?? []).map(({ path, content, scenarioIds, testCaseIds }) => ({ path, content, scenarioIds, testCaseIds })),
           repositoryContext: agentData.repositoryContext ?? [],

@@ -46,7 +46,7 @@ const schemas = {
   'qa:save-browser-test-account': z.tuple([z.object({ id: z.string().uuid().optional(), label: z.string().trim().min(1).max(80), origin: z.string().max(500), username: z.string().min(1).max(500), password: z.string().min(1).max(2000) }).strict()]),
   'qa:delete-browser-test-account': z.tuple([z.string().uuid()]),
   'qa:save-repository-config-draft': z.tuple([z.object({ target: z.object({ targetKind: z.enum(['repository', 'site', 'both']), repositorySource: z.enum(['local', 'ado-git']).optional(), repositoryPath: z.string().max(2000).optional(), adoRepository: z.object({ organization: z.string().max(100), projectId: z.string().max(200), id: z.string().max(200), name: z.string().max(200), refName: z.string().max(300), commit: z.string().regex(/^[a-f0-9]{40,64}$/i) }).strict().optional(), siteBaseUrl: z.string().max(2000).optional(), allowedOrigins: z.array(z.string().max(500)).max(10), runInstructions: z.string().max(10_000).optional(), testAccountIds: z.array(z.string().uuid()).max(20).optional(), testAccountVersions: z.record(z.string().uuid(), z.number().int().positive()).optional(), showBrowserWindow: z.boolean().optional() }).strict(), content: z.string().max(256_000) }).strict()]),
-  'qa:create-draft-plan': z.tuple([z.string().uuid().optional()]),
+  'qa:create-draft-plan': z.tuple([z.string().uuid().optional(), z.string().uuid().optional()]),
   'qa:import-provider-key': z.tuple([z.enum(['openai', 'anthropic', 'openrouter'])]),
   'qa:connect-claude-account': z.tuple([]),
   'qa:list-provider-models': z.tuple([z.enum(['openai', 'anthropic', 'openrouter', 'claude-code'])]),
@@ -78,7 +78,7 @@ const schemas = {
   'qa:cancel-run': z.tuple([z.string().uuid()]),
 } as const;
 
-type MainApi = Omit<DesktopApi, 'getState'> & Pick<DesktopApi, 'getState'>;
+type MainApi = Omit<DesktopApi, 'onModelStream'>;
 
 const methods = {
   'qa:get-state': 'getState',

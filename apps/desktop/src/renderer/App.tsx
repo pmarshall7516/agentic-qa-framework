@@ -297,6 +297,10 @@ export function App({
   const [childrenByParent, setChildrenByParent] = useState<Record<number, WorkItemSnapshot[]>>({});
   const [expandedParents, setExpandedParents] = useState<Set<number>>(new Set());
   const [busy, setBusy] = useState(false);
+  const [modelStreamId, setModelStreamId] = useState('');
+  const [modelStreamText, setModelStreamText] = useState('');
+  const [modelStreamPhase, setModelStreamPhase] = useState('');
+  const modelStreamIdRef = useRef('');
   const [isConnectingClaude, setIsConnectingClaude] = useState(false);
   const [isCheckingClaudeModels, setIsCheckingClaudeModels] = useState(false);
   const [isSavingModel, setIsSavingModel] = useState(false);
@@ -355,6 +359,19 @@ export function App({
   const queueProjectGroups = useMemo(() => buildQueueProjectGroups(state.queue), [state.queue]);
   const selectedProviderConnected = modelProvider === state.modelProvider && state.modelProviderConfigured === true;
   const selectedSavedRunModel = state.savedModels?.find((model) => model.id === selectedRunModelId && model.testStatus === 'reachable');
+
+  function beginModelStream(streamId: string) {
+    modelStreamIdRef.current = streamId;
+    setModelStreamId(streamId);
+    setModelStreamText('');
+    setModelStreamPhase('Waiting for model response');
+  }
+
+  useEffect(() => api.onModelStream?.((event) => {
+    if (event.streamId !== modelStreamIdRef.current) return;
+    setModelStreamPhase(event.phase);
+    setModelStreamText((current) => `${current}${event.chunk}`.slice(-60_000));
+  }), [api]);
 
   useEffect(() => {
     if (initialState) return;
@@ -533,6 +550,7 @@ export function App({
   }
 
   async function saveRunTarget() {
+    const streamId = crypto.randomUUID();
     await run(async () => {
       if (!selectedSavedRunModel) throw new Error('Select a saved model that passed its reachability test before preparing the plan.');
       updateState(await api.selectSavedModel(selectedRunModelId));
@@ -540,7 +558,8 @@ export function App({
       const next = await api.saveTarget(target);
       updateState(next);
       if (target.targetKind !== 'site' && repositoryConfigDraft.trim()) await api.saveRepositoryConfigDraft({ target, content: repositoryConfigDraft });
-      const plan = await api.createDraftPlan();
+      beginModelStream(streamId);
+      const plan = await api.createDraftPlan(undefined, streamId);
       setDraftPlan(plan);
       setScreen('plan');
     });
@@ -589,9 +608,11 @@ export function App({
 
   async function saveRepositoryConfigAndRefreshPlan() {
     const target = composeTargetConfig();
+    const streamId = crypto.randomUUID();
     await run(async () => {
       await api.saveRepositoryConfigDraft({ target, content: repositoryConfigDraft });
-      const plan = await api.createDraftPlan();
+      beginModelStream(streamId);
+      const plan = await api.createDraftPlan(undefined, streamId);
       setDraftPlan(plan);
       setNotice('Configuration saved locally and plan refreshed against current ADO revisions.');
     });
@@ -648,6 +669,8 @@ export function App({
 
   async function approvePlan() {
     if (!draftPlan) return;
+    const streamId = draftPlan.manifest.runId;
+    beginModelStream(streamId);
     await run(async () => {
       const approved = { ...draftPlan, contract: { ...draftPlan.contract, scenarios: draftPlan.contract.scenarios.map((scenario) => ({ ...scenario, approved: true })) } };
       await api.approvePlan(approved);
@@ -840,15 +863,19 @@ export function App({
   }
 
   async function refreshPlan() {
+    const streamId = crypto.randomUUID();
     await run(async () => {
-      const plan = await api.createDraftPlan();
+      beginModelStream(streamId);
+      const plan = await api.createDraftPlan(undefined, streamId);
       setDraftPlan(plan);
     });
   }
 
   async function createRerunPlan(runId: string) {
+    const streamId = crypto.randomUUID();
     await run(async () => {
-      const plan = await api.createDraftPlan(runId);
+      beginModelStream(streamId);
+      const plan = await api.createDraftPlan(runId, streamId);
       setDraftPlan(plan);
       setSelectedRunId('');
       setSelectedRun(undefined);
@@ -920,6 +947,7 @@ export function App({
   async function startSelectedRun() {
     if (!selectedRun || selectedRun.report) return;
     const runId = selectedRun.manifest.runId;
+    if (modelStreamIdRef.current !== runId) beginModelStream(runId);
     setActiveRunId(runId);
     let settled = false;
     const pending = api.startRun(runId).finally(() => { settled = true; });
@@ -1025,6 +1053,10 @@ export function App({
         <main className="content-area">
           {error ? <div className="message error-message" role="alert">{error}</div> : null}
           {notice ? <div className={`message ${isCheckingClaudeModels ? 'info-message' : 'success-message'}`} role="status">{notice}</div> : null}
+          {modelStreamText && (screen !== 'history' || modelStreamId === selectedRunId) ? <section className="model-stream" aria-label="Live model response">
+            <div className="model-stream-heading"><strong>{modelStreamPhase.replaceAll('-', ' ')}</strong><span>Live model response</span></div>
+            <pre aria-live="off">{modelStreamText}</pre>
+          </section> : null}
 
           {screen === 'connections' ? (
             <section className="page-section">

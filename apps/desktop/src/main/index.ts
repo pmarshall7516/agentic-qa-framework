@@ -130,6 +130,9 @@ async function createWindow(): Promise<void> {
   });
   const controller = new DesktopController({
     store,
+    emitModelStream: (event) => {
+      if (!window.isDestroyed()) window.webContents.send('qa:model-stream', event);
+    },
     browserExecutablePath: () => chromium.executablePath(),
     installBrowser: () => new Promise<void>((resolveInstall, rejectInstall) => {
       const allowed = ['PATH', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'HOME'];

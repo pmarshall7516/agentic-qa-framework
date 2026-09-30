@@ -8,7 +8,7 @@ export const AgentCompletionRequestSchema = z.object({
   maxOutputTokens: z.number().int().positive().max(32_000),
 }).strict();
 
-export interface AgentCompletionRequest extends z.infer<typeof AgentCompletionRequestSchema> { schema: z.ZodType }
+export interface AgentCompletionRequest extends z.infer<typeof AgentCompletionRequestSchema> { schema: z.ZodType; onText?: (chunk: string) => void }
 export interface AgentCompletion<T = unknown> { value: T; inputTokens: number; outputTokens: number }
 export interface ModelProviderAdapter {
   readonly providerId: ProviderModel['providerId'];

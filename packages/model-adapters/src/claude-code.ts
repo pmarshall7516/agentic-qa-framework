@@ -3,29 +3,30 @@ import type { ProviderModel } from '@agentic-qa/domain/agent';
 import { runClaudeCliCommand } from './claude-cli.js';
 import { AgentCompletionRequestSchema, type AgentCompletionRequest, type ModelProviderAdapter } from './provider.js';
 
-type CliRunner = (args: string[], input: string, timeoutMs?: number) => Promise<string>;
+type CliRunner = (args: string[], input: string, timeoutMs?: number, onStdout?: (chunk: string) => void) => Promise<string>;
 const CATALOG: ProviderModel[] = [
   { providerId: 'claude-code', modelId: 'sonnet', displayName: 'Claude Sonnet (subscription)', capabilities: { structuredOutput: true, toolUse: true, inputUsdPerMillionTokens: 2, outputUsdPerMillionTokens: 10 } },
   { providerId: 'claude-code', modelId: 'opus', displayName: 'Claude Opus (subscription)', capabilities: { structuredOutput: true, toolUse: true, inputUsdPerMillionTokens: 4, outputUsdPerMillionTokens: 20 } },
   { providerId: 'claude-code', modelId: 'haiku', displayName: 'Claude Haiku (subscription)', capabilities: { structuredOutput: true, toolUse: true, inputUsdPerMillionTokens: 1, outputUsdPerMillionTokens: 5 } },
 ];
-const CliResponseSchema = z.object({ result: z.string().max(1_000_000), is_error: z.boolean().optional(), usage: z.object({ input_tokens: z.number().int().nonnegative().optional(), output_tokens: z.number().int().nonnegative().optional() }).passthrough().optional() }).passthrough();
+const CliResponseSchema = z.object({ result: z.string().max(1_000_000).optional(), structured_output: z.unknown().optional(), is_error: z.boolean().optional(), usage: z.object({ input_tokens: z.number().int().nonnegative().optional(), output_tokens: z.number().int().nonnegative().optional() }).passthrough().optional() }).passthrough();
 
 function cliResponseError(raw: string): string | undefined {
   try {
     const response = CliResponseSchema.parse(JSON.parse(raw));
     if (!response.is_error) return undefined;
-    if (/not logged in|please run \/login/i.test(response.result)) return 'Claude Code says this CLI is not signed in. Sign in again in Claude Code, then retry model discovery.';
-    if (/rate.?limit|usage limit|limit reached|out of.*(?:usage|messages)/i.test(response.result)) return 'Claude Code reports that this account has reached a usage limit. Wait for the limit to reset, then retry.';
-    if (/model.{0,40}(?:not found|not available|no access|does not have access)|(?:not found|not available).{0,40}model/i.test(response.result)) return 'Claude Code reports that this account cannot access this model.';
+    const result = response.result ?? '';
+    if (/not logged in|please run \/login/i.test(result)) return 'Claude Code says this CLI is not signed in. Sign in again in Claude Code, then retry model discovery.';
+    if (/rate.?limit|usage limit|limit reached|out of.*(?:usage|messages)/i.test(result)) return 'Claude Code reports that this account has reached a usage limit. Wait for the limit to reset, then retry.';
+    if (/model.{0,40}(?:not found|not available|no access|does not have access)|(?:not found|not available).{0,40}model/i.test(result)) return 'Claude Code reports that this account cannot access this model.';
     return 'Claude Code returned an error instead of a model response. Check the account and retry.';
   } catch {
     return undefined;
   }
 }
 
-async function runClaudeCli(args: string[], input: string, timeoutMs = 120_000): Promise<string> {
-  const result = await runClaudeCliCommand(args, input, { timeoutMs, maxOutputBytes: 5_000_000 });
+async function runClaudeCli(args: string[], input: string, timeoutMs = 120_000, onStdout?: (chunk: string) => void): Promise<string> {
+  const result = await runClaudeCliCommand(args, input, { timeoutMs, maxOutputBytes: 5_000_000, ...(onStdout ? { onStdout } : {}) });
   if (result.code !== 0) throw new Error(cliResponseError(result.output) ?? `Claude Code request failed (exit ${result.code}). Check the signed-in account, selected model access and plan limits.`);
   return result.output;
 }
@@ -36,6 +37,7 @@ function requestInput(request: AgentCompletionRequest): string {
 
 async function complete<T>(runner: CliRunner, request: AgentCompletionRequest): Promise<{ value: T; inputTokens: number; outputTokens: number }> {
   const parsedRequest = AgentCompletionRequestSchema.parse({ modelId: request.modelId, system: request.system, input: request.input, maxOutputTokens: request.maxOutputTokens });
+  const onText = request.onText;
   const model = CATALOG.find(({ modelId }) => modelId === parsedRequest.modelId);
   if (!model) throw new Error('The selected model is not in the Claude Code model catalog.');
   const input = requestInput({ ...parsedRequest, schema: request.schema });
@@ -45,24 +47,57 @@ async function complete<T>(runner: CliRunner, request: AgentCompletionRequest): 
   catch { throw new Error('The requested Claude Code result schema cannot be represented as JSON Schema.'); }
   if (Buffer.byteLength(outputSchema) > 24_000) throw new Error('Claude Code result schema exceeded the safe CLI argument limit.');
   const args = [
-    '--print', '--output-format', 'json', '--no-session-persistence', '--disable-slash-commands',
+    '--print', '--output-format', onText ? 'stream-json' : 'json', ...(onText ? ['--include-partial-messages', '--verbose'] : []), '--no-session-persistence', '--disable-slash-commands',
     '--strict-mcp-config', '--setting-sources', '', '--tools', '',
     '--permission-mode', 'dontAsk', '--model', model.modelId, '--json-schema', outputSchema,
   ];
   let raw: string;
-  try { raw = await runner(args, input, parsedRequest.maxOutputTokens === 8 ? 45_000 : undefined); } catch (error) { throw error instanceof Error ? error : new Error('Claude Code request failed.'); }
+  let streamBuffer = '';
+  const onStdout = onText ? (chunk: string) => {
+    streamBuffer += chunk;
+    const lines = streamBuffer.split(/\r?\n/);
+    streamBuffer = lines.pop() ?? '';
+    for (const line of lines) emitTextDelta(line, onText);
+  } : undefined;
+  try { raw = await runner(args, input, parsedRequest.maxOutputTokens === 8 ? 45_000 : undefined, onStdout); } catch (error) { throw error instanceof Error ? error : new Error('Claude Code request failed.'); }
   let response: z.infer<typeof CliResponseSchema>;
-  try { response = CliResponseSchema.parse(JSON.parse(raw)); }
+  try {
+    let decoded: unknown;
+    try { decoded = JSON.parse(raw); }
+    catch {
+      if (!onText) throw new Error('invalid JSON output');
+      const resultLines = raw.split(/\r?\n/).filter(Boolean).flatMap((line) => {
+        try { const value = JSON.parse(line); return value?.type === 'result' ? [value] : []; }
+        catch { return []; }
+      });
+      decoded = resultLines.at(-1);
+    }
+    response = CliResponseSchema.parse(decoded);
+  }
   catch { throw new Error('Claude Code returned an invalid structured result.'); }
-  let value: unknown;
-  try { value = JSON.parse(response.result); }
-  catch { throw new Error('Claude Code returned an invalid structured result.'); }
+  if (onText && streamBuffer.trim()) emitTextDelta(streamBuffer, onText);
+  if (response.is_error) throw new Error(cliResponseError(raw) ?? 'Claude Code returned an error instead of a structured result.');
+  let value: unknown = response.structured_output;
+  if (value === undefined && response.result !== undefined) {
+    try { value = JSON.parse(response.result); }
+    catch { throw new Error('Claude Code returned an invalid structured result.'); }
+  }
+  if (value === undefined) throw new Error('Claude Code returned an invalid structured result.');
   const validated = request.schema.safeParse(value);
   if (!validated.success) throw new Error('Claude Code returned a structured result that did not match the requested schema.');
   const inputTokens = response.usage?.input_tokens ?? 0;
   const outputTokens = response.usage?.output_tokens ?? 0;
   if (outputTokens > parsedRequest.maxOutputTokens) throw new Error('Claude Code response exceeded the requested output-token budget.');
   return { value: validated.data as T, inputTokens, outputTokens };
+}
+
+function emitTextDelta(line: string, onText: (chunk: string) => void): void {
+  try {
+    const message = JSON.parse(line) as { type?: unknown; event?: { type?: unknown; delta?: { type?: unknown; text?: unknown } } };
+    const delta = message.type === 'stream_event' && message.event?.type === 'content_block_delta' && message.event.delta?.type === 'text_delta'
+      ? message.event.delta.text : undefined;
+    if (typeof delta === 'string' && delta) onText(delta);
+  } catch { /* Ignore non-JSON or partial stream lines; final structured output is validated below. */ }
 }
 
 async function probe(runner: CliRunner, modelId: string, timeoutMs = 30_000): Promise<void> {
@@ -80,7 +115,7 @@ async function probe(runner: CliRunner, modelId: string, timeoutMs = 30_000): Pr
   if (!response.success) throw new Error('Claude Code returned an invalid reachability response.');
   const responseError = cliResponseError(raw);
   if (responseError) throw new Error(responseError);
-  if (!response.data.result.trim()) throw new Error('Claude Code returned no text for the reachability prompt.');
+  if (!response.data.result?.trim()) throw new Error('Claude Code returned no text for the reachability prompt.');
 }
 
 function createAdapter(runner: CliRunner) {

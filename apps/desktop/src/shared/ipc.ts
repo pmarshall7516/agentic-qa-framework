@@ -49,6 +49,14 @@ export interface DraftPlan {
   envelopePreview?: { providerId: 'openai' | 'anthropic' | 'openrouter' | 'claude-code'; modelId: string; sourceIds: number[]; sourceRevisions: Record<string, number>; repositoryPaths: string[]; allowedOrigins: string[]; commandIds: string[]; excludedContext: string[]; budget: RunBudget; runInstructions?: string; testAccounts: BrowserTestAccountSummary[]; showBrowserWindow: boolean };
 }
 
+export interface ModelStreamEvent {
+  streamId: string;
+  scope: 'planning' | 'run';
+  phase: string;
+  chunk: string;
+  at: string;
+}
+
 export interface QueueItemView {
   entry: QueueEntry;
   snapshot?: WorkItemSnapshot;
@@ -151,7 +159,8 @@ export interface DesktopApi {
   deleteBrowserTestAccount(id: string): Promise<BrowserTestAccountSummary[]>;
   getRepositoryConfigDraft(target: TargetConfig): Promise<string>;
   saveRepositoryConfigDraft(input: { target: TargetConfig; content: string }): Promise<void>;
-  createDraftPlan(previousRunId?: string): Promise<DraftPlan>;
+  createDraftPlan(previousRunId?: string, streamId?: string): Promise<DraftPlan>;
+  onModelStream(listener: (event: ModelStreamEvent) => void): () => void;
   importProviderKey(providerId: 'openai' | 'anthropic' | 'openrouter'): Promise<boolean>;
   connectClaudeAccount(): Promise<boolean>;
   listProviderModels(providerId: 'openai' | 'anthropic' | 'openrouter' | 'claude-code'): Promise<ProviderModel[]>;

@@ -29,6 +29,25 @@ describe('Claude Code subscription adapter', () => {
     expect(result).toEqual({ value: { plan: 'delegate' }, inputTokens: 45, outputTokens: 8 });
   });
 
+  it('accepts Claude Code structured_output results and streams assistant text deltas', async () => {
+    const streamed: string[] = [];
+    const runCli = vi.fn(async (args: string[], _input: string, _timeout: number | undefined, onStdout?: (chunk: string) => void) => {
+      expect(args).toContain('stream-json');
+      expect(args).toContain('--include-partial-messages');
+      onStdout?.(`${JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: '{"plan":' } } })}\n`);
+      onStdout?.(`${JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: '"delegate"}' } } })}\n`);
+      return `${JSON.stringify({ type: 'result', is_error: false, structured_output: { plan: 'delegate' }, usage: { input_tokens: 45, output_tokens: 8 } })}\n`;
+    });
+    const adapter = claudeCodeAdapter.withRunner(runCli);
+    const result = await adapter.complete('', {
+      modelId: 'sonnet', system: 'Act as the QA planner.', input: 'Plan this work.', maxOutputTokens: 100,
+      schema: z.object({ plan: z.string() }).strict(), onText: (chunk) => streamed.push(chunk),
+    });
+
+    expect(result.value).toEqual({ plan: 'delegate' });
+    expect(streamed.join('')).toBe('{"plan":"delegate"}');
+  });
+
   it('rejects invalid model ids and malformed or schema-invalid CLI results', async () => {
     await expect(claudeCodeAdapter.complete('', { modelId: 'custom-shell-command', system: 'system', input: 'input', maxOutputTokens: 100, schema: z.object({ plan: z.string() }) })).rejects.toThrow('not in the Claude Code model catalog');
     const malformed = claudeCodeAdapter.withRunner(async () => '{"result":"not-json"}');

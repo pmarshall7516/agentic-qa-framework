@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { DesktopApi, DraftPlan, QueueWorkItemSelection, SearchItemsInput, TargetConfig } from '../shared/ipc.js';
+import type { DesktopApi, DraftPlan, ModelStreamEvent, QueueWorkItemSelection, SearchItemsInput, TargetConfig } from '../shared/ipc.js';
 import type { AdoProject } from '@agentic-qa/ado/client';
 
 const api: DesktopApi = Object.freeze({
@@ -38,7 +38,12 @@ const api: DesktopApi = Object.freeze({
   deleteBrowserTestAccount: (id: string) => ipcRenderer.invoke('qa:delete-browser-test-account', id),
   getRepositoryConfigDraft: (target: TargetConfig) => ipcRenderer.invoke('qa:get-repository-config-draft', target),
   saveRepositoryConfigDraft: (input: Parameters<DesktopApi['saveRepositoryConfigDraft']>[0]) => ipcRenderer.invoke('qa:save-repository-config-draft', input),
-  createDraftPlan: (previousRunId?: string) => ipcRenderer.invoke('qa:create-draft-plan', previousRunId),
+  createDraftPlan: (previousRunId?: string, streamId?: string) => ipcRenderer.invoke('qa:create-draft-plan', previousRunId, streamId),
+  onModelStream: (listener: (event: ModelStreamEvent) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: ModelStreamEvent) => listener(payload);
+    ipcRenderer.on('qa:model-stream', handler);
+    return () => ipcRenderer.removeListener('qa:model-stream', handler);
+  },
   importProviderKey: (providerId: 'openai' | 'anthropic' | 'openrouter') => ipcRenderer.invoke('qa:import-provider-key', providerId),
   connectClaudeAccount: () => ipcRenderer.invoke('qa:connect-claude-account'),
   listProviderModels: (providerId: 'openai' | 'anthropic' | 'openrouter' | 'claude-code') => ipcRenderer.invoke('qa:list-provider-models', providerId),

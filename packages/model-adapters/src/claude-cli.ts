@@ -60,7 +60,7 @@ async function resolveClaudeCommand(): Promise<ClaudeCommand> {
 export async function runClaudeCliCommand(
   args: string[],
   input: string,
-  options: { timeoutMs: number; maxOutputBytes?: number; captureStderr?: boolean },
+  options: { timeoutMs: number; maxOutputBytes?: number; captureStderr?: boolean; onStdout?: (chunk: string) => void },
 ): Promise<{ code: number; output: string; errorOutput: string }> {
   const cwd = await mkdtemp(join(tmpdir(), 'agentic-qa-claude-'));
   try {
@@ -90,7 +90,9 @@ export async function runClaudeCliCommand(
         setTimeout(() => child.kill('SIGKILL'), 1_000).unref();
       }, options.timeoutMs);
       child.stdout.on('data', (chunk: Buffer) => {
-        output += chunk.toString('utf8');
+        const text = chunk.toString('utf8');
+        output += text;
+        try { options.onStdout?.(text); } catch { /* UI streaming must not interrupt model completion. */ }
         if (Buffer.byteLength(output) > (options.maxOutputBytes ?? 32_000)) {
           child.kill('SIGTERM');
           finish(new Error('Claude Code response exceeded its output limit.'));
