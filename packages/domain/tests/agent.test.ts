@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AgentToolCallSchema, DelegationPlanSchema, RunBudgetSchema, RunEnvelopeSchema, buildDelegationDiagram } from '../src/agent.js';
+import { AgentToolCallSchema, DelegationPlanSchema, RunBudgetSchema, RunEnvelopeSchema, SavedModelSchema, SavedModelViewSchema, buildDelegationDiagram } from '../src/agent.js';
 
 const runId = '7e4d0603-7f9a-4a6e-8ed3-23d7a8c8d83c';
 const plan = {
@@ -22,6 +22,30 @@ describe('agent run contracts', () => {
       commandIds: ['unit'], excludedContext: ['.env'], approvedAt: '2026-09-29T15:00:00.000Z', contextHash: 'a'.repeat(64),
       budget: { maxCostUsd: 1, maxInputTokens: 20_000, maxOutputTokens: 4_000, maxProviderCalls: 20, maxAgents: 4, maxParallelAgents: 2, maxRetries: 1, maxRunSeconds: 900, maxBrowserActions: 50, maxArtifactMiB: 100 },
     }).providerId).toBe('anthropic');
+  });
+
+  it('rejects role model overrides that differ from the selected run model', () => {
+    expect(RunEnvelopeSchema.safeParse({
+      schemaVersion: 1, runId, providerId: 'anthropic', defaultModelId: 'selected-model', roleModels: { backend: 'different-model' }, sourceIds: [101],
+      sourceRevisions: { 'ado/project/101': 7 }, repositoryPaths: ['src/**'], allowedOrigins: [], commandIds: ['unit'], excludedContext: [],
+      approvedAt: '2026-09-29T15:00:00.000Z', contextHash: 'a'.repeat(64),
+      budget: { maxCostUsd: 1, maxInputTokens: 20_000, maxOutputTokens: 4_000, maxProviderCalls: 20, maxAgents: 4, maxParallelAgents: 2, maxRetries: 1, maxRunSeconds: 900, maxBrowserActions: 50, maxArtifactMiB: 100 },
+    }).success).toBe(false);
+  });
+
+  it('requires saved model test evidence and exposes no credential field in the renderer view', () => {
+    const savedModel = {
+      id: '11111111-1111-4111-8111-111111111111', providerId: 'anthropic', modelId: 'claude-sonnet', displayName: 'Claude Sonnet',
+      capabilities: { structuredOutput: true, toolUse: true }, maxOutputTokens: 1200,
+      credentialGeneration: '22222222-2222-4222-8222-222222222222', testStatus: 'reachable',
+      testedAt: '2026-09-30T15:00:00.000Z', testedCredentialGeneration: '22222222-2222-4222-8222-222222222222',
+    };
+    const { credentialGeneration: _credentialGeneration, testedCredentialGeneration: _testedCredentialGeneration, ...rendererData } = savedModel;
+    const view = SavedModelViewSchema.parse(rendererData);
+
+    expect(SavedModelSchema.parse(savedModel).testStatus).toBe('reachable');
+    expect(view).not.toHaveProperty('credentialGeneration');
+    expect(SavedModelSchema.safeParse({ ...savedModel, testStatus: 'reachable', testedAt: undefined }).success).toBe(false);
   });
 
   it('rejects parallel fan-out above the total agent limit', () => {

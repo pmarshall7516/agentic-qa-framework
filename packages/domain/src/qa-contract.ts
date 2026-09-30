@@ -8,6 +8,10 @@ export const SourceRefSchema = z.object({
 export const CriterionSourceSchema = z.union([
   SourceRefSchema,
   z.object({ userAdded: z.literal(true), author: z.string().min(1).max(200), derivedFrom: SourceRefSchema.optional() }).strict(),
+  z.object({
+    agentProposed: z.literal(true), proposalId: z.string().min(1).max(120),
+    sourceRefs: z.array(SourceRefSchema).min(1).max(30), decision: z.enum(['ACCEPTED', 'EDITED']),
+  }).strict(),
 ]);
 export const RequiredLayerSchema = z.enum(['repo', 'browser']);
 export const CriterionSchema = z.object({
@@ -103,11 +107,41 @@ export const CoverageGapSchema = z.object({
   }
 });
 
+export const CriterionProposalSchema = z.object({
+  id: z.string().min(1).max(120), text: z.string().trim().min(1).max(4000),
+  sourceRefs: z.array(SourceRefSchema).min(1).max(30),
+  ambiguityNotes: z.array(z.string().trim().min(1).max(1000)).max(20),
+  decision: z.enum(['PROPOSED', 'ACCEPTED', 'EDITED', 'REJECTED']),
+  criterionId: z.string().min(1).max(120).optional(),
+}).strict().superRefine((proposal, ctx) => {
+  if (new Set(proposal.sourceRefs.map((ref) => `${ref.organization.toLocaleLowerCase('en-US')}:${ref.projectId}:${ref.workItemId}:${ref.revision}:${ref.field}:${ref.excerptHash}`)).size !== proposal.sourceRefs.length) {
+    ctx.addIssue({ code: 'custom', message: 'Criterion proposal source references must be unique.', path: ['sourceRefs'] });
+  }
+  if ((proposal.decision === 'ACCEPTED' || proposal.decision === 'EDITED') !== Boolean(proposal.criterionId)) {
+    ctx.addIssue({ code: 'custom', message: 'Accepted or edited proposals must link to a criterion.', path: ['criterionId'] });
+  }
+});
+
+export const TaskPlanSchema = z.object({
+  taskId: z.number().int().positive(), taskSource: SourceRefSchema,
+  summary: z.string().trim().min(1).max(1000),
+  criterionProposalIds: z.array(z.string().min(1).max(120)).max(100),
+  verificationIntent: z.array(z.string().trim().min(1).max(1000)).min(1).max(30),
+  unresolvedQuestions: z.array(z.string().trim().min(1).max(1000)).max(20),
+}).strict().superRefine((taskPlan, ctx) => {
+  if (taskPlan.taskSource.workItemId !== taskPlan.taskId || !['System.Description', 'System.Title'].includes(taskPlan.taskSource.field)) {
+    ctx.addIssue({ code: 'custom', message: 'Task plans must cite the matching Task Description or Title.', path: ['taskSource'] });
+  }
+  if (new Set(taskPlan.criterionProposalIds).size !== taskPlan.criterionProposalIds.length) {
+    ctx.addIssue({ code: 'custom', message: 'Task plan proposal links must be unique.', path: ['criterionProposalIds'] });
+  }
+});
+
 export const RunSourceContextSchema = WorkItemSnapshotSchema.omit({ id: true }).extend({
   workItemId: z.number().int().positive(),
 }).strict();
 
-export const QAContractSchema = ContractContentSchema.extend({
+export const QAContractV2Schema = ContractContentSchema.extend({
   schemaVersion: z.literal(2),
   sourceContext: z.array(RunSourceContextSchema).max(200),
   taskCandidates: z.array(TaskCandidateSchema).max(500),
@@ -147,17 +181,83 @@ export const QAContractSchema = ContractContentSchema.extend({
   }
 });
 
+export const QAContractSchema = ContractContentSchema.extend({
+  schemaVersion: z.literal(3),
+  sourceContext: z.array(RunSourceContextSchema).max(200),
+  taskCandidates: z.array(TaskCandidateSchema).max(500),
+  coverageGaps: z.array(CoverageGapSchema).max(200),
+  featureSummary: z.string().trim().min(1).max(4000).optional(),
+  taskPlans: z.array(TaskPlanSchema).max(200),
+  proposals: z.array(CriterionProposalSchema).max(500),
+}).strict().superRefine((contract, ctx) => {
+  validateContractRelations(contract, ctx);
+  const contextKey = (ref: z.infer<typeof SourceRefSchema>) => `${ref.organization.toLocaleLowerCase('en-US')}:${ref.projectId}:${ref.workItemId}:${ref.revision}`;
+  const sourceIsFrozen = (ref: z.infer<typeof SourceRefSchema>) => contract.sourceContext.some((source) =>
+    `${source.organization.toLocaleLowerCase('en-US')}:${source.projectId}:${source.workItemId}:${source.revision}` === contextKey(ref));
+  const proposals = new Map(contract.proposals.map((proposal) => [proposal.id, proposal]));
+  if (proposals.size !== contract.proposals.length) ctx.addIssue({ code: 'custom', message: 'Criterion proposal IDs must be unique.', path: ['proposals'] });
+  const taskPlans = new Map(contract.taskPlans.map((taskPlan) => [taskPlan.taskId, taskPlan]));
+  if (taskPlans.size !== contract.taskPlans.length) ctx.addIssue({ code: 'custom', message: 'Each selected Task may have only one verification plan.', path: ['taskPlans'] });
+  for (const proposal of contract.proposals) {
+    if (proposal.sourceRefs.some((ref) => !sourceIsFrozen(ref))) {
+      ctx.addIssue({ code: 'custom', message: 'Criterion proposals must refer only to frozen source items and revisions.', path: ['proposals'] });
+    }
+    if (proposal.criterionId) {
+      const criterion = contract.criteria.find(({ id }) => id === proposal.criterionId);
+      if (!criterion || !('agentProposed' in criterion.source) || criterion.source.proposalId !== proposal.id || criterion.source.decision !== proposal.decision || JSON.stringify(criterion.source.sourceRefs) !== JSON.stringify(proposal.sourceRefs)) {
+        ctx.addIssue({ code: 'custom', message: 'Accepted proposal and criterion provenance must match exactly.', path: ['proposals'] });
+      }
+    }
+  }
+  for (const criterion of contract.criteria) {
+    if (!('agentProposed' in criterion.source)) continue;
+    const proposal = proposals.get(criterion.source.proposalId);
+    if (!proposal || proposal.criterionId !== criterion.id || (proposal.decision !== 'ACCEPTED' && proposal.decision !== 'EDITED')) {
+      ctx.addIssue({ code: 'custom', message: 'Agent-proposed criteria require a matching accepted proposal.', path: ['criteria'] });
+    }
+  }
+  for (const taskPlan of contract.taskPlans) {
+    const task = contract.sourceContext.find((source) => source.workItemId === taskPlan.taskId && source.kind === 'TASK' && contextKey(taskPlan.taskSource) === `${source.organization.toLocaleLowerCase('en-US')}:${source.projectId}:${source.workItemId}:${source.revision}`);
+    if (!task || !sourceIsFrozen(taskPlan.taskSource)) {
+      ctx.addIssue({ code: 'custom', message: 'Task verification plans must cite a selected Task snapshot.', path: ['taskPlans'] });
+    }
+    if (taskPlan.criterionProposalIds.some((id) => !proposals.get(id)?.sourceRefs.some((ref) => ref.workItemId === taskPlan.taskId))) {
+      ctx.addIssue({ code: 'custom', message: 'Task plans may link only proposals informed by that Task.', path: ['taskPlans'] });
+    }
+  }
+  for (const candidate of contract.taskCandidates) {
+    const source = contract.sourceContext.find(({ organization, projectId, workItemId, revision }) =>
+      organization.toLocaleLowerCase('en-US') === candidate.source.organization.toLocaleLowerCase('en-US') && projectId === candidate.source.projectId && workItemId === candidate.source.workItemId && revision === candidate.source.revision);
+    if (!source || source.kind !== 'TASK' || !source.description) ctx.addIssue({ code: 'custom', message: 'Task candidates must cite a queued Task Description in this contract.', path: ['taskCandidates'] });
+    if (candidate.disposition === 'ACCEPTED') {
+      const criterion = contract.criteria.find(({ id }) => id === candidate.criterionId);
+      if (!criterion || !('userAdded' in criterion.source) || JSON.stringify(criterion.source.derivedFrom) !== JSON.stringify(candidate.source)) ctx.addIssue({ code: 'custom', message: 'Accepted Task candidate must be user-added and retain its source.', path: ['taskCandidates'] });
+    }
+  }
+  for (const gap of contract.coverageGaps) {
+    const source = contract.sourceContext.find(({ organization, projectId, workItemId, revision, kind }) => organization.toLocaleLowerCase('en-US') === gap.source.organization.toLocaleLowerCase('en-US') && projectId === gap.source.projectId && workItemId === gap.source.workItemId && revision === gap.source.revision && kind === 'REQUIREMENT');
+    if (!source || source.acceptanceCriteria?.trim()) ctx.addIssue({ code: 'custom', message: 'A missing-criteria coverage gap must cite a Requirement without Acceptance Criteria.', path: ['coverageGaps'] });
+  }
+});
+
 export function upgradeQAContract(input: unknown): QAContract {
   if (input && typeof input === 'object' && 'schemaVersion' in input && input.schemaVersion === 1) {
     const previous = QAContractV1Schema.parse(input);
-    return QAContractSchema.parse({ ...previous, schemaVersion: 2, sourceContext: [], taskCandidates: [], coverageGaps: [] });
+    return upgradeV2({ ...previous, schemaVersion: 2, sourceContext: [], taskCandidates: [], coverageGaps: [] });
   }
+  if (input && typeof input === 'object' && 'schemaVersion' in input && input.schemaVersion === 2) return upgradeV2(QAContractV2Schema.parse(input));
   return QAContractSchema.parse(input);
+}
+
+function upgradeV2(previous: z.infer<typeof QAContractV2Schema>): QAContract {
+  return QAContractSchema.parse({ ...previous, schemaVersion: 3, featureSummary: undefined, taskPlans: [], proposals: [] });
 }
 
 export type SourceRef = z.infer<typeof SourceRefSchema>;
 export type Criterion = z.infer<typeof CriterionSchema>;
 export type Scenario = z.infer<typeof ScenarioSchema>;
+export type CriterionProposal = z.infer<typeof CriterionProposalSchema>;
+export type TaskPlan = z.infer<typeof TaskPlanSchema>;
 export type QAContract = z.infer<typeof QAContractSchema>;
 
 export function validateReadyContract(input: unknown): QAContract {

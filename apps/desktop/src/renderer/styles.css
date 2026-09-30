@@ -182,7 +182,7 @@ select option { background: #1b1e25; color: #e4e7ee; }
 .queue-card-task { padding: 10px 12px; background: #16191f; }
 .queue-other-items > h3 { margin: 5px 2px 0; color: #929ba8; font-size: 11px; font-weight: 600; }
 .empty-card { display: grid; justify-items: center; gap: 7px; padding: 29px 20px; border: 1px dashed #3b424e; border-radius: 7px; background: #17191f; color: #a3abb7; text-align: center; }.empty-icon { color: #8dbcf0; font-size: 22px; }.empty-card strong { color: #d5dae3; font-size: 13px; font-weight: 600; }.empty-card p { max-width: 430px; margin: 0 0 6px; color: #8d96a3; font-size: 12px; line-height: 1.6; }
-.message { margin: 0 0 14px; padding: 10px 12px; border: 1px solid; border-radius: 5px; font-size: 12px; line-height: 1.5; }.error-message { border-color: #653c40; background: #301d20; color: #f09b9b; }.success-message { border-color: #315944; background: #1b2d23; color: #8ed7ae; }
+.message { margin: 0 0 14px; padding: 10px 12px; border: 1px solid; border-radius: 5px; font-size: 12px; line-height: 1.5; }.error-message { border-color: #653c40; background: #301d20; color: #f09b9b; }.success-message { border-color: #315944; background: #1b2d23; color: #8ed7ae; }.info-message { border-color: #35516f; background: #1b2735; color: #b4d3f4; }
 .scenario-step { display: grid; gap: 8px; margin: 10px 0; padding: 12px; border: 1px solid #333944; border-radius: 6px; background: #191c22; }.scenario-step-top { display: flex; align-items: center; justify-content: space-between; color: #d0d6df; font-size: 12px; }.scenario-step .field-label { display: grid; gap: 5px; }.scenario-step input, .scenario-step select { min-width: 0; }.scenario-step small { color: #deb078; font-size: 11px; line-height: 1.5; }.scenario-id { display: block; overflow-wrap: anywhere; padding: 7px; border: 1px solid #333944; border-radius: 4px; background: #121419; color: #aab9cb; font-size: 11px; }
 .review-panel { margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--line); }.review-panel h3 { margin: 0 0 8px; color: #e0e4eb; font-size: 14px; }.review-panel .filters-row { align-items: end; }.review-panel .filters-row label { display: grid; align-items: start; flex: 1; }.review-panel .filters-row input, .review-panel .filters-row select { width: 100%; }.review-panel .field-label { display: grid; gap: 6px; }.review-panel .contract-textarea { min-height: 75px; }.review-message { margin: 10px 0; padding: 10px 12px; border: 1px solid #665238; border-radius: 5px; background: #30271b; color: #e0bd83; font-size: 12px; line-height: 1.55; }
 .registration-help { margin-top: 12px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 7px; background: #191c22; color: var(--text-secondary); font-size: 12px; line-height: 1.55; }.registration-help summary { color: var(--text-primary); cursor: pointer; font-weight: 600; }.registration-help ol { display: grid; gap: 7px; margin: 10px 0 0; padding-left: 20px; }.registration-help code { overflow-wrap: anywhere; }
@@ -207,6 +207,30 @@ select option { background: #1b1e25; color: #e4e7ee; }
 .plan-summary-note { color: #aab3c0; }
 .plan-summary-warning { padding: 10px 12px; border: 1px solid #665238; border-radius: 6px; background: #30271b; color: #e0bd83; }
 .model-settings > small { display: block; margin-top: 10px; color: #8f98a6; font-size: 11px; line-height: 1.6; }
+.connected-account { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; padding: 9px 11px; border: 1px solid #315944; border-radius: 5px; background: #1b2d23; color: #a8d9ba; font-size: 12px; }
+.connected-account strong { color: #e0f3e7; font-weight: 650; }
+.connected-indicator { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: #57c682; box-shadow: 0 0 0 3px #57c68222; }
+.saved-model-list { display: grid; gap: 8px; margin-top: 16px; }
+.saved-model-list > h3 { margin: 0 0 2px; color: #dce1e9; font-size: 13px; font-weight: 620; }
+.saved-model-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 9px 14px; min-width: 0; padding: 11px 12px; border: 1px solid #343a46; border-radius: 7px; background: #191c22; }
+.saved-model-copy { display: grid; gap: 3px; min-width: 0; }
+.saved-model-copy strong { overflow-wrap: anywhere; color: #dbe0e8; font-size: 12px; font-weight: 620; }
+.saved-model-copy span { overflow-wrap: anywhere; color: #939ca9; font-size: 10px; }
+.saved-model-status { justify-self: end; padding: 4px 8px; border: 1px solid; border-radius: 12px; font-size: 10px; font-weight: 700; white-space: nowrap; }
+.test-status-success { border-color: #315944; background: #1b2d23; color: #8ed7ae; }
+.test-status-fail { border-color: #653c40; background: #301d20; color: #f09b9b; }
+.test-status-pending { border-color: #3a4656; background: #202630; color: #b8c1ce; }
+.saved-model-actions { display: flex; grid-column: 1 / -1; justify-content: flex-end; gap: 7px; }
+.model-combobox { position: relative; min-width: 0; }
+.model-combobox > .text-input { padding-right: 36px; text-overflow: ellipsis; }
+.model-combobox-toggle { position: absolute; top: 1px; right: 1px; display: grid; width: 34px; height: 36px; place-items: center; border-left: 1px solid #383e49; border-radius: 0 4px 4px 0; background: #171a20; color: #9ca7b6; pointer-events: none; }
+.model-combobox-options { position: absolute; z-index: 30; top: calc(100% + 4px); right: 0; left: 0; max-height: 280px; overflow-y: auto; border: 1px solid #485365; border-radius: 6px; background: #171a20; box-shadow: 0 12px 28px #0009; }
+.model-combobox-option { display: grid; width: 100%; gap: 3px; padding: 10px 12px; border: 0; border-bottom: 1px solid #2b303a; background: transparent; color: #dce1e9; text-align: left; cursor: pointer; }
+.model-combobox-option:last-child { border-bottom: 0; }
+.model-combobox-option:hover, .model-combobox-option.active { background: #242c37; }
+.model-combobox-option strong { font-size: 12px; font-weight: 620; }
+.model-combobox-option span, .model-combobox-option small { color: #9ba5b3; font-size: 10px; }
+.model-combobox-empty { padding: 12px; color: #9ba5b3; font-size: 11px; }
 .settings-fields label > .field-help { margin: 0; font-size: 10px; font-weight: 400; }
 @media (max-width: 1050px) {
   .settings-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }

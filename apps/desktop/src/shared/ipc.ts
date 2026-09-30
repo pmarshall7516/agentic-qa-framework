@@ -6,7 +6,7 @@ import type { QAContract } from '@agentic-qa/domain/qa-contract';
 import type { Finding, Observation, QAReport, RunManifest, RunProgressEvent } from '@agentic-qa/domain/run';
 import type { WorkItemKind, WorkItemTypeMappings } from '@agentic-qa/domain/work-item';
 import type { RepositoryConfig } from '@agentic-qa/repo-worker/config';
-import type { ProviderModel } from '@agentic-qa/domain/agent';
+import type { ProviderModel, SavedModelView } from '@agentic-qa/domain/agent';
 import type { DelegationDiagram, DelegationPlan, RunBudget } from '@agentic-qa/domain/agent';
 
 export type AppScreen = 'connections' | 'project' | 'work-items' | 'queue' | 'run-setup' | 'plan' | 'history' | 'settings';
@@ -92,8 +92,10 @@ export interface DesktopState {
   browserTestAccounts?: BrowserTestAccountSummary[];
   modelProviderConfigured?: boolean;
   modelProvider?: 'openai' | 'anthropic' | 'openrouter' | 'claude-code';
+  modelProviderAccountEmail?: string;
   modelId?: string;
   modelMaxOutputTokens?: number;
+  savedModels?: SavedModelView[];
 }
 
 export interface ModelPayloadPreview {
@@ -153,7 +155,11 @@ export interface DesktopApi {
   importProviderKey(providerId: 'openai' | 'anthropic' | 'openrouter'): Promise<boolean>;
   connectClaudeAccount(): Promise<boolean>;
   listProviderModels(providerId: 'openai' | 'anthropic' | 'openrouter' | 'claude-code'): Promise<ProviderModel[]>;
-  saveAgentModelSettings(input: { providerId: 'openai' | 'anthropic' | 'openrouter' | 'claude-code'; modelId: string; maxOutputTokens: number }): Promise<void>;
+  saveAgentModelSettings(input: { providerId: 'openai' | 'anthropic' | 'openrouter' | 'claude-code'; modelId: string; maxOutputTokens: number }): Promise<SavedModelView[]>;
+  selectSavedModel(modelId: string): Promise<DesktopState>;
+  getSavedModels(): Promise<SavedModelView[]>;
+  testSavedModel(modelId: string): Promise<{ reachable: boolean; testStatus: 'reachable' | 'unreachable'; message: string }>;
+  removeSavedModel(modelId: string): Promise<SavedModelView[]>;
   importModelKey(): Promise<boolean>;
   clearModelKey(): Promise<void>;
   saveModelSettings(input: { model: string; maxOutputTokens: number }): Promise<void>;

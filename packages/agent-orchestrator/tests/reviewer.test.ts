@@ -12,6 +12,7 @@ function provider(value: unknown): ModelProviderAdapter {
   return {
     providerId: 'openai',
     async listModels() { return [model]; },
+    async probe() {},
     async complete<T>(_key: string, request: AgentCompletionRequest) { return { value: request.schema.parse(value) as T, inputTokens: 700, outputTokens: 120 }; },
   };
 }

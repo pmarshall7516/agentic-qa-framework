@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AgentCompletionRequestSchema, type AgentCompletionRequest, type ModelProviderAdapter, modelResponseSchema, normalizedModel, providerJson, validateApiKey } from './provider.js';
+import { AgentCompletionRequestSchema, type AgentCompletionRequest, type ModelProviderAdapter, modelResponseSchema, normalizedModel, providerJson, validateApiKey, validateModelId } from './provider.js';
 import type { ProviderModel } from '@agentic-qa/domain/agent';
 
 const ANTHROPIC_MODEL_PRICES = new Map([
@@ -51,6 +51,23 @@ export const anthropicAdapter: ModelProviderAdapter = {
       if (page === 19) throw new Error('Anthropic model discovery exceeded the pagination limit.');
     }
     return models;
+  },
+  async probe(apiKey, modelId, fetcher = fetch) {
+    validateApiKey(apiKey);
+    const response = await fetcher('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: validateModelId(modelId), max_tokens: 16,
+        system: 'This is a connection check. Reply briefly to the user.',
+        messages: [{ role: 'user', content: 'Reply with OK.' }],
+      }),
+      redirect: 'error', referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(30_000),
+    });
+    const parsed = z.object({
+      content: z.array(z.object({ type: z.string(), text: z.string().max(100_000).optional() }).passthrough()).max(100),
+    }).passthrough().parse(await providerJson(response, 'Anthropic'));
+    if (!parsed.content.some(({ type, text }) => type === 'text' && text?.trim())) throw new Error('Anthropic returned no text for the reachability prompt.');
   },
   async complete<T>(apiKey: string, input: AgentCompletionRequest, fetcher: typeof fetch = fetch) {
     validateApiKey(apiKey);

@@ -29,9 +29,10 @@ import { anthropicAdapter } from '@agentic-qa/model-adapters/anthropic';
 import { openRouterAdapter } from '@agentic-qa/model-adapters/openrouter';
 import { claudeCodeAdapter } from '@agentic-qa/model-adapters/claude-code';
 import { validateApiKey } from '@agentic-qa/model-adapters/provider';
-import type { ProviderModel } from '@agentic-qa/domain/agent';
-import { buildDelegationDiagram, DelegationDiagramSchema, DelegationPlanSchema, ProviderModelSchema, RunBudgetSchema, RunEnvelopeSchema } from '@agentic-qa/domain/agent';
-import { EvidenceLinkedReviewSchema, planQaRun, RepositoryTestDraftSchema, reviewQaRun } from '@agentic-qa/agent-orchestrator';
+import type { ProviderModel, SavedModelView } from '@agentic-qa/domain/agent';
+import { buildDelegationDiagram, DelegationDiagramSchema, DelegationPlanSchema, ProviderModelSchema, RunBudgetSchema, RunEnvelopeSchema, SavedModelSchema, SavedModelViewSchema } from '@agentic-qa/domain/agent';
+import type { ModelProviderAdapter } from '@agentic-qa/model-adapters/provider';
+import { EvidenceLinkedReviewSchema, planQaRun, RepositoryTestDraftSchema, reviewQaRun, synthesizeWorkItemPlan } from '@agentic-qa/agent-orchestrator';
 import type { AdoRunProfile, AdoRunProfileInput, BrowserTestAccountInput, BrowserTestAccountSummary, DesktopState, DraftPlan, QueueItemView, SearchItemsInput, TargetConfig } from '../shared/ipc.js';
 
 const SETTING = {
@@ -126,6 +127,7 @@ export class DesktopController {
   private readonly chosenRepository: () => Promise<string | undefined>;
   private chosenRepositoryPath?: string;
   private readonly pendingPlans = new Map<string, DraftPlan>();
+  private readonly workItemTypeCategoryMappings = new Map<string, WorkItemTypeMappings>();
   private readonly saveReportFile: (filename: string, contents: string, format: ReportFormat) => Promise<boolean>;
   private readonly saveEvidenceFile: (filename: string, contents: Buffer, restricted: boolean) => Promise<boolean>;
   private readonly activeRuns = new Map<string, AbortController>();
@@ -144,10 +146,12 @@ export class DesktopController {
   private readonly repoWorkerImageInstaller?: () => Promise<void>;
   private readonly chooseModelKeyFile?: () => Promise<string | undefined>;
   private readonly isClaudeAccountConnected: () => Promise<boolean>;
+  private readonly getClaudeAccountEmail: () => Promise<string | undefined>;
   private readonly startClaudeLogin: () => Promise<void>;
   private readonly readAdoProfilesConfig?: () => Promise<string | undefined>;
   private readonly saveAdoProfilesConfig?: (contents: string) => Promise<boolean>;
   private readonly providerFetch: typeof fetch;
+  private readonly getProviderAdapter: (providerId: SupportedProviderId) => ModelProviderAdapter;
   private readonly pendingModelPreviews = new Map<string, { runId: string; draftHash: string; preview: ReturnType<typeof buildModelPayload>; includedCriterionIds: string[]; expiresAt: number }>();
 
   constructor(options: {
@@ -171,10 +175,12 @@ export class DesktopController {
     installRepoWorkerImage?: () => Promise<void>;
     chooseModelKeyFile?: () => Promise<string | undefined>;
     isClaudeAccountConnected?: () => Promise<boolean>;
+    getClaudeAccountEmail?: () => Promise<string | undefined>;
     startClaudeLogin?: () => Promise<void>;
     readAdoProfilesConfig?: () => Promise<string | undefined>;
     saveAdoProfilesConfig?: (contents: string) => Promise<boolean>;
     providerFetch?: typeof fetch;
+    providerAdapterFactory?: (providerId: SupportedProviderId) => ModelProviderAdapter;
   }) {
     this.store = options.store;
     this.ado = options.ado ?? new AdoClient();
@@ -201,10 +207,12 @@ export class DesktopController {
     this.repoWorkerImageInstaller = options.installRepoWorkerImage;
     this.chooseModelKeyFile = options.chooseModelKeyFile;
     this.isClaudeAccountConnected = options.isClaudeAccountConnected ?? (async () => false);
+    this.getClaudeAccountEmail = options.getClaudeAccountEmail ?? (async () => undefined);
     this.startClaudeLogin = options.startClaudeLogin ?? (async () => { throw new Error('Claude Code CLI is not configured.'); });
     this.readAdoProfilesConfig = options.readAdoProfilesConfig;
     this.saveAdoProfilesConfig = options.saveAdoProfilesConfig;
     this.providerFetch = options.providerFetch ?? fetch;
+    this.getProviderAdapter = options.providerAdapterFactory ?? providerAdapter;
   }
 
   async getState(): Promise<DesktopState> {
@@ -223,11 +231,15 @@ export class DesktopController {
     const auth = await this.getAuth().catch(() => undefined);
     const accounts = auth ? await auth.getAccounts().catch(() => []) : [];
     const activeAccountId = selectedAccountId && accounts.some(({ homeAccountId }) => homeAccountId === selectedAccountId) ? selectedAccountId : undefined;
+    if (activeAccountId && organization && project) await this.ensureDefaultAdoProfile(organization, project);
     const customTypeMappings = activeAccountId && organization && project ? await this.typeMappings(organization, project.id) : {};
     const queue: QueueItemView[] = await Promise.all(entries.map(async (entry: QueueEntry) => ({
       entry,
       snapshot: await this.store.getSnapshot(entry.key),
     })));
+    const claudeAccountEmail = configuredProvider === 'claude-code'
+      ? await this.getClaudeAccountEmail().catch(() => undefined)
+      : undefined;
     return {
       azureCliAvailable: Boolean(auth),
       accounts,
@@ -242,8 +254,10 @@ export class DesktopController {
       ...(target ? { target } : {}),
       modelProviderConfigured: configuredProvider === 'claude-code' ? await this.isClaudeAccountConnected().catch(() => false) : Boolean(modelKey),
       modelProvider: providerId ?? modelSettings?.providerId ?? 'openai',
+      ...(claudeAccountEmail ? { modelProviderAccountEmail: claudeAccountEmail } : {}),
       modelId: modelSettings?.modelId ?? modelSettings?.model ?? '',
       modelMaxOutputTokens: modelSettings?.maxOutputTokens ?? 1200,
+      savedModels: await this.getSavedModels(),
     };
   }
 
@@ -260,6 +274,7 @@ export class DesktopController {
     if (apiKey.length < 20 || apiKey.length > 500 || /[\r\n]/.test(apiKey)) throw new Error('The selected file must contain one provider API key on a single line.');
     validateApiKey(apiKey);
     await this.store.setSetting(`model.apiKey.${providerId}`, apiKey);
+    await this.store.setSetting(`model.credentialGeneration.${providerId}`, randomUUID());
     await this.store.setSetting('model.provider', providerId);
     this.pendingModelPreviews.clear();
     return true;
@@ -269,6 +284,7 @@ export class DesktopController {
     if (!await this.isClaudeAccountConnected().catch(() => false)) await this.startClaudeLogin();
     if (!await this.isClaudeAccountConnected().catch(() => false)) throw new Error('Claude Code sign-in did not complete. Finish sign-in in the browser and try again.');
     await this.store.setSetting('model.provider', 'claude-code');
+    await this.store.setSetting('model.credentialGeneration.claude-code', randomUUID());
     this.pendingModelPreviews.clear();
     return true;
   }
@@ -277,27 +293,138 @@ export class DesktopController {
     const providerId = ProviderIdSchema.parse(providerIdInput);
     if (providerId === 'claude-code') {
       if (!await this.isClaudeAccountConnected()) throw new Error('Connect a Claude plan account through Claude Code before discovering models.');
-      return providerAdapter(providerId).listModels('');
+      return this.getProviderAdapter(providerId).discoverModels?.() ?? claudeCodeAdapter.listModels('');
     }
     const apiKey = await this.setting<string>(`model.apiKey.${providerId}`);
     if (!apiKey) throw new Error(`Connect an ${providerId === 'openai' ? 'OpenAI' : 'Anthropic'} API key before discovering models.`);
-    return providerAdapter(providerId).listModels(apiKey, this.providerFetch);
+    return this.getProviderAdapter(providerId).listModels(apiKey, this.providerFetch);
   }
 
-  async saveAgentModelSettings(input: { providerId: SupportedProviderId; modelId: string; maxOutputTokens: number }): Promise<void> {
+  async saveAgentModelSettings(input: { providerId: SupportedProviderId; modelId: string; maxOutputTokens: number }): Promise<SavedModelView[]> {
     const settings = ModelSettingsSchema.parse(input);
     const key = settings.providerId === 'claude-code' ? '' : await this.setting<string>(`model.apiKey.${settings.providerId}`);
     if (settings.providerId === 'claude-code' ? !await this.isClaudeAccountConnected() : !key) throw new Error('Connect the selected provider before saving its model.');
-    const models = await providerAdapter(settings.providerId).listModels(key ?? '', this.providerFetch);
-    if (!models.some((model) => model.modelId === settings.modelId && model.capabilities.structuredOutput && model.capabilities.toolUse)) throw new Error('Choose a discovered model that supports structured output and tool use.');
+    const models = await this.getProviderAdapter(settings.providerId).listModels(key ?? '', this.providerFetch);
+    const model = models.find((item) => item.modelId === settings.modelId && item.capabilities.structuredOutput && item.capabilities.toolUse);
+    if (!model) throw new Error('Choose a discovered model that supports structured output and tool use.');
+    const generation = await this.credentialGeneration(settings.providerId);
+    const catalog = await this.savedModelCatalog();
+    const prior = catalog.find((item) => item.providerId === model.providerId && item.modelId === model.modelId);
+    const savedModel = SavedModelSchema.parse({
+      ...model,
+      id: prior?.id ?? randomUUID(),
+      maxOutputTokens: settings.maxOutputTokens,
+      credentialGeneration: generation,
+      testStatus: prior?.credentialGeneration === generation ? prior.testStatus : 'untested',
+      ...(prior?.credentialGeneration === generation && prior.testedAt ? { testedAt: prior.testedAt, testedCredentialGeneration: prior.testedCredentialGeneration } : {}),
+      ...(prior?.credentialGeneration === generation && prior?.testMessage ? { testMessage: prior.testMessage } : {}),
+    });
+    await this.saveModelCatalog([...catalog.filter((item) => item.id !== savedModel.id), savedModel]);
     await this.store.setSetting('model.provider', settings.providerId);
     await this.store.setSetting('model.settings', settings);
     this.pendingModelPreviews.clear();
+    await this.testSavedModel(savedModel.id);
+    return this.getSavedModels();
+  }
+
+  async selectSavedModel(modelIdInput: string): Promise<DesktopState> {
+    const modelId = z.string().uuid().parse(modelIdInput);
+    const catalog = await this.savedModelCatalog();
+    const model = catalog.find(({ id }) => id === modelId);
+    if (!model) throw new Error('Choose a saved model from Settings.');
+    const generation = await this.credentialGeneration(model.providerId);
+    if (model.testStatus !== 'reachable' || model.testedCredentialGeneration !== generation) throw new Error('Test this saved model successfully after the most recent credential change before using it for planning.');
+    await this.store.setSetting('model.provider', model.providerId);
+    await this.store.setSetting('model.settings', { providerId: model.providerId, modelId: model.modelId, maxOutputTokens: model.maxOutputTokens });
+    this.pendingModelPreviews.clear();
+    return this.getState();
+  }
+
+  async getSavedModels(): Promise<SavedModelView[]> {
+    const catalog = await this.savedModelCatalog();
+    const views = await Promise.all(catalog.map(async (model) => {
+      const generation = await this.credentialGeneration(model.providerId);
+      const stale = model.testStatus !== 'untested' && model.testedCredentialGeneration !== generation;
+      return SavedModelViewSchema.parse({
+        providerId: model.providerId, modelId: model.modelId, displayName: model.displayName,
+        capabilities: model.capabilities, id: model.id, maxOutputTokens: model.maxOutputTokens,
+        testStatus: stale ? 'stale' : model.testStatus,
+        ...(model.testedAt ? { testedAt: model.testedAt } : {}),
+        ...(!stale && model.testMessage ? { testMessage: model.testMessage } : {}),
+      });
+    }));
+    return views;
+  }
+
+  async testSavedModel(modelIdInput: string): Promise<{ reachable: boolean; testStatus: 'reachable' | 'unreachable'; message: string }> {
+    const modelId = z.string().uuid().parse(modelIdInput);
+    const catalog = await this.savedModelCatalog();
+    const index = catalog.findIndex((item) => item.id === modelId);
+    if (index < 0) throw new Error('Saved model was not found.');
+    const model = catalog[index]!;
+    const generation = await this.credentialGeneration(model.providerId);
+    const apiKey = model.providerId === 'claude-code' ? '' : await this.setting<string>(`model.apiKey.${model.providerId}`);
+    if (model.providerId === 'claude-code' ? !await this.isClaudeAccountConnected() : !apiKey) throw new Error('Reconnect this provider before testing the saved model.');
+    let reachable = false;
+    try {
+      const adapter = this.getProviderAdapter(model.providerId);
+      await adapter.probe(apiKey ?? '', model.modelId, this.providerFetch);
+      reachable = true;
+    } catch {
+      reachable = false;
+    }
+    const testedAt = new Date().toISOString();
+    const { testMessage: _previousTestMessage, ...modelWithoutTestMessage } = model;
+    catalog[index] = SavedModelSchema.parse({
+      ...modelWithoutTestMessage,
+      credentialGeneration: generation,
+      testStatus: reachable ? 'reachable' : 'unreachable',
+      testedAt,
+      testedCredentialGeneration: generation,
+      ...(reachable ? {} : { testMessage: 'The provider did not complete the reachability prompt. Verify model access, credentials, and account limits.' }),
+    });
+    await this.saveModelCatalog(catalog);
+    return {
+      reachable,
+      testStatus: reachable ? 'reachable' : 'unreachable',
+      message: reachable ? 'Model is reachable and completed a prompt.' : 'Model did not complete the reachability prompt. Verify model access, credentials, and account limits.',
+    };
+  }
+
+  async removeSavedModel(modelIdInput: string): Promise<SavedModelView[]> {
+    const modelId = z.string().uuid().parse(modelIdInput);
+    const catalog = await this.savedModelCatalog();
+    const removed = catalog.find(({ id }) => id === modelId);
+    await this.saveModelCatalog(catalog.filter(({ id }) => id !== modelId));
+    if (removed) {
+      const active = await this.setting<{ providerId?: SupportedProviderId; modelId?: string }>('model.settings');
+      if (active?.providerId === removed.providerId && active.modelId === removed.modelId) await this.store.setSetting('model.settings', null);
+    }
+    return this.getSavedModels();
+  }
+
+  private async savedModelCatalog() {
+    const raw = await this.setting<unknown>('model.catalog');
+    return raw === undefined || raw === null ? [] : z.array(SavedModelSchema).max(100).parse(raw);
+  }
+
+  private async saveModelCatalog(catalog: unknown): Promise<void> {
+    await this.store.setSetting('model.catalog', z.array(SavedModelSchema).max(100).parse(catalog));
+  }
+
+  private async credentialGeneration(providerId: SupportedProviderId): Promise<string> {
+    const settingKey = `model.credentialGeneration.${providerId}`;
+    const existing = await this.setting<string>(settingKey);
+    if (existing && z.string().uuid().safeParse(existing).success) return existing;
+    const generation = randomUUID();
+    await this.store.setSetting(settingKey, generation);
+    return generation;
   }
 
   async clearModelKey(): Promise<void> {
     const providerId = await this.setting<SupportedProviderId>('model.provider') ?? 'openai';
     if (providerId !== 'claude-code') await this.store.setSetting(`model.apiKey.${providerId}`, null);
+    await this.store.setSetting(`model.credentialGeneration.${providerId}`, randomUUID());
     await this.store.setSetting('model.settings', null);
     this.pendingModelPreviews.clear();
   }
@@ -428,12 +555,43 @@ export class DesktopController {
 
   async selectProject(input: AdoProject): Promise<DesktopState> {
     const project = ProjectSchema.parse(input);
-    if (!(await this.setting<string>(SETTING.organization))) {
+    const organization = await this.setting<string>(SETTING.organization);
+    if (!organization) {
       throw new Error('Choose an Azure DevOps organization first.');
     }
     await this.setSetting(SETTING.project, project);
     await this.setSetting(SETTING.activeProfile, null);
+    await this.ensureDefaultAdoProfile(organization, project);
     return this.getState();
+  }
+
+  private async ensureDefaultAdoProfile(organization: string, project: AdoProject): Promise<void> {
+    const profiles = await this.setting<AdoRunProfile[]>(SETTING.profiles) ?? [];
+    const activeId = await this.setting<string>(SETTING.activeProfile);
+    const current = profiles.find(({ id }) => id === activeId);
+    if (current && current.organization.toLocaleLowerCase('en-US') === organization.toLocaleLowerCase('en-US') && current.project.id === project.id) return;
+
+    const matching = profiles.find((profile) => profile.organization.toLocaleLowerCase('en-US') === organization.toLocaleLowerCase('en-US') && profile.project.id === project.id);
+    if (matching) {
+      await this.setSetting(SETTING.activeProfile, matching.id);
+      return;
+    }
+
+    const teams = await this.ado.listTeams(await this.accessToken(), organization, project.id);
+    const team = teams.find(({ name }) => name.toLocaleLowerCase('en-US') === project.name.toLocaleLowerCase('en-US')) ?? teams[0];
+    if (!team) throw new Error(`No teams were returned for project ${project.name}. Check that the signed-in account can read this project's teams.`);
+
+    const profile: AdoRunProfile = {
+      id: randomUUID(),
+      name: `${project.name.slice(0, 92)} default`,
+      organization,
+      project,
+      team: team.name,
+      boardColumn: '',
+      storyIds: [],
+    };
+    await this.setSetting(SETTING.profiles, [...profiles, profile]);
+    await this.setSetting(SETTING.activeProfile, profile.id);
   }
 
   async saveAdoProfile(input: AdoRunProfileInput): Promise<DesktopState> {
@@ -1025,11 +1183,6 @@ export class DesktopController {
     for (const snapshot of snapshots) {
       if (snapshot.kind !== 'REQUIREMENT') {
         notes.push(`Task #${snapshot.id} is retained with its description as scope context. It does not prove parent acceptance criteria.`);
-        if (snapshot.kind === 'TASK' && snapshot.description?.trim()) {
-          const text = snapshot.description.trim().slice(0, 4000);
-          const source: SourceRef = { organization: snapshot.organization, projectId: snapshot.projectId, workItemId: snapshot.id, revision: snapshot.revision, field: 'System.Description', excerptHash: sha256(text) };
-          taskCandidates.push({ id: `task-${snapshot.id}-${source.excerptHash.slice(0, 12)}`, source, text, disposition: 'PROPOSED' });
-        }
         continue;
       }
       const raw = snapshot.acceptanceCriteria?.trim() ?? '';
@@ -1064,13 +1217,32 @@ export class DesktopController {
         });
       }
     }
+    const synthesis = await synthesizeWorkItemPlan({
+      provider: this.getProviderAdapter(configuredAgent.providerId), apiKey: configuredAgent.apiKey,
+      modelId: configuredAgent.modelId,
+      items: snapshots.map(({ id, parentId, kind, type, title, state, description, acceptanceCriteria, comments }) => ({ id, ...(parentId ? { parentId } : {}), kind, type, title, state, ...(description ? { description } : {}), ...(acceptanceCriteria ? { acceptanceCriteria } : {}), ...(comments?.length ? { comments } : {}) })),
+      fetcher: this.providerFetch,
+    });
+    const sourceForItem = (workItemId: number): SourceRef => {
+      const item = snapshots.find(({ id }) => id === workItemId)!;
+      const field = item.acceptanceCriteria?.trim() ? 'Microsoft.VSTS.Common.AcceptanceCriteria' : item.description?.trim() ? 'System.Description' : 'System.Title';
+      const text = field === 'Microsoft.VSTS.Common.AcceptanceCriteria' ? item.acceptanceCriteria! : field === 'System.Description' ? item.description! : item.title;
+      return { organization: item.organization, projectId: item.projectId, workItemId: item.id, revision: item.revision, field, excerptHash: sha256(text) };
+    };
+    const proposals: QAContract['proposals'] = synthesis.proposals.map(({ id, text, sourceWorkItemIds, ambiguityNotes }) => ({ id, text, sourceRefs: sourceWorkItemIds.map(sourceForItem), ambiguityNotes, decision: 'PROPOSED' }));
+    const taskPlans: QAContract['taskPlans'] = synthesis.taskPlans.map((plan) => {
+      const item = snapshots.find(({ id }) => id === plan.taskId)!;
+      const field = item.description?.trim() ? 'System.Description' : 'System.Title';
+      const sourceText = field === 'System.Description' ? item.description! : item.title;
+      return { ...plan, taskSource: { organization: item.organization, projectId: item.projectId, workItemId: item.id, revision: item.revision, field, excerptHash: sha256(sourceText) } };
+    });
     if (repositoryConfig) {
       const mapped = new Set(repositoryConfig.tests.flatMap(({ scenarioMappings }) => scenarioMappings.map(({ scenarioId }) => scenarioId)));
       const unmapped = scenarios.filter(({ layer }) => layer === 'repo').filter(({ id }) => !mapped.has(id)).map(({ id }) => id);
       if (unmapped.length) notes.push(`Map each Repository Scenario to exact JUnit testcase identities using scenarioMappings in .agentic-qa.yml, then refresh this plan: ${unmapped.join(', ')}`);
     }
     if (repositoryConfigAutoDetected) notes.push('The app found a supported repository test entry point and added its exact command automatically. It will run in Docker with networking disabled; dependencies are not installed or restored automatically. Until exact JUnit/TRX testcase mappings exist, this command is diagnostic and does not prove an Acceptance Criterion.');
-    const contract: QAContract = QAContractSchema.parse({ schemaVersion: 2, id: randomUUID(), revision: 1, sourceContext, taskCandidates, coverageGaps, criteria, scenarios });
+    const contract: QAContract = QAContractSchema.parse({ schemaVersion: 3, id: randomUUID(), revision: 1, sourceContext, taskCandidates, coverageGaps, featureSummary: synthesis.featureSummary, taskPlans, proposals, criteria, scenarios });
     const startedAt = new Date().toISOString();
     const sourceRefs = snapshots.map((snapshot) => ({
       organization: snapshot.organization, projectId: snapshot.projectId, workItemId: snapshot.id, revision: snapshot.revision,
@@ -1116,27 +1288,39 @@ export class DesktopController {
     const configuredAgent = await this.requireConfiguredAgent();
     const original = this.pendingPlans.get(input.manifest.runId);
     if (!original || JSON.stringify(original.manifest) !== JSON.stringify(input.manifest) || JSON.stringify(original.repositoryCommands ?? []) !== JSON.stringify(input.repositoryCommands ?? [])) throw new Error('This plan is no longer current. Create a fresh draft and review it again.');
+    if (configuredAgent.providerId !== original.manifest.providerId || configuredAgent.modelId !== original.manifest.modelId) throw new Error('The selected model changed after plan synthesis. Select the planned tested model again or create a fresh plan.');
     if (JSON.stringify(original.envelopePreview) !== JSON.stringify(input.envelopePreview)) throw new Error('The approved run envelope cannot be changed in the renderer. Create a fresh plan to change its scope.');
-    const contract = validateReadyContract({ ...input.contract, approvedAt: new Date().toISOString() });
+    const reviewedContract = QAContractSchema.parse(input.contract);
+    if (JSON.stringify(reviewedContract.coverageGaps) !== JSON.stringify(original.contract.coverageGaps)) throw new Error('Coverage gaps are frozen during review. A source-grounded accepted proposal resolves a matching gap at approval.');
+    const acceptedRequirementKeys = new Set(reviewedContract.proposals.filter(({ decision }) => decision === 'ACCEPTED' || decision === 'EDITED').flatMap(({ sourceRefs }) => sourceRefs.filter((ref) => original.contract.sourceContext.some((source) => source.kind === 'REQUIREMENT' && source.organization.toLocaleLowerCase('en-US') === ref.organization.toLocaleLowerCase('en-US') && source.projectId === ref.projectId && source.workItemId === ref.workItemId) && ['Microsoft.VSTS.Common.AcceptanceCriteria', 'System.Description', 'System.Title'].includes(ref.field)).map((ref) => `${ref.organization.toLocaleLowerCase('en-US')}:${ref.projectId}:${ref.workItemId}`)));
+    const contract = validateReadyContract({ ...reviewedContract, coverageGaps: reviewedContract.coverageGaps.filter((gap) => !acceptedRequirementKeys.has(`${gap.source.organization.toLocaleLowerCase('en-US')}:${gap.source.projectId}:${gap.source.workItemId}`)), approvedAt: new Date().toISOString() });
     if (contract.id !== original.contract.id || contract.revision !== original.contract.revision) throw new Error('Contract identity cannot change while approving a plan.');
-    if (JSON.stringify(contract.sourceContext) !== JSON.stringify(original.contract.sourceContext) || JSON.stringify(contract.coverageGaps) !== JSON.stringify(original.contract.coverageGaps)) throw new Error('ADO source context and coverage gaps are frozen. Refresh the source and create a new plan to change them.');
+    if (JSON.stringify(contract.sourceContext) !== JSON.stringify(original.contract.sourceContext)) throw new Error('ADO source context is frozen. Refresh the source and create a new plan to change it.');
     const originalCriteria = new Map(original.contract.criteria.map((criterion) => [criterion.id, criterion]));
     if (original.contract.criteria.some((criterion) => {
       const reviewed = contract.criteria.find(({ id }) => id === criterion.id);
       return !reviewed || JSON.stringify(criterion.source) !== JSON.stringify(reviewed.source);
     })) throw new Error('Requirement identity and source revisions cannot change during review. Create a fresh plan to update sources.');
+    if (contract.featureSummary !== original.contract.featureSummary || JSON.stringify(contract.taskPlans) !== JSON.stringify(original.contract.taskPlans)) throw new Error('The generated feature summary and Task verification plans are frozen during review. Create a fresh plan to regenerate them.');
+    const proposalsById = new Map(original.contract.proposals.map((proposal) => [proposal.id, proposal]));
+    if (contract.proposals.length !== original.contract.proposals.length || contract.proposals.some((proposal) => {
+      const before = proposalsById.get(proposal.id);
+      return !before || proposal.text !== before.text && proposal.decision !== 'EDITED' || JSON.stringify(proposal.sourceRefs) !== JSON.stringify(before.sourceRefs) || JSON.stringify(proposal.ambiguityNotes) !== JSON.stringify(before.ambiguityNotes);
+    })) throw new Error('Proposal provenance is frozen. Only proposed criteria may be accepted, edited, or rejected.');
     const candidateById = new Map(original.contract.taskCandidates.map((candidate) => [candidate.id, candidate]));
     if (contract.taskCandidates.length !== original.contract.taskCandidates.length || contract.taskCandidates.some((candidate) => {
       const before = candidateById.get(candidate.id);
       return !before || before.text !== candidate.text || JSON.stringify(before.source) !== JSON.stringify(candidate.source) ||
         (before.disposition !== 'PROPOSED' && (before.disposition !== candidate.disposition || before.criterionId !== candidate.criterionId));
     })) throw new Error('Task candidate source text and provenance cannot change during review. Create a fresh plan to update sources.');
+    for (const proposal of contract.proposals) {
+      const criterion = proposal.criterionId ? contract.criteria.find(({ id }) => id === proposal.criterionId) : undefined;
+      if ((proposal.decision === 'ACCEPTED' || proposal.decision === 'EDITED') !== Boolean(criterion)) throw new Error('Accept or edit each criterion proposal through its review controls before adding it to the QA Contract.');
+      if (criterion && (!('agentProposed' in criterion.source) || criterion.source.proposalId !== proposal.id || criterion.source.decision !== proposal.decision || JSON.stringify(criterion.source.sourceRefs) !== JSON.stringify(proposal.sourceRefs))) throw new Error('Accepted criteria must preserve the selected proposal and its source provenance.');
+      if (criterion && criterion.expectedBehavior !== proposal.text) throw new Error('The reviewed criterion text must match its accepted or edited proposal text.');
+    }
     for (const criterion of contract.criteria.filter(({ id }) => !originalCriteria.has(id))) {
-      const derivedFrom = 'userAdded' in criterion.source ? criterion.source.derivedFrom : undefined;
-      if (!derivedFrom) throw new Error('A new criterion must be a user-added Task candidate with preserved source provenance.');
-      const candidate = original.contract.taskCandidates.find(({ source, disposition }) => disposition === 'PROPOSED' && JSON.stringify(source) === JSON.stringify(derivedFrom));
-      const reviewedCandidate = candidate && contract.taskCandidates.find(({ id }) => id === candidate.id);
-      if (!candidate || reviewedCandidate?.disposition !== 'ACCEPTED' || reviewedCandidate.criterionId !== criterion.id) throw new Error('Only a Task candidate explicitly accepted in this review can add a criterion.');
+      if (!('agentProposed' in criterion.source)) throw new Error('New criteria must come from an explicitly accepted Orchestrator proposal.');
     }
     await this.validateCurrentSourceRevisions(original.manifest);
     const target = await this.setting<TargetConfig>('run.target');
@@ -1816,7 +2000,11 @@ export class DesktopController {
     const modelId = saved?.modelId ?? saved?.model;
     const configured = providerId === 'claude-code' ? await this.isClaudeAccountConnected() : Boolean(key);
     if (!providerId || !configured || !modelId || saved?.providerId !== providerId) throw new Error('Connect an AI provider account and select a supported model in Settings before planning or running QA.');
-    return { providerId, modelId, maxOutputTokens: Math.max(256, Math.min(saved?.maxOutputTokens ?? 1200, 32_000)), apiKey: key ?? '' };
+    const generation = await this.credentialGeneration(providerId);
+    const catalog = await this.savedModelCatalog();
+    const selected = catalog.find((model) => model.providerId === providerId && model.modelId === modelId && model.testStatus === 'reachable' && model.testedCredentialGeneration === generation);
+    if (!selected) throw new Error('Select a saved model that passed its reachability test after the latest credential change before planning or running QA.');
+    return { providerId, modelId, maxOutputTokens: Math.max(256, Math.min(selected.maxOutputTokens, 32_000)), apiKey: key ?? '' };
   }
 
   private async setSetting(key: string, value: unknown): Promise<void> {
@@ -1871,7 +2059,19 @@ export class DesktopController {
   }
 
   private async typeMappings(organization: string, projectId: string): Promise<WorkItemTypeMappings> {
-    return WorkItemTypeMappingsSchema.parse(await this.setting<WorkItemTypeMappings>(this.typeMappingsSettingKey(organization, projectId)) ?? {});
+    const key = `${organization.toLocaleLowerCase('en-US')}:${projectId}`;
+    let categoryMappings = this.workItemTypeCategoryMappings.get(key);
+    if (!categoryMappings) {
+      try {
+        categoryMappings = await this.ado.getWorkItemTypeCategoryMappings(await this.accessToken(), organization, projectId);
+      } catch {
+        // Older or restricted ADO projects may not expose categories; standard type names still classify normally.
+        categoryMappings = {};
+      }
+      this.workItemTypeCategoryMappings.set(key, categoryMappings);
+    }
+    const savedMappings = WorkItemTypeMappingsSchema.parse(await this.setting<WorkItemTypeMappings>(this.typeMappingsSettingKey(organization, projectId)) ?? {});
+    return { ...categoryMappings, ...savedMappings };
   }
 
   private async configFingerprint(target: TargetConfig): Promise<{ value: string; repositoryConfigHash?: string }> {

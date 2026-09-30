@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
+import { runClaudeCliCommand } from '@agentic-qa/model-adapters/claude-cli';
 import { openQaStore } from '@agentic-qa/storage/database';
 import { AzureCliAdoAuthService } from '@agentic-qa/ado/azure-cli-auth';
 import { DesktopController } from './controller.js';
@@ -19,25 +20,25 @@ const APP_CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe
 const DEV_CSP = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' http://127.0.0.1:5173; style-src 'self' 'unsafe-inline' http://127.0.0.1:5173; img-src 'self' data:; connect-src 'self' http://127.0.0.1:5173 ws://127.0.0.1:5173; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'";
 
 function runClaudeCommand(args: string[], timeoutMs: number, captureOutput = false): Promise<{ code: number; output: string }> {
-  return new Promise((resolveCommand, rejectCommand) => {
-    const allowed = ['PATH', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'SYSTEMROOT', 'TEMP', 'TMP'];
-    const env = Object.fromEntries(allowed.flatMap((key) => process.env[key] ? [[key, process.env[key]!] as const] : []));
-    const child = spawn('claude', args, { env, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
-    let output = '';
-    let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); setTimeout(() => child.kill('SIGKILL'), 1000).unref(); }, timeoutMs);
-    child.stdout.on('data', (chunk: Buffer) => { if (captureOutput) output = (output + chunk.toString('utf8')).slice(0, 4096); });
-    child.on('error', () => { clearTimeout(timer); rejectCommand(new Error('Claude Code CLI was not found. Install Claude Code, sign in to your Claude plan, then retry.')); });
-    child.on('close', (code) => { clearTimeout(timer); if (timedOut) rejectCommand(new Error('Claude Code sign-in timed out.')); else resolveCommand({ code: code ?? 1, output }); });
-  });
+  return runClaudeCliCommand(args, '', { timeoutMs, maxOutputBytes: captureOutput ? 16_384 : 64_000 })
+    .then(({ code, output }) => ({ code, output: captureOutput ? output : '' }));
+}
+
+async function claudeAccountStatus(): Promise<{ connected: boolean; email?: string }> {
+  const status = await runClaudeCommand(['auth', 'status', '--json'], 10_000, true);
+  if (status.code !== 0) return { connected: false };
+  try {
+    const parsed: unknown = JSON.parse(status.output);
+    if (!parsed || typeof parsed !== 'object') return { connected: false };
+    const auth = parsed as { loggedIn?: unknown; apiProvider?: unknown; authMethod?: unknown; email?: unknown };
+    const connected = auth.loggedIn === true && auth.apiProvider === 'firstParty' && typeof auth.authMethod === 'string' && auth.authMethod !== 'none';
+    const email = typeof auth.email === 'string' && auth.email.length <= 320 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(auth.email) ? auth.email : undefined;
+    return { connected, ...(connected && email ? { email } : {}) };
+  } catch { return { connected: false }; }
 }
 
 async function claudeAccountConnected(): Promise<boolean> {
-  const status = await runClaudeCommand(['auth', 'status', '--json'], 10_000, true);
-  try {
-    const parsed = JSON.parse(status.output);
-    return parsed.loggedIn === true && parsed.apiProvider === 'firstParty' && parsed.authMethod !== 'none';
-  } catch { return false; }
+  return (await claudeAccountStatus()).connected;
 }
 
 function dockerCommand(args: string[], timeoutMs = 10_000): Promise<{ code: number; errorText: string; output: string }> {
@@ -163,6 +164,7 @@ async function createWindow(): Promise<void> {
     artifactKey: () => getDatabaseKey(join(userDataPath, 'storage-key.enc')),
     authFactory: async () => new AzureCliAdoAuthService(),
     isClaudeAccountConnected: claudeAccountConnected,
+    getClaudeAccountEmail: async () => (await claudeAccountStatus()).email,
     startClaudeLogin: async () => {
       const result = await runClaudeCommand(['auth', 'login'], 5 * 60_000);
       if (result.code !== 0) throw new Error('Claude Code sign-in did not complete. Finish sign-in in the browser, then retry.');

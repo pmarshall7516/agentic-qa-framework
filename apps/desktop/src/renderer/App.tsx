@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import type { AdoGitRef, AdoGitRepository, AdoProject, AdoTeam } from '@agentic-qa/ado/client';
 import type { WorkItemSnapshot } from '@agentic-qa/domain/work-item';
 import type { ProviderModel } from '@agentic-qa/domain/agent';
@@ -12,7 +12,6 @@ const navigation: Array<{ id: AppScreen; label: string }> = [
   { id: 'queue', label: 'QA Queue' },
   { id: 'history', label: 'Runs' },
 ];
-const BUILT_IN_WORK_ITEM_TYPES = new Set(['user story', 'product backlog item', 'issue', 'requirement', 'task']);
 
 const EMPTY_STATE: DesktopState = {
   azureCliAvailable: false,
@@ -26,6 +25,88 @@ const EMPTY_STATE: DesktopState = {
 
 function projectLabel(project?: AdoProject): string {
   return project?.name ?? 'Choose a project';
+}
+
+function ModelCombobox({ models, value, disabled, onChange }: {
+  models: ProviderModel[];
+  value: string;
+  disabled: boolean;
+  onChange: (modelId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [activeIndex, setActiveIndex] = useState(0);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const selected = models.find(({ modelId }) => modelId === value);
+  const filtered = models.filter(({ displayName, modelId }) => `${displayName} ${modelId}`.toLocaleLowerCase().includes(query.toLocaleLowerCase()));
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener('pointerdown', closeOnOutsidePointer);
+    return () => document.removeEventListener('pointerdown', closeOnOutsidePointer);
+  }, [open]);
+
+  function select(model: ProviderModel) {
+    onChange(model.modelId);
+    setQuery('');
+    setOpen(false);
+  }
+
+  function handleKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setOpen(true);
+      setActiveIndex((index) => open ? Math.min(Math.max(filtered.length - 1, 0), index + 1) : 0);
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setOpen(true);
+      setActiveIndex((index) => Math.max(index - 1, 0));
+    } else if (event.key === 'Enter' && open && filtered[activeIndex]) {
+      event.preventDefault();
+      select(filtered[activeIndex]!);
+    } else if (event.key === 'Escape' && open) {
+      event.preventDefault();
+      setOpen(false);
+      setQuery('');
+    } else if (event.key === 'Tab' && open) {
+      setOpen(false);
+    }
+  }
+
+  return <div className="model-combobox" ref={rootRef}>
+    <input
+      className="text-input"
+      role="combobox"
+      aria-label="Search and choose a supported model"
+      aria-autocomplete="list"
+      aria-expanded={open}
+      aria-controls="provider-model-options"
+      aria-activedescendant={open && filtered[activeIndex] ? `provider-model-${activeIndex}` : undefined}
+      autoComplete="off"
+      disabled={disabled}
+      value={open ? query : selected ? `${selected.displayName} · ${selected.modelId}` : ''}
+      placeholder="Search available models"
+      onFocus={() => setOpen(true)}
+      onChange={(event) => { setQuery(event.target.value); setActiveIndex(0); setOpen(true); if (value) onChange(''); }}
+      onKeyDown={handleKeyDown}
+    />
+    <span className="model-combobox-toggle" aria-hidden="true">▾</span>
+    {open ? <div className="model-combobox-options" id="provider-model-options" role="listbox" aria-label="Available models">
+      {filtered.length ? filtered.map((model, index) => <div
+        id={`provider-model-${index}`}
+        className={`model-combobox-option ${index === activeIndex ? 'active' : ''}`}
+        key={model.modelId}
+        role="option"
+        aria-selected={model.modelId === value}
+        onMouseEnter={() => setActiveIndex(index)}
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => select(model)}
+      ><strong>{model.displayName}</strong><span>{model.modelId}</span><small>{model.capabilities.inputUsdPerMillionTokens === undefined || model.capabilities.outputUsdPerMillionTokens === undefined ? 'Pricing unavailable' : `$${model.capabilities.inputUsdPerMillionTokens} input / $${model.capabilities.outputUsdPerMillionTokens} output per 1M tokens`}</small></div>) : <div className="model-combobox-empty" role="status">{models.length ? 'No matching models.' : 'Check for available models first.'}</div>}
+    </div> : null}
+  </div>;
 }
 
 function blankStep(action: string): Scenario['steps'][number] {
@@ -154,7 +235,10 @@ function PlanSummary({ draftPlan, queue, target }: { draftPlan?: DraftPlan; queu
   const storySummary = `${stories.length} ${storyLabel}${stories.length === 1 ? '' : 's'}`;
   const taskSummary = `${tasks.length} Task${tasks.length === 1 ? '' : 's'}`;
   const criterionCount = draftPlan?.contract.criteria.length ?? 0;
-  const criterionSummary = `${criterionCount} acceptance ${criterionCount === 1 ? 'criterion' : 'criteria'}`;
+  const pendingProposals = draftPlan?.contract.proposals.filter(({ decision }) => decision === 'PROPOSED').length ?? 0;
+  const criterionSummary = pendingProposals
+    ? `${criterionCount} accepted · ${pendingProposals} proposed feature criteria`
+    : `${criterionCount} acceptance ${criterionCount === 1 ? 'criterion' : 'criteria'}`;
   const checks = draftPlan?.manifest.targetKind === 'site' ? 'Browser checks'
     : draftPlan?.manifest.targetKind === 'repository' ? 'Repository checks'
       : draftPlan?.manifest.targetKind === 'both' ? 'Repository and browser checks' : 'Not selected';
@@ -170,8 +254,9 @@ function PlanSummary({ draftPlan, queue, target }: { draftPlan?: DraftPlan; queu
       <div><dt>Coverage</dt><dd>{criterionSummary} · {checks}</dd></div>
       <div><dt>Target</dt><dd>{targetName}</dd></div>
     </dl>
-    {tasks.length ? <p className="plan-summary-note">Tasks provide context; they do not verify their Story's acceptance criteria.</p> : null}
-    {criterionCount === 0 ? <p className="plan-summary-warning" role="note">No Story acceptance criteria were found. Add or clarify acceptance criteria before approving a QA run.</p> : null}
+    {tasks.length ? <p className="plan-summary-note">Tasks inform feature-level criteria and get a verification plan; Task completion itself is never QA evidence.</p> : null}
+    {criterionCount === 0 && pendingProposals ? <p className="plan-summary-warning" role="note">Review and accept a source-linked feature criterion proposal before approving a QA run.</p> : null}
+    {criterionCount === 0 && !pendingProposals && draftPlan ? <p className="plan-summary-warning" role="note">No acceptance criteria or feature proposals are available. Clarify the Requirement or Task context and prepare a fresh plan.</p> : null}
   </section>;
 }
 
@@ -212,6 +297,10 @@ export function App({
   const [childrenByParent, setChildrenByParent] = useState<Record<number, WorkItemSnapshot[]>>({});
   const [expandedParents, setExpandedParents] = useState<Set<number>>(new Set());
   const [busy, setBusy] = useState(false);
+  const [isConnectingClaude, setIsConnectingClaude] = useState(false);
+  const [isCheckingClaudeModels, setIsCheckingClaudeModels] = useState(false);
+  const [isSavingModel, setIsSavingModel] = useState(false);
+  const [testingSavedModelId, setTestingSavedModelId] = useState<string>();
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [targetKind, setTargetKind] = useState<TargetConfig['targetKind']>(initialState?.target?.targetKind ?? 'site');
@@ -236,8 +325,8 @@ export function App({
   const [modelId, setModelId] = useState(initialState?.modelId ?? '');
   const [modelProvider, setModelProvider] = useState<'openai' | 'anthropic' | 'openrouter' | 'claude-code'>(initialState?.modelProvider ?? 'openai');
   const [providerModels, setProviderModels] = useState<ProviderModel[]>([]);
-  const [modelSearch, setModelSearch] = useState('');
   const [modelMaxOutputTokens, setModelMaxOutputTokens] = useState(initialState?.modelMaxOutputTokens ?? 1200);
+  const [selectedRunModelId, setSelectedRunModelId] = useState('');
   const [profileId, setProfileId] = useState('');
   const [profileName, setProfileName] = useState('');
   const [profileOrganization, setProfileOrganization] = useState(initialState?.selectedOrganization ?? '');
@@ -264,6 +353,8 @@ export function App({
     [state.queue],
   );
   const queueProjectGroups = useMemo(() => buildQueueProjectGroups(state.queue), [state.queue]);
+  const selectedProviderConnected = modelProvider === state.modelProvider && state.modelProviderConfigured === true;
+  const selectedSavedRunModel = state.savedModels?.find((model) => model.id === selectedRunModelId && model.testStatus === 'reachable');
 
   useEffect(() => {
     if (initialState) return;
@@ -443,6 +534,8 @@ export function App({
 
   async function saveRunTarget() {
     await run(async () => {
+      if (!selectedSavedRunModel) throw new Error('Select a saved model that passed its reachability test before preparing the plan.');
+      updateState(await api.selectSavedModel(selectedRunModelId));
       const target = composeTargetConfig();
       const next = await api.saveTarget(target);
       updateState(next);
@@ -523,38 +616,13 @@ export function App({
 
   function updateCriterion(criterionId: string, expectedBehavior: string) {
     if (!draftPlan) return;
+    const criterion = draftPlan.contract.criteria.find((item) => item.id === criterionId);
+    const proposalId = criterion && 'agentProposed' in criterion.source ? criterion.source.proposalId : undefined;
     setDraftPlan({ ...draftPlan, contract: {
       ...draftPlan.contract,
-      criteria: draftPlan.contract.criteria.map((criterion) => criterion.id === criterionId ? { ...criterion, expectedBehavior } : criterion),
+      criteria: draftPlan.contract.criteria.map((item) => item.id === criterionId ? { ...item, expectedBehavior, ...(proposalId && 'agentProposed' in item.source ? { source: { ...item.source, decision: 'EDITED' as const } } : {}) } : item),
+      proposals: proposalId ? draftPlan.contract.proposals.map((proposal) => proposal.id === proposalId ? { ...proposal, text: expectedBehavior, decision: 'EDITED' as const } : proposal) : draftPlan.contract.proposals,
     } });
-  }
-
-  function promoteTaskCandidate(candidateId: string) {
-    if (!draftPlan) return;
-    const candidate = draftPlan.contract.taskCandidates.find(({ id }) => id === candidateId);
-    if (!candidate || candidate.disposition !== 'PROPOSED') return;
-    const layer = draftPlan.manifest.targetKind === 'site' ? 'browser' as const : 'repo' as const;
-    const criterionId = `${candidate.id}-criterion`;
-    const scenarioId = `${candidate.id}-${layer}`;
-    const text = candidate.text.slice(0, 1000);
-    const criteria = [...draftPlan.contract.criteria, {
-      id: criterionId, source: { userAdded: true as const, author: 'Local QA plan editor', derivedFrom: candidate.source },
-      expectedBehavior: text, requiredLayers: [layer], scenarioIds: [scenarioId], ambiguityNotes: [],
-    }];
-    const scenarios = [...draftPlan.contract.scenarios, {
-      id: scenarioId, criterionIds: [criterionId], layer, preconditions: [],
-      steps: layer === 'browser' ? [{ action: 'expectText' as const, text }] : [],
-      expectedObservations: [text], risk: 'medium' as const, approved: false,
-    }];
-    setDraftPlan({ ...draftPlan, contract: {
-      ...draftPlan.contract, criteria, scenarios,
-      taskCandidates: draftPlan.contract.taskCandidates.map((item) => item.id === candidateId ? { ...item, disposition: 'ACCEPTED', criterionId } : item),
-    } });
-  }
-
-  function rejectTaskCandidate(candidateId: string) {
-    if (!draftPlan) return;
-    setDraftPlan({ ...draftPlan, contract: { ...draftPlan.contract, taskCandidates: draftPlan.contract.taskCandidates.map((item) => item.id === candidateId ? { ...item, disposition: 'REJECTED', criterionId: undefined } : item) } });
   }
 
   function updateScenarioStep(scenarioId: string, index: number, step: Scenario['steps'][number]) {
@@ -605,37 +673,144 @@ export function App({
   }
 
   async function connectProvider() {
-    await run(async () => {
-      if (modelProvider === 'claude-code') {
-        const connected = await api.connectClaudeAccount();
-        if (!connected) { setNotice('Claude Code connection canceled.'); return; }
-      } else {
-        const imported = await api.importProviderKey(modelProvider);
-        if (!imported) { setNotice('Provider key import canceled.'); return; }
-      }
-      const models = await api.listProviderModels(modelProvider);
-      setProviderModels(models);
-      const priorModel = modelProvider === state.modelProvider ? state.modelId ?? '' : '';
-      updateState(await api.getState());
-      setModelId(models.some(({ modelId: id }) => id === priorModel) ? priorModel : '');
-      setNotice(`${modelProvider === 'openai' ? 'OpenAI' : modelProvider === 'anthropic' ? 'Anthropic' : modelProvider === 'claude-code' ? 'Claude account' : 'OpenRouter'} connected. ${models.length} supported models discovered.`);
-    });
+    const connectingClaude = modelProvider === 'claude-code';
+    if (connectingClaude) setIsConnectingClaude(true);
+    try {
+      await run(async () => {
+        if (modelProvider === 'claude-code') {
+          setNotice('Opening Claude Code sign-in. Complete the sign-in in your browser; this window will confirm the connected account.');
+          const connected = await api.connectClaudeAccount();
+          if (!connected) { setNotice('Claude Code connection canceled.'); return; }
+          const next = await api.getState();
+          updateState(next);
+          setProviderModels([]);
+          setModelId(modelProvider === state.modelProvider ? state.modelId ?? '' : '');
+          setNotice(next.modelProviderAccountEmail
+            ? `Claude Code connected as ${next.modelProviderAccountEmail}. Check this account’s available models before choosing one.`
+            : 'Claude Code connected. Check the account’s available models before choosing one.');
+          return;
+        } else {
+          const imported = await api.importProviderKey(modelProvider);
+          if (!imported) { setNotice('Provider key import canceled.'); return; }
+        }
+        const models = await api.listProviderModels(modelProvider);
+        setProviderModels(models);
+        const priorModel = modelProvider === state.modelProvider ? state.modelId ?? '' : '';
+        updateState(await api.getState());
+        setModelId(models.some(({ modelId: id }) => id === priorModel) ? priorModel : '');
+        setNotice(`${modelProvider === 'openai' ? 'OpenAI' : modelProvider === 'anthropic' ? 'Anthropic' : 'OpenRouter'} connected. ${models.length} supported models discovered.`);
+      });
+    } finally {
+      if (connectingClaude) setIsConnectingClaude(false);
+    }
   }
 
   async function discoverProviderModels() {
-    await run(async () => {
-      const models = await api.listProviderModels(modelProvider);
-      setProviderModels(models);
-      setNotice(`${models.length} supported models discovered.`);
-    });
+    const checkingClaudeModels = modelProvider === 'claude-code';
+    if (checkingClaudeModels) setIsCheckingClaudeModels(true);
+    try {
+      await run(async () => {
+        if (checkingClaudeModels) setNotice('Checking 3 Claude models in parallel. This may take up to 30 seconds and uses your Claude plan allowance.');
+        const models = await api.listProviderModels(modelProvider);
+        setProviderModels(models);
+        if (modelProvider === 'claude-code' && !models.some(({ modelId: id }) => id === modelId)) setModelId('');
+        setNotice(modelProvider === 'claude-code'
+          ? `${models.length} Claude models are available to ${state.modelProviderAccountEmail ?? 'this account'}.`
+          : `${models.length} supported models discovered.`);
+      });
+    } finally {
+      if (checkingClaudeModels) setIsCheckingClaudeModels(false);
+    }
   }
 
   async function saveModelSettings() {
+    setIsSavingModel(true);
+    try {
+      await run(async () => {
+        setNotice('Saving the model and checking it with a short prompt…');
+        const savedModels = await api.saveAgentModelSettings({ providerId: modelProvider, modelId: modelId.trim(), maxOutputTokens: modelMaxOutputTokens });
+        updateState(await api.getState());
+        const savedModel = savedModels.find((model) => model.providerId === modelProvider && model.modelId === modelId.trim());
+        setNotice(savedModel?.testStatus === 'reachable'
+          ? `${savedModel.displayName}: Test Success.`
+          : `${savedModel?.displayName ?? 'Model'}: Test Fail. You can retest it after checking the connection.`);
+      });
+    } finally {
+      setIsSavingModel(false);
+    }
+  }
+
+  async function testSavedModel(id: string) {
+    setTestingSavedModelId(id);
+    try {
+      await run(async () => {
+        setNotice('Sending a short prompt to the saved model…');
+        const result = await api.testSavedModel(id);
+        updateState(await api.getState());
+        setNotice(result.reachable ? 'Test Success. The model returned a response.' : 'Test Fail. The model did not return a response; you can retest it.');
+      });
+    } finally {
+      setTestingSavedModelId(undefined);
+    }
+  }
+
+  async function removeSavedModel(id: string) {
     await run(async () => {
-      await api.saveAgentModelSettings({ providerId: modelProvider, modelId: modelId.trim(), maxOutputTokens: modelMaxOutputTokens });
+      await api.removeSavedModel(id);
+      if (selectedRunModelId === id) setSelectedRunModelId('');
       updateState(await api.getState());
-      setNotice('Required agent provider, model and output-token limit saved locally.');
+      setNotice('Saved model removed from the local catalog.');
     });
+  }
+
+  async function selectRunModel(id: string) {
+    if (!id) { setSelectedRunModelId(''); return; }
+    await run(async () => {
+      const next = await api.selectSavedModel(id);
+      setSelectedRunModelId(id);
+      updateState(next);
+      setNotice('Tested model selected for planning and every QA agent role.');
+    });
+  }
+
+  function decideProposal(proposalId: string, decision: 'ACCEPTED' | 'EDITED' | 'REJECTED') {
+    if (!draftPlan) return;
+    const proposal = draftPlan.contract.proposals.find(({ id }) => id === proposalId);
+    if (!proposal) return;
+    if (decision === 'REJECTED') {
+      const oldCriterion = draftPlan.contract.criteria.find((criterion) => 'agentProposed' in criterion.source && criterion.source.proposalId === proposalId);
+      const nextProposals = draftPlan.contract.proposals.map((item) => {
+        if (item.id !== proposalId) return item;
+        const { criterionId: _criterionId, ...withoutCriterion } = item;
+        return { ...withoutCriterion, decision };
+      });
+      const nextCriteria = draftPlan.contract.criteria.filter((criterion) => !('agentProposed' in criterion.source) || criterion.source.proposalId !== proposalId);
+      const nextScenarios = draftPlan.contract.scenarios.filter((scenario) => !oldCriterion?.scenarioIds.includes(scenario.id));
+      setDraftPlan({ ...draftPlan, contract: { ...draftPlan.contract, proposals: nextProposals, criteria: nextCriteria, scenarios: nextScenarios } });
+      return;
+    }
+    const criterionId = proposal.criterionId ?? `proposal-${proposal.id}`;
+    const requiredLayers = draftPlan.manifest.targetKind === 'site' ? ['browser'] as const : draftPlan.manifest.targetKind === 'repository' ? ['repo'] as const : ['repo', 'browser'] as const;
+    const scenarioIds = requiredLayers.map((layer) => `${criterionId}-${layer}`);
+    const criterion = {
+      id: criterionId,
+      source: { agentProposed: true as const, proposalId, sourceRefs: proposal.sourceRefs, decision },
+      expectedBehavior: proposal.text,
+      requiredLayers: [...requiredLayers],
+      scenarioIds,
+      ambiguityNotes: proposal.ambiguityNotes,
+    };
+    const scenarios = requiredLayers.map((layer) => ({
+      id: `${criterionId}-${layer}`, criterionIds: [criterionId], layer,
+      preconditions: [], steps: layer === 'browser' ? [{ action: 'expectText' as const, text: proposal.text.slice(0, 1000) }] : [],
+      expectedObservations: [proposal.text.slice(0, 1000)], risk: 'medium' as const, approved: false,
+    }));
+    setDraftPlan({ ...draftPlan, contract: {
+      ...draftPlan.contract,
+      proposals: draftPlan.contract.proposals.map((item) => item.id === proposalId ? { ...item, decision, criterionId } : item),
+      criteria: [...draftPlan.contract.criteria.filter((item) => item.id !== criterionId), criterion],
+      scenarios: [...draftPlan.contract.scenarios.filter((scenario) => !scenario.id.startsWith(`${criterionId}-`)), ...scenarios],
+    } });
   }
 
   async function saveAdoProfile() {
@@ -650,18 +825,6 @@ export function App({
       setProfileColumn('');
       setProfileStoryIds('');
       setNotice('Azure DevOps configuration profile saved locally.');
-    });
-  }
-
-  async function importAdoProfilesConfig() {
-    await run(async () => {
-      const next = await api.importAdoProfilesConfig();
-      updateState(next);
-      if (next.selectedProject) {
-        setWorkItemTypes(await api.listWorkItemTypes());
-        setScreen('work-items');
-      }
-      setNotice(next.adoProfiles?.length ? 'Azure DevOps profiles imported and validated from the configuration file.' : 'No configuration file was imported.');
     });
   }
 
@@ -861,7 +1024,7 @@ export function App({
 
         <main className="content-area">
           {error ? <div className="message error-message" role="alert">{error}</div> : null}
-          {notice ? <div className="message success-message" role="status">{notice}</div> : null}
+          {notice ? <div className={`message ${isCheckingClaudeModels ? 'info-message' : 'success-message'}`} role="status">{notice}</div> : null}
 
           {screen === 'connections' ? (
             <section className="page-section">
@@ -887,7 +1050,7 @@ export function App({
               <div className="page-heading"><div><p className="eyebrow">ORGANIZATION</p><h1>Choose an organization</h1></div><span className="context-pill">{state.accounts.find(({ homeAccountId }) => homeAccountId === state.selectedAccountId)?.username ?? 'Azure DevOps account'}</span></div>
               <p className="page-description">Select an organization available to your account, or add one by name. We’ll check access before saving it.</p>
               <div className="panel selection-panel">
-                <div className="panel-title-row"><div><h2>Already have an ADO config file?</h2><p>Import organization, project, team, board column and Story IDs to finish setup without entering them here.</p></div><button className="button outline" type="button" disabled={busy || !state.selectedAccountId} onClick={() => void importAdoProfilesConfig()}>Import profiles config file…</button></div>
+                <div className="panel-title-row"><div><h2>Choose a project</h2><p>Selecting a project loads its work items and team sprint list automatically.</p></div></div>
                 <div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void refreshOrganizations()}>{busy ? 'Checking…' : 'Refresh organizations'}</button></div>
                 {organizations.length || state.savedOrganizations?.length ? <div className="project-list"><div className="list-heading"><div><span className="eyebrow">AVAILABLE TO THIS ACCOUNT</span><h2>{organizations.length || state.savedOrganizations?.length} organizations</h2></div></div>{organizations.map((item) => <button type="button" className="project-card" key={item.id} onClick={() => { setOrganization(item.name); void connectOrganization(item.name); }}><span className="project-icon">{item.name.slice(0, 1).toUpperCase()}</span><span className="project-name"><strong>{item.name}</strong><small>{state.savedOrganizations?.includes(item.name) ? 'Saved organization' : 'Available organization'}</small></span><span className="project-arrow">→</span></button>)}</div> : null}
                 <label className="field-label" htmlFor="organization">Add organization by name</label>
@@ -911,7 +1074,6 @@ export function App({
                 <label className="field-label" htmlFor="work-search">Work item ID or title</label>
                 <div className="search-line"><div className="search-input-wrap"><span aria-hidden="true">⌕</span><input id="work-search" className="search-input" value={searchTerm} onChange={(event) => { setSearchTerm(event.target.value); setSearchHasMore(false); }} onKeyDown={(event) => { if (event.key === 'Enter') void search(); }} placeholder="e.g. 4821 or remember filters" /></div><button className="button primary" type="button" disabled={busy || !state.selectedProject} onClick={() => void search()}>{busy ? 'Searching…' : 'Search work items'}</button></div>
                 <div className="filters-row"><label>Type <select aria-label="Filter by work item type" value={typeFilter} onChange={(event) => { setTypeFilter(event.target.value); setSearchHasMore(false); }}><option value="">All types</option>{workItemTypes.map((type) => <option key={type}>{type}</option>)}</select></label><label>State <select aria-label="Filter by state" value={stateFilter} onChange={(event) => { setStateFilter(event.target.value); setSearchHasMore(false); }}><option value="">All states</option>{['New', 'Active', 'Resolved', 'Closed', 'To Do', 'Doing', 'Done'].map((value) => <option key={value}>{value}</option>)}</select></label></div>
-                {workItemTypes.some((type) => !BUILT_IN_WORK_ITEM_TYPES.has(type.toLocaleLowerCase('en-US'))) ? <div className="custom-type-mappings"><strong>Map custom work item types</strong><p className="field-help">Choose how this project’s custom types should participate in QA. Mapping changes refresh queued source snapshots.</p>{workItemTypes.filter((type) => !BUILT_IN_WORK_ITEM_TYPES.has(type.toLocaleLowerCase('en-US'))).map((type) => <label className="filters-row" key={type}>{type}<select aria-label={`Map ${type}`} value={state.customTypeMappings?.[type] ?? 'OTHER'} disabled={busy} onChange={(event) => void mutateQueue(() => api.saveWorkItemTypeMapping(type, event.target.value as 'REQUIREMENT' | 'TASK' | 'OTHER'))}><option value="OTHER">Context only</option><option value="REQUIREMENT">Requirement</option><option value="TASK">Task</option></select></label>)}</div> : null}
               </div>
               <div className="results-heading"><h2>Search results</h2><span>{results.length ? `${results.length} items` : ''}</span></div>
               <div className="results-list">{results.map((item) => <div className="result-group" key={`${item.organization}:${item.projectId}:${item.id}`}><WorkItemCard item={item} queued={queuedIds.has(`${item.organization.toLowerCase()}:${item.projectId}:${item.id}`)} onAdd={(id) => void mutateQueue(() => api.addQueueItem(id))} onChildren={(id) => void toggleChildren(id)} childrenExpanded={expandedParents.has(item.id)} />{expandedParents.has(item.id) ? <div className="child-items">{childrenByParent[item.id]?.length ? childrenByParent[item.id]!.map((child) => <WorkItemCard key={child.id} item={child} queued={queuedIds.has(`${child.organization.toLowerCase()}:${child.projectId}:${child.id}`)} onAdd={(id) => void mutateQueue(() => api.addQueueItem(id))} />) : <div className="child-empty">No child tasks were returned for this requirement.</div>}</div> : null}</div>)}{!results.length ? <div className="empty-card"><span className="empty-icon">⌕</span><strong>Search this project</strong><p>Results include current source revisions. Add requirements or tasks to your local QA Queue.</p></div> : null}</div>
@@ -933,6 +1095,7 @@ export function App({
               <div className="page-heading"><div><p className="eyebrow">NEW RUN</p><h1>Set up a QA run</h1></div></div>
               <p className="page-description">Choose which target this contract must cover. Repository checks use a disposable snapshot; site checks stay within the approved origin.</p>
               <div className="panel selection-panel run-setup-panel">
+                <div className="target-block"><label className="field-label" htmlFor="run-model">Saved model for planning and every QA agent role</label><select id="run-model" className="text-input" value={selectedRunModelId} onChange={(event) => void selectRunModel(event.target.value)}><option value="">Choose a saved, tested model</option>{(state.savedModels ?? []).filter(({ testStatus }) => testStatus === 'reachable').map((model) => <option key={model.id} value={model.id}>{model.displayName} · {model.providerId} / {model.modelId} · tested {model.testedAt ? new Date(model.testedAt).toLocaleString() : 'recently'}</option>)}</select>{!(state.savedModels ?? []).some(({ testStatus }) => testStatus === 'reachable') ? <p className="field-help">Save a model in Settings and use its Test model action before planning.</p> : <p className="field-help">The selected saved model is used by the Orchestrator, all QA specialists, and Reviewer.</p>}</div>
                 <label className="field-label" htmlFor="target-kind">Target layers</label>
                 <select id="target-kind" className="text-input target-select" value={targetKind} onChange={(event) => setTargetKind(event.target.value as TargetConfig['targetKind'])}>
                   <option value="site">Site only</option><option value="repository">Repository only</option><option value="both">Repository and site</option>
@@ -943,26 +1106,27 @@ export function App({
                 {targetKind !== 'repository' ? <div className="target-block"><label className="field-label" htmlFor="site-url">Development or staging URL</label><input id="site-url" className="text-input" value={siteBaseUrl} onChange={(event) => { const value = event.target.value; setSiteBaseUrl(value); let origin = ''; try { origin = new URL(value).origin; } catch { /* unfinished URL */ } setSelectedTestAccountIds((current) => current.filter((id) => testAccounts.some((account) => account.id === id && account.origin === origin))); }} placeholder="https://staging.example.test" /><p className="field-help">Only the origin in this URL will be approved for the browser worker. Production URLs are not recommended.</p><label className="field-label" htmlFor="test-account-select">Named test accounts</label><select id="test-account-select" className="text-input" multiple size={Math.min(4, Math.max(2, testAccounts.filter(({ origin }) => { try { return origin === new URL(siteBaseUrl).origin; } catch { return false; } }).length))} value={selectedTestAccountIds} onChange={(event) => setSelectedTestAccountIds(Array.from(event.target.selectedOptions, ({ value }) => value))}>{testAccounts.filter(({ origin }) => { try { return origin === new URL(siteBaseUrl).origin; } catch { return false; } }).map((account) => <option key={account.id} value={account.id}>{account.label} · {account.hasUsername ? 'username' : ''}{account.hasPassword ? ' password' : ''}</option>)}</select><p className="field-help">Select one or more accounts for the site origin. The agent sees labels and available fields only; values stay encrypted until the browser uses them. Manage accounts in Settings.</p><label className="checkbox-row"><input type="checkbox" checked={showBrowserWindow} onChange={(event) => setShowBrowserWindow(event.target.checked)} />Show Playwright browser window while testing</label><p className="field-help">Opens a separate Chromium window. When unchecked, site checks run headless.</p></div> : null}
                 {targetKind !== 'repository' ? <div className="target-block"><div className="queue-toolbar"><div><strong>Local Chromium browser</strong><span>{browserInstalled ? 'Installed and ready' : 'Required for site checks; downloads to this device (about 300 MB).'}</span></div><button className="button outline" type="button" disabled={busy || browserInstalled} onClick={() => void installBrowser()}>{busy ? 'Installing…' : browserInstalled ? 'Installed' : 'Install browser'}</button></div></div> : null}
                 {targetKind !== 'site' ? <div className="target-block"><div className="queue-toolbar"><div><strong>Docker repository worker</strong><span>{repoWorkerInstalled ? 'Worker image installed' : 'Docker Desktop required; prepares the pinned Node 22 and .NET 10 worker image.'}</span></div><button className="button outline" type="button" disabled={busy || repoWorkerInstalled} onClick={() => void installRepoWorker()}>{busy ? 'Preparing…' : repoWorkerInstalled ? 'Installed' : 'Prepare worker'}</button></div></div> : null}
-                <div className="button-row"><button className="button primary" type="button" disabled={busy || !state.queue.length || !state.modelProviderConfigured || !state.modelId || (targetKind !== 'repository' && !siteBaseUrl.trim()) || (targetKind !== 'site' && (repositorySource === 'local' ? !repositoryPath : !selectedGitRepository || !selectedGitRef))} onClick={() => void saveRunTarget()}>{busy ? 'Preparing…' : 'Prepare agentic QA plan'}</button>{!state.modelProviderConfigured || !state.modelId ? <span className="field-help">Configure a provider and supported model in Settings first.</span> : null}</div>
+                <div className="disclosure-card"><div className="disclosure-icon">i</div><div><strong>Context sent when you prepare this plan</strong><p>The selected model receives the queued work-item type, title, state, description, acceptance criteria, comments when present, parent links, IDs, and revisions. It uses these ADO snapshots to create the feature summary, feature-level criterion proposals, and per-Task verification plans. The Story is feature context; Tasks are not QAed as separate records. The selected target and run instructions are sent later only if you approve this reviewed scope. Preparing a plan makes a model request; workers do not run until that separate approval.</p><ul>{state.queue.map(({ entry, snapshot }) => <li key={entry.key}>ADO #{entry.workItemId} r{snapshot?.revision ?? 'unknown'} · {snapshot?.type ?? 'work item'} · fields: System.WorkItemType, System.Title, System.State{snapshot?.description ? ', System.Description' : ''}{snapshot?.acceptanceCriteria ? ', Microsoft.VSTS.Common.AcceptanceCriteria' : ''}{snapshot?.comments?.length ? ', comments' : ''}{snapshot?.parentId ? ` · parent #${snapshot.parentId}` : ''}</li>)}</ul><p>{state.modelProvider} / {state.modelId}{state.modelProvider === 'claude-code' ? ' · model request uses the connected Claude plan allowance' : ''}</p></div></div>
+                <div className="button-row"><button className="button primary" type="button" disabled={busy || !state.queue.length || !selectedSavedRunModel || (targetKind !== 'repository' && !siteBaseUrl.trim()) || (targetKind !== 'site' && (repositorySource === 'local' ? !repositoryPath : !selectedGitRepository || !selectedGitRef))} onClick={() => void saveRunTarget()}>{busy ? 'Preparing…' : 'Prepare agentic QA plan'}</button>{!selectedSavedRunModel ? <span className="field-help">Select a saved model with a successful reachability test first.</span> : null}</div>
               </div>
             </section>
           ) : null}
 
           {screen === 'plan' ? (
             <section className="page-section">
-              <div className="page-heading"><div><p className="eyebrow">PLAN REVIEW</p><h1>Review the QA plan</h1></div><span className="step-count">{draftPlan?.contract.criteria.length ?? 0} criteria</span></div>
-              <p className="page-description">The source revision and acceptance-criteria field are frozen in this draft. Edit expected behavior and required evidence before saving the contract.</p>
+              <div className="page-heading"><div><p className="eyebrow">PLAN REVIEW</p><h1>Review the QA plan</h1></div><span className="step-count">{draftPlan?.contract.criteria.length ?? 0} criteria{(draftPlan?.contract.proposals.filter(({ decision }) => decision === 'PROPOSED').length ?? 0) ? ` · ${draftPlan?.contract.proposals.filter(({ decision }) => decision === 'PROPOSED').length} proposals` : ''}</span></div>
+              <p className="page-description">The agent reviewed the selected Story/Requirement and Tasks together. Review its feature summary, Task verification plans, and source-linked Acceptance Criterion proposals before approving the QA contract.</p>
               <PlanSummary draftPlan={draftPlan} queue={state.queue} target={state.target} />
               <OrchestratorPlan draftPlan={draftPlan} />
+              {draftPlan?.contract.featureSummary ? <div className="panel command-preview"><div className="panel-title-row"><div><h2>Agentic feature plan</h2><p>Generated from the frozen Story/Requirement and selected Task snapshots using {draftPlan.manifest.providerId} / {draftPlan.manifest.modelId}. Review proposals; nothing is written to Azure DevOps.</p></div></div><h3>Feature summary</h3><p>{draftPlan.contract.featureSummary}</p>{draftPlan.contract.taskPlans.map((taskPlan) => { const task = draftPlan.contract.sourceContext.find(({ workItemId }) => workItemId === taskPlan.taskId); return <article className="command-preview-row" key={taskPlan.taskId}><strong>Task #{taskPlan.taskId} · verification plan</strong><p>{task?.title ?? 'Selected Task'}</p><p>{taskPlan.summary}</p><ul>{taskPlan.verificationIntent.map((intent, index) => <li key={index}>{intent}</li>)}</ul>{taskPlan.criterionProposalIds.length ? <small>Related feature criteria: {taskPlan.criterionProposalIds.join(', ')}</small> : null}{taskPlan.unresolvedQuestions.map((question, index) => <p className="field-help" role="note" key={index}>Open question: {question}</p>)}</article>})}<h3>Proposed feature acceptance criteria</h3>{draftPlan.contract.proposals.map((proposal) => <article className="command-preview-row" key={proposal.id}><strong>{proposal.decision === 'PROPOSED' ? 'Agent proposal' : `Proposal ${proposal.decision.toLocaleLowerCase()}`} · sources {proposal.sourceRefs.map(({ workItemId, revision, field }) => `#${workItemId} r${revision} ${field}`).join(' · ')}</strong><p>{proposal.text}</p>{proposal.ambiguityNotes.map((note, index) => <p className="field-help" role="note" key={index}>Ambiguity: {note}</p>)}{proposal.decision === 'PROPOSED' ? <div className="button-row"><button className="button outline" type="button" onClick={() => decideProposal(proposal.id, 'ACCEPTED')}>Accept as criterion</button><button className="text-button" type="button" onClick={() => decideProposal(proposal.id, 'REJECTED')}>Reject proposal</button></div> : proposal.decision === 'REJECTED' ? <div className="button-row"><small>Rejected · not included in this contract.</small><button className="button outline" type="button" onClick={() => decideProposal(proposal.id, 'EDITED')}>Reconsider</button></div> : <div className="button-row"><small>Accepted and available to edit below. Its source provenance is retained.</small><button className="text-button" type="button" onClick={() => decideProposal(proposal.id, 'REJECTED')}>Remove from contract</button></div>}</article>)}</div> : null}
               {draftPlan?.notes.map((note) => <div className="message review-message" key={note}>{note}</div>)}
-              {draftPlan?.contract.coverageGaps?.map((gap) => <div className="message error-message" role="note" key={gap.id}>{gap.message} This source gap keeps the run at NEEDS_REVIEW until the Requirement is updated in Azure DevOps and the plan is refreshed.</div>)}
-              {draftPlan?.contract.taskCandidates?.length ? <div className="panel command-preview"><div className="panel-title-row"><div><h2>Task descriptions · scope context</h2><p>Each description is tied to its ADO revision. Promote a Task into a candidate check only after reviewing it; a Task does not establish its parent Requirement’s Acceptance Criteria.</p></div></div>{draftPlan.contract.taskCandidates.map((candidate) => <div className="command-preview-row" key={candidate.id}><strong>ADO Task #{candidate.source.workItemId} · {candidate.disposition.toLocaleLowerCase('en-US')}</strong><p>{candidate.text}</p><small>{candidate.source.field} · revision {candidate.source.revision}</small>{candidate.disposition === 'PROPOSED' ? <div className="button-row"><button className="button outline" type="button" onClick={() => promoteTaskCandidate(candidate.id)}>Add as candidate criterion</button><button className="text-button" type="button" onClick={() => rejectTaskCandidate(candidate.id)}>Ignore this Task</button></div> : candidate.disposition === 'ACCEPTED' ? <small>Linked to candidate criterion {candidate.criterionId}. Review its checks below.</small> : null}</div>)}</div> : null}
+              {draftPlan?.contract.coverageGaps?.filter((gap) => !draftPlan.contract.proposals.some((proposal) => (proposal.decision === 'ACCEPTED' || proposal.decision === 'EDITED') && proposal.sourceRefs.some((ref) => ref.organization.toLocaleLowerCase('en-US') === gap.source.organization.toLocaleLowerCase('en-US') && ref.projectId === gap.source.projectId && ref.workItemId === gap.source.workItemId))).map((gap) => <div className="message error-message" role="note" key={gap.id}>{gap.message} This source gap remains unresolved until a source-grounded proposal is accepted or the Requirement is updated and the plan is refreshed.</div>)}
               {draftPlan?.repositoryCommands?.length ? <div className="panel command-preview"><div className="panel-title-row"><div><h2>Repository commands</h2><p>Exact argument arrays run inside the isolated worker, with networking disabled.</p></div><button className="button outline" type="button" disabled={busy} onClick={() => void refreshPlan()}>Refresh after config edits</button></div>{draftPlan.repositoryCommands.map((command) => <div className="command-preview-row" key={command.id}><strong>{command.label} · {command.timeoutSeconds}s</strong><code>{command.executable} {command.arguments.map((argument) => JSON.stringify(argument)).join(' ')}</code><small>Directory: {command.workingDirectory} · Results: {command.resultFormat ?? 'none'}{command.scenarioMappings.length ? ` · Scenarios: ${command.scenarioMappings.map(({ scenarioId, testCaseIds }) => `${scenarioId} ← ${testCaseIds.join(', ')}`).join('; ')}` : ' · diagnostic only'}</small></div>)}</div> : null}
               {draftPlan?.manifest.targetKind !== 'site' ? <div className="panel command-preview"><div className="panel-title-row"><div><h2>Local repository configuration</h2><p>Use the plan’s Repository Scenario IDs in each JUnit command’s scenarioMappings. A command without a mapping is diagnostic and cannot prove acceptance criteria.</p></div><button className="button outline" type="button" disabled={busy} onClick={() => void loadRepositoryConfigDraft()}>Load saved JSON</button></div>{repositoryConfigDraft ? <><textarea className="contract-textarea payload-preview" aria-label="Repository configuration JSON for mapping scenarios" value={repositoryConfigDraft} onChange={(event) => setRepositoryConfigDraft(event.target.value)} /><div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void saveRepositoryConfigAndRefreshPlan()}>Save and refresh plan</button></div></> : <p className="field-help">Load the saved configuration to map exact JUnit testcase IDs to the reviewed scenarios.</p>}</div> : null}
-              <div className="disclosure-card"><div className="disclosure-icon">✓</div><div><strong>One approval covers this agentic run envelope</strong><p>After approval, the configured provider receives the selected Story and Task content, Acceptance Criteria, task links, selected file-scope patterns, approved site origin, and command IDs. If the Orchestrator selects repository coverage, a bounded, secret-filtered sample of approved text source files is also sent to the backend specialist to write tests. Environment files, credential files and known secret-shaped values are excluded or redacted. No provider request occurs before approval.</p></div></div>
+              <div className="disclosure-card"><div className="disclosure-icon">✓</div><div><strong>Plan synthesis is complete; workers still require approval</strong><p>The selected {draftPlan?.manifest.providerId} / {draftPlan?.manifest.modelId} received the selected Story/Requirement and Tasks to create the summary, feature-level criterion proposals, and per-Task verification plans shown above. If you approve this reviewed scope, that same model will plan agent roles and receive the additional run-envelope context disclosed below. Repository/browser workers do not start until this separate approval.</p></div></div>
               {draftPlan?.envelopePreview ? <div className="panel command-preview"><div className="panel-title-row"><div><h2>Approved context and limits</h2><p>{draftPlan.envelopePreview.providerId} / {draftPlan.envelopePreview.modelId} · estimated cost ceiling ${draftPlan.envelopePreview.budget.maxCostUsd.toFixed(2)} · {draftPlan.envelopePreview.budget.maxProviderCalls} provider calls · {draftPlan.envelopePreview.budget.maxAgents} agents · {draftPlan.envelopePreview.budget.maxRunSeconds}s</p></div></div><p className="field-help">Sources and revisions: {Object.entries(draftPlan.envelopePreview.sourceRevisions).map(([key, revision]) => `${key} r${revision}`).join(' · ')}</p><p className="field-help">Repository scope: {draftPlan.envelopePreview.repositoryPaths.join(', ') || 'not selected'} · Commands: {draftPlan.envelopePreview.commandIds.join(', ') || 'none'} · Approved origins: {draftPlan.envelopePreview.allowedOrigins.join(', ') || 'none'}</p><p className="field-help">Browser: {draftPlan.envelopePreview.showBrowserWindow ? 'visible Playwright window' : 'headless'} · Selected test accounts: {draftPlan.envelopePreview.testAccounts.map(({ label, origin, hasUsername, hasPassword }) => `${label} (${origin}; ${[hasUsername ? 'username' : '', hasPassword ? 'password' : ''].filter(Boolean).join(', ')})`).join('; ') || 'none'}</p>{draftPlan.envelopePreview.runInstructions ? <details open><summary>Run-specific instructions ({draftPlan.envelopePreview.runInstructions.length} characters sent to the agent)</summary><p className="field-help">{draftPlan.envelopePreview.runInstructions}</p></details> : <p className="field-help">No additional run-specific instructions.</p>}</div> : null}
               <div className="criteria-list">{draftPlan?.contract.criteria.map((criterion) => <article className="criterion-card" key={criterion.id}>
-                <div className="criterion-source"><span>ADO #{criterion.source && 'workItemId' in criterion.source ? criterion.source.workItemId : 'Local'}</span><span>revision {criterion.source && 'revision' in criterion.source ? criterion.source.revision : '—'}</span><span>{criterion.source && 'field' in criterion.source ? criterion.source.field : 'User-added'}</span></div>
+                <div className="criterion-source"><span>{criterion.source && 'agentProposed' in criterion.source ? 'Agent-proposed' : `ADO #${criterion.source && 'workItemId' in criterion.source ? criterion.source.workItemId : 'Local'}`}</span><span>{criterion.source && 'agentProposed' in criterion.source ? criterion.source.sourceRefs.map(({ workItemId, revision }) => `#${workItemId} r${revision}`).join(' · ') : `revision ${criterion.source && 'revision' in criterion.source ? criterion.source.revision : '—'}`}</span><span>{criterion.source && 'agentProposed' in criterion.source ? `Proposal ${criterion.source.proposalId} · ${criterion.source.decision.toLowerCase()}` : criterion.source && 'field' in criterion.source ? criterion.source.field : 'User-added'}</span></div>
                 <label className="field-label" htmlFor={`criterion-${criterion.id}`}>Expected behavior</label>
                 <textarea id={`criterion-${criterion.id}`} className="contract-textarea" value={criterion.expectedBehavior} onChange={(event) => updateCriterion(criterion.id, event.target.value)} />
                 <div className="required-layers"><span className="field-label">Evidence plan</span><span>The Orchestrator will select repository, browser or both coverage from the Acceptance Criterion, linked Tasks, and approved target.</span></div>
@@ -971,7 +1135,7 @@ export function App({
                   if (!scenario) return null;
                   return <div className="scenario-editor" key={scenario.id}><div className="scenario-heading"><strong>{scenario.summary ?? (scenario.layer === 'browser' ? 'Browser scenario' : 'Repository evidence')}{scenario.id.startsWith('ai-') ? ' · AI suggestion' : ''}</strong><span>{scenario.layer}</span></div><p className="field-help">Expected observations: {scenario.expectedObservations.join(' · ')}</p>{scenario.layer === 'browser' ? <><p className="field-help">Actions use accessible roles and exact control names. Approval permits only the configured site origin. Sign-in actions refer to selected named test accounts; secret values are never shown to the agent. AI suggestions are untrusted; inspect every step and expected observation.</p>{scenario.steps.map((step, index) => <ScenarioStepEditor key={`${scenario.id}-${index}`} scenarioId={scenario.id} index={index} step={step} accounts={testAccounts} onChange={(next) => updateScenarioStep(scenario.id, index, next)} onRemove={() => removeScenarioStep(scenario.id, index)} />)}<button className="button outline" type="button" disabled={scenario.steps.length >= 100} onClick={() => addScenarioStep(scenario.id)}>Add browser action</button></> : <><p className="field-help">Repository tests are detected and run automatically when supported. Exact JUnit mappings can link a named test to this Acceptance Criterion; without a mapping, repository output is diagnostic and coverage remains NEEDS_REVIEW.</p><code className="scenario-id">{scenario.id}</code></>}</div>;
                 })}
-              </article>)}{draftPlan && !draftPlan.contract.criteria.length ? <div className="empty-card"><strong>No source acceptance criteria were found</strong><p>This plan cannot be approved as a passing run. Add or clarify a Requirement with acceptance criteria first.</p></div> : null}</div>
+              </article>)}{draftPlan && !draftPlan.contract.criteria.length ? <div className="empty-card"><strong>No criteria have been accepted yet</strong><p>Accept or edit a source-linked feature criterion proposal above before approving a QA run.</p></div> : null}</div>
               {draftPlan?.manifest.targetKind !== 'site' ? <details className="panel command-preview"><summary>Advanced: custom repository configuration</summary><p>Only edit this when automatic test discovery selected the wrong command or you need exact JUnit mappings. A command without exact mappings is diagnostic and cannot verify an Acceptance Criterion.</p><div className="panel-title-row"><div><h2>Local repository configuration</h2><p>Saved encrypted in this app; the repository is not modified.</p></div><button className="button outline" type="button" disabled={busy} onClick={() => void loadRepositoryConfigDraft()}>Load saved JSON</button></div>{repositoryConfigDraft ? <><textarea className="contract-textarea payload-preview" aria-label="Repository configuration JSON for advanced repository settings" value={repositoryConfigDraft} onChange={(event) => setRepositoryConfigDraft(event.target.value)} /><div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void saveRepositoryConfigAndRefreshPlan()}>Save and refresh plan</button></div></> : <p className="field-help">Custom JSON is optional. Normal npm projects are detected without it.</p>}</details> : null}
               <div className="queue-toolbar"><div><strong>Run context and evidence scope</strong><span>{draftPlan?.manifest.targetKind} · {draftPlan?.manifest.sources.length} source snapshots · {draftPlan?.manifest.siteBaseUrl ?? 'No site URL'} · {state.modelProvider} / {state.modelId}{draftPlan?.manifest.repositorySource?.kind === 'ado-git' ? ` · ${draftPlan.manifest.repositorySource.refName} @ ${draftPlan.manifest.sourceCommit?.slice(0, 12)}` : draftPlan?.manifest.repositorySource?.kind === 'local' ? ` · local tree ${draftPlan.manifest.localGitState ?? 'state unavailable'}` : ''}</span></div><button className="button primary" type="button" disabled={busy || !draftPlan?.contract.criteria.length || draftPlan?.contract.criteria.some((criterion) => !criterion.expectedBehavior.trim())} onClick={() => void approvePlan()}>{busy ? 'Saving…' : 'Approve reviewed QA scope'}</button></div>
             </section>
@@ -980,7 +1144,7 @@ export function App({
           {screen === 'settings' ? (
             <section className="page-section">
               <div className="page-heading"><div><p className="eyebrow">PREFERENCES</p><h1>Settings</h1></div></div>
-              <p className="page-description">Manage your Azure DevOps account and required agent provider. QA runs cannot start until a supported provider and model are configured.</p>
+              <p className="page-description">Manage Azure DevOps, browser accounts and saved agent models. Preparing QA requires a saved model whose latest reachability test succeeded.</p>
               <div className="panel selection-panel">
                 <div className="panel-title-row"><div><h2>Azure DevOps account</h2><p>Authentication runs through Azure CLI in your system browser. Access is read-only.</p></div><span className="security-tag">{state.selectedAccountId ? 'CONNECTED' : 'NOT CONNECTED'}</span></div>
                 {state.accounts.map((account) => <div className="account-row" key={account.homeAccountId}><span className="account-avatar">{(account.displayName ?? account.username).slice(0, 1).toUpperCase()}</span><div><strong>{account.displayName ?? account.username}{state.selectedAccountId === account.homeAccountId ? ' · Active' : ''}</strong><span>{account.username}</span></div>{state.selectedAccountId === account.homeAccountId ? <button className="button quiet" type="button" disabled={busy} onClick={() => void run(() => api.signOut(account.homeAccountId), updateState)}>Disconnect</button> : <button className="button quiet" type="button" disabled={busy} onClick={() => void run(() => api.selectAccount(account.homeAccountId), updateState)}>Use account</button>}</div>)}
@@ -990,9 +1154,9 @@ export function App({
                 <div className="permission-note"><span>🔒</span><p>Azure CLI keeps the sign-in on this machine. A short-lived ADO token is used only in the main process and never sent to QA workers.</p></div>
               </div>
               <div className="panel selection-panel">
-                <div className="panel-title-row"><div><h2>Azure DevOps configuration profiles</h2><p>Save each organization/project/team/board-column setup once, then switch profiles before runs. These settings stay encrypted with this app's local data.</p></div></div>
-                <div className="button-row"><button className="button outline" type="button" disabled={busy || !state.selectedAccountId} onClick={() => void importAdoProfilesConfig()}>Import profiles config file…</button><button className="button outline" type="button" disabled={busy || !state.adoProfiles?.length} onClick={() => void run(async () => { const saved = await api.exportAdoProfilesConfig(); setNotice(saved ? 'Configuration exported from your saved app settings.' : 'Configuration export canceled.'); })}>Export current settings…</button><span className="field-help">Import or export version 1 JSON; credentials are never included.</span></div>
-                {state.adoProfiles?.length ? <div className="saved-organizations">{state.adoProfiles.map((profile) => <div className="profile-card" key={profile.id}><div><strong>{profile.name}{state.activeAdoProfileId === profile.id ? ' · Active' : ''}</strong><span>{profile.organization} / {profile.project.name} · {profile.team} · {profile.boardColumn} · {profile.storyIds.length} Stories</span></div><div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void run(() => api.activateAdoProfile(profile.id), updateState)}>{state.activeAdoProfileId === profile.id ? 'Selected' : 'Use for runs'}</button><button className="button quiet" type="button" disabled={busy} onClick={() => editAdoProfile(profile)}>Edit</button><button className="button quiet" type="button" disabled={busy} onClick={() => void run(() => api.deleteAdoProfile(profile.id), updateState)}>Remove</button></div></div>)}</div> : <p className="field-help">No profiles saved. Create one from the configuration file values you use for QA.</p>}
+                <div className="panel-title-row"><div><h2>Azure DevOps team profiles</h2><p>Your selected project and default team are saved automatically. Add a profile here only when you need a different team or board scope.</p></div></div>
+                <div className="button-row"><button className="button outline" type="button" disabled={busy || !state.adoProfiles?.length} onClick={() => void run(async () => { const saved = await api.exportAdoProfilesConfig(); setNotice(saved ? 'Configuration exported from your saved app settings.' : 'Configuration export canceled.'); })}>Export current settings…</button><span className="field-help">Your project and team setup is saved locally as you select it.</span></div>
+                {state.adoProfiles?.length ? <div className="saved-organizations">{state.adoProfiles.map((profile) => <div className="profile-card" key={profile.id}><div><strong>{profile.name}{state.activeAdoProfileId === profile.id ? ' · Active' : ''}</strong><span>{profile.organization} / {profile.project.name} · {profile.team} · {profile.boardColumn} · {profile.storyIds.length} Stories</span></div><div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void run(() => api.activateAdoProfile(profile.id), updateState)}>{state.activeAdoProfileId === profile.id ? 'Selected' : 'Use for runs'}</button><button className="button quiet" type="button" disabled={busy} onClick={() => editAdoProfile(profile)}>Edit</button><button className="button quiet" type="button" disabled={busy} onClick={() => void run(() => api.deleteAdoProfile(profile.id), updateState)}>Remove</button></div></div>)}</div> : <p className="field-help">Select an organization and project on the Work items screen to set up its default team automatically.</p>}
                 <div className="filters-row settings-fields"><label>Profile name<input className="text-input" value={profileName} maxLength={100} onChange={(event) => setProfileName(event.target.value)} placeholder="Derse QA" /></label><label>Organization URL or name<input className="text-input" value={profileOrganization} maxLength={500} onChange={(event) => setProfileOrganization(event.target.value)} placeholder="https://dev.azure.com/Xorbix" /></label></div>
                 <div className="filters-row settings-fields"><label>Project name<input className="text-input" value={profileProjectName} maxLength={200} onChange={(event) => setProfileProjectName(event.target.value)} placeholder="Derse" /></label><label>Project ID <span className="field-help">Optional · resolves from project name</span><input className="text-input" value={profileProjectId} maxLength={200} onChange={(event) => setProfileProjectId(event.target.value)} placeholder="Project ID" /></label><label>Team<input className="text-input" value={profileTeam} maxLength={200} onChange={(event) => setProfileTeam(event.target.value)} placeholder="Derse Team" /></label></div>
               <div className="button-row"><button className="button outline" type="button" disabled={busy || !profileOrganization.trim() || !profileProjectName.trim()} onClick={() => void run(async () => { const teams = await api.listAdoTeams({ organization: profileOrganization.trim(), project: { ...(profileProjectId.trim() ? { id: profileProjectId.trim() } : {}), name: profileProjectName.trim() } }); setAdoTeams(teams); if (teams.length) setProfileTeam((current) => teams.some(({ name }) => name === current) ? current : teams.find(({ name }) => name.toLocaleLowerCase('en-US') === profileProjectName.toLocaleLowerCase('en-US'))?.name ?? teams[0]!.name); setNotice(teams.length ? `Loaded ${teams.length} teams from the selected Azure DevOps project.` : 'No teams were returned for this project.'); })}>Load project teams</button>{adoTeams.length ? <label>Team<select className="text-input" value={profileTeam} onChange={(event) => setProfileTeam(event.target.value)}><option value="">Choose a team</option>{adoTeams.map(({ id, name }) => <option key={id} value={name}>{name}</option>)}</select></label> : <label>Team<input className="text-input" value={profileTeam} maxLength={200} onChange={(event) => setProfileTeam(event.target.value)} placeholder="Load teams or enter a team name" /></label>}</div>
@@ -1013,12 +1177,23 @@ export function App({
                 {state.savedOrganizations?.length ? <div className="saved-organizations">{state.savedOrganizations.map((name) => <span className="context-pill" key={name}>{name}</span>)}</div> : <p className="field-help">No organizations saved yet.</p>}
               </div>
               <div className="panel selection-panel model-settings">
-                <div className="panel-title-row"><div><h2>Required AI agent provider</h2><p>{state.modelProviderConfigured ? modelProvider === 'claude-code' ? 'Claude Code uses your signed-in Claude plan account. Credentials stay in Claude Code and are never returned to the renderer or sent to QA workers.' : `${modelProvider === 'openai' ? 'OpenAI' : modelProvider === 'anthropic' ? 'Anthropic' : 'OpenRouter'} API key is stored locally. The key is never returned to the renderer or sent to workers.` : 'Connect a provider before planning or running QA. No deterministic plan fallback is available.'}</p></div><span className="security-tag">{state.modelProviderConfigured ? 'CONNECTED' : 'REQUIRED'}</span></div>
-                <div className="filters-row settings-fields"><label>Provider<select className="text-input" value={modelProvider} onChange={(event) => { const next = event.target.value as 'openai' | 'anthropic' | 'openrouter' | 'claude-code'; setModelProvider(next); setProviderModels([]); setModelId(''); }}><option value="openai">OpenAI API</option><option value="anthropic">Anthropic API key</option><option value="openrouter">OpenRouter API key · multi-model catalog</option><option value="claude-code">Claude account · Claude Code plan</option></select></label><button className="button outline" type="button" disabled={busy} onClick={() => void connectProvider()}>{modelProvider === 'claude-code' ? 'Connect Claude account…' : 'Import key and discover models…'}</button></div>
-                <div className="filters-row settings-fields"><label>Search models<input className="text-input" type="search" value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} placeholder="Search discovered models" /></label><label>Supported model<select className="text-input" value={modelId} onChange={(event) => setModelId(event.target.value)}><option value="">Choose a supported model</option>{providerModels.filter(({ displayName, modelId: id }) => `${displayName} ${id}`.toLocaleLowerCase().includes(modelSearch.toLocaleLowerCase())).map(({ modelId: id, displayName, capabilities }) => <option key={id} value={id}>{displayName} · {id} · ${capabilities.inputUsdPerMillionTokens ?? '?'} / ${capabilities.outputUsdPerMillionTokens ?? '?'} per 1M tokens</option>)}</select></label><label>Max output tokens<input className="text-input" type="number" min={256} max={32000} step={256} value={modelMaxOutputTokens} onChange={(event) => setModelMaxOutputTokens(Number(event.target.value))} /></label></div>
-                <div className="button-row"><button className="button outline" type="button" disabled={busy || !state.modelProviderConfigured} onClick={() => void discoverProviderModels()}>Refresh model list</button><button className="button primary" type="button" disabled={busy || !state.modelProviderConfigured || !modelId} onClick={() => void saveModelSettings()}>Save required agent model</button></div>
-                {state.modelProviderConfigured ? <button className="button quiet" type="button" disabled={busy} onClick={() => void run(async () => { await api.clearModelKey(); setProviderModels([]); setModelId(''); updateState(await api.getState()); setNotice(modelProvider === 'claude-code' ? 'Claude model selection cleared. Your Claude Code account remains signed in.' : 'Provider key and selected agent model removed from encrypted local storage.'); })}>{modelProvider === 'claude-code' ? 'Clear selected Claude model' : 'Remove provider connection'}</button> : null}
-                <small>{modelProvider === 'claude-code' ? 'Sign-in is completed by Claude Code in your browser. Agent calls use one-shot mode with built-in tools, settings, MCP servers and session persistence disabled. The searchable model list is a curated set of Claude aliases, not account-specific discovery; displayed prices are API-equivalent estimates and do not represent Claude plan billing.' : 'Choose a private one-line key file in the native picker. The main process reads it, stores it in encrypted local settings, and never sends it to the renderer. Model discovery lists models that report structured output, tool use and pricing. OpenRouter provides a broad catalog behind one key.'}</small>
+                <div className="panel-title-row"><div><h2>Required AI agent provider</h2><p>{selectedProviderConnected ? modelProvider === 'claude-code' ? 'Claude Code is connected. Its credentials stay in Claude Code and are never returned to the renderer or sent to QA workers.' : `${modelProvider === 'openai' ? 'OpenAI' : modelProvider === 'anthropic' ? 'Anthropic' : 'OpenRouter'} API key is stored locally. The key is never returned to the renderer or sent to workers.` : 'Connect a provider before planning or running QA. No deterministic plan fallback is available.'}</p></div><span className="security-tag">{selectedProviderConnected ? 'CONNECTED' : 'REQUIRED'}</span></div>
+                <div className="filters-row settings-fields"><label>Provider<select className="text-input" value={modelProvider} onChange={(event) => { const next = event.target.value as 'openai' | 'anthropic' | 'openrouter' | 'claude-code'; setModelProvider(next); setProviderModels([]); setModelId(''); }}><option value="openai">OpenAI API</option><option value="anthropic">Anthropic API key</option><option value="openrouter">OpenRouter API key · multi-model catalog</option><option value="claude-code">Claude account · Claude Code plan</option></select></label><button className="button outline" type="button" disabled={busy} onClick={() => void connectProvider()}>{isConnectingClaude ? 'Checking Claude connection…' : isCheckingClaudeModels ? 'Checking models…' : modelProvider === 'claude-code' && selectedProviderConnected ? 'Check Claude account' : modelProvider === 'claude-code' ? 'Connect Claude account…' : 'Import key and discover models…'}</button></div>
+                {modelProvider === 'claude-code' && selectedProviderConnected ? <p className="connected-account" role="status"><span className="connected-indicator" aria-hidden="true" />Connected Claude account <strong>{state.modelProviderAccountEmail ?? 'Email not provided by Claude Code'}</strong></p> : null}
+                <div className="filters-row settings-fields model-settings-fields"><label>Model<ModelCombobox models={providerModels} value={modelId} disabled={busy} onChange={setModelId} /></label><label>Max output tokens<input className="text-input" type="number" min={256} max={32000} step={256} value={modelMaxOutputTokens} onChange={(event) => setModelMaxOutputTokens(Number(event.target.value))} /></label></div>
+                <div className="button-row"><button className="button outline" type="button" disabled={busy || !selectedProviderConnected} onClick={() => void discoverProviderModels()}>{isCheckingClaudeModels ? 'Checking 3 models…' : modelProvider === 'claude-code' ? 'Check account models' : 'Refresh model list'}</button><button className="button primary" type="button" disabled={busy || !selectedProviderConnected || !modelId} onClick={() => void saveModelSettings()}>{isSavingModel ? 'Saving and testing…' : 'Save and test model'}</button></div>
+                <div className="saved-model-list"><h3>Saved models</h3>{(state.savedModels ?? []).map((model) => {
+                  const isTesting = testingSavedModelId === model.id;
+                  const statusLabel = isTesting ? 'Testing…' : model.testStatus === 'reachable' ? 'Test Success' : model.testStatus === 'unreachable' ? 'Test Fail' : model.testStatus === 'stale' ? 'Retest required' : 'Not tested';
+                  const statusClass = isTesting ? 'test-status-pending' : model.testStatus === 'reachable' ? 'test-status-success' : model.testStatus === 'unreachable' ? 'test-status-fail' : 'test-status-pending';
+                  return <div className="saved-model-row" key={model.id}>
+                    <div className="saved-model-copy"><strong>{model.displayName}</strong><span>{model.providerId} / {model.modelId}</span></div>
+                    <span className={`saved-model-status ${statusClass}`} role="status">{statusLabel}</span>
+                    <div className="saved-model-actions"><button className="button outline" type="button" disabled={busy} onClick={() => void testSavedModel(model.id)}>{isTesting ? 'Testing…' : model.testStatus === 'untested' ? 'Test now' : 'Retest'}</button><button className="button quiet" type="button" disabled={busy} onClick={() => void removeSavedModel(model.id)}>Remove</button></div>
+                  </div>;
+                })}{!(state.savedModels ?? []).length ? <p className="field-help">Models you save appear here with their latest prompt-test result.</p> : null}</div>
+                {selectedProviderConnected ? <button className="button quiet" type="button" disabled={busy} onClick={() => void run(async () => { await api.clearModelKey(); setProviderModels([]); setModelId(''); updateState(await api.getState()); setNotice(modelProvider === 'claude-code' ? 'Claude model selection cleared. Your Claude Code account remains signed in.' : 'Provider key and selected agent model removed from encrypted local storage.'); })}>{modelProvider === 'claude-code' ? 'Clear selected Claude model' : 'Remove provider connection'}</button> : null}
+                <small>{modelProvider === 'claude-code' ? 'Saving or retesting a model sends one short prompt with no project data and uses your Claude plan allowance. Checking account models sends one short prompt per candidate model. Prices shown are API-equivalent estimates only.' : 'Choose a private one-line key file in the native picker. Saving or retesting a model sends one short prompt with no project data; standard provider charges may apply. The key is stored in encrypted local settings and never returned to the renderer.'}</small>
               </div>
             </section>
           ) : null}

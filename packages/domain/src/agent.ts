@@ -18,6 +18,36 @@ export const ProviderModelSchema = z.object({
   capabilities: ModelCapabilitySchema,
 }).strict();
 
+export const SavedModelTestStatusSchema = z.enum(['untested', 'reachable', 'unreachable']);
+export const SavedModelSchema = ProviderModelSchema.extend({
+  id: z.string().uuid(),
+  maxOutputTokens: z.number().int().min(256).max(32_000),
+  credentialGeneration: z.string().uuid(),
+  testStatus: SavedModelTestStatusSchema,
+  testedAt: z.iso.datetime().optional(),
+  testedCredentialGeneration: z.string().uuid().optional(),
+  testMessage: z.string().max(500).optional(),
+}).strict().superRefine((model, ctx) => {
+  const hasTest = model.testStatus !== 'untested';
+  if (hasTest !== Boolean(model.testedAt) || hasTest !== Boolean(model.testedCredentialGeneration)) {
+    ctx.addIssue({ code: 'custom', message: 'Tested models must retain their timestamp and credential generation.', path: ['testedAt'] });
+  }
+  if (hasTest && model.testedCredentialGeneration !== model.credentialGeneration) {
+    ctx.addIssue({ code: 'custom', message: 'A model test must match the saved credential generation.', path: ['testedCredentialGeneration'] });
+  }
+  if (model.testStatus === 'untested' && model.testMessage !== undefined) {
+    ctx.addIssue({ code: 'custom', message: 'Untested models cannot have a test result message.', path: ['testMessage'] });
+  }
+});
+
+export const SavedModelViewSchema = ProviderModelSchema.extend({
+  id: z.string().uuid(),
+  maxOutputTokens: z.number().int().min(256).max(32_000),
+  testStatus: z.enum(['untested', 'reachable', 'unreachable', 'stale']),
+  testedAt: z.iso.datetime().optional(),
+  testMessage: z.string().max(500).optional(),
+}).strict();
+
 export const RunBudgetSchema = z.object({
   maxCostUsd: z.number().positive().max(1000),
   maxInputTokens: z.number().int().positive().max(2_000_000),
@@ -52,6 +82,9 @@ export const RunEnvelopeSchema = z.object({
   if (new Set(envelope.sourceIds).size !== envelope.sourceIds.length) ctx.addIssue({ code: 'custom', message: 'Source IDs must be unique.', path: ['sourceIds'] });
   if (new Set(envelope.allowedOrigins).size !== envelope.allowedOrigins.length) ctx.addIssue({ code: 'custom', message: 'Allowed origins must be unique.', path: ['allowedOrigins'] });
   if (new Set(envelope.commandIds).size !== envelope.commandIds.length) ctx.addIssue({ code: 'custom', message: 'Command IDs must be unique.', path: ['commandIds'] });
+  for (const [role, modelId] of Object.entries(envelope.roleModels ?? {})) {
+    if (modelId !== envelope.defaultModelId) ctx.addIssue({ code: 'custom', message: 'All agent roles must use the selected run model.', path: ['roleModels', role] });
+  }
 });
 
 export const AgentAssignmentSchema = z.object({
@@ -131,6 +164,8 @@ export const DelegationDiagramSchema = z.object({
 
 export type AgentRole = z.infer<typeof AgentRoleSchema>;
 export type ProviderModel = z.infer<typeof ProviderModelSchema>;
+export type SavedModel = z.infer<typeof SavedModelSchema>;
+export type SavedModelView = z.infer<typeof SavedModelViewSchema>;
 export type RunBudget = z.infer<typeof RunBudgetSchema>;
 export type RunEnvelope = z.infer<typeof RunEnvelopeSchema>;
 export type AgentAssignment = z.infer<typeof AgentAssignmentSchema>;

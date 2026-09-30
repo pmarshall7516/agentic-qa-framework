@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AgentCompletionRequestSchema, type AgentCompletionRequest, type ModelProviderAdapter, providerJson, validateApiKey } from './provider.js';
+import { AgentCompletionRequestSchema, type AgentCompletionRequest, type ModelProviderAdapter, providerJson, validateApiKey, validateModelId } from './provider.js';
 import { ProviderModelSchema } from '@agentic-qa/domain/agent';
 
 const OpenRouterModelsSchema = z.object({
@@ -41,6 +41,23 @@ export const openRouterAdapter: ModelProviderAdapter = {
         },
       })];
     }).sort((a, b) => a.displayName.localeCompare(b.displayName));
+  },
+  async probe(apiKey, modelId, fetcher = fetch) {
+    validateApiKey(apiKey);
+    const response = await fetcher('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: validateModelId(modelId),
+        messages: [{ role: 'user', content: 'Reply with OK.' }],
+        max_tokens: 16,
+      }),
+      redirect: 'error', referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(30_000),
+    });
+    const parsed = z.object({
+      choices: z.array(z.object({ message: z.object({ content: z.string().max(100_000).nullable().optional() }).passthrough() }).passthrough()).max(10),
+    }).passthrough().parse(await providerJson(response, 'OpenRouter'));
+    if (!parsed.choices[0]?.message.content?.trim()) throw new Error('OpenRouter returned no text for the reachability prompt.');
   },
   async complete<T>(apiKey: string, input: AgentCompletionRequest, fetcher: typeof fetch = fetch) {
     validateApiKey(apiKey);

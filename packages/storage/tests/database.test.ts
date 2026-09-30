@@ -105,8 +105,9 @@ describe('encrypted QA store', () => {
     const store = await openQaStore({ databasePath: path.join(directory, 'qa.db'), key: () => Buffer.alloc(32, 9) });
     await store.addToQueue(snapshot);
     const contract: QAContract = {
-      schemaVersion: 2, id: '11111111-1111-4111-8111-111111111111', revision: 1,
+      schemaVersion: 3, id: '11111111-1111-4111-8111-111111111111', revision: 1,
       sourceContext: [], taskCandidates: [], coverageGaps: [],
+      taskPlans: [], proposals: [],
       criteria: [{ id: 'criterion-1', source: { organization: 'org', projectId: 'project', workItemId: 2, revision: 4, field: 'Microsoft.VSTS.Common.AcceptanceCriteria', excerptHash: 'a'.repeat(64) }, expectedBehavior: 'Search results are shown.', requiredLayers: ['browser'], scenarioIds: ['scenario-1'], ambiguityNotes: [] }],
       scenarios: [{ id: 'scenario-1', criterionIds: ['criterion-1'], layer: 'browser', preconditions: [], steps: [{ action: 'expectVisible', role: 'heading', name: 'Results' }], expectedObservations: ['Results heading visible.'], risk: 'low', approved: true }],
       approvedAt: '2026-09-27T12:00:00.000Z',
@@ -146,8 +147,9 @@ describe('encrypted QA store', () => {
     directory = await mkdtemp(path.join(tmpdir(), 'agentic-qa-store-'));
     const store = await openQaStore({ databasePath: path.join(directory, 'qa.db'), key: () => Buffer.alloc(32, 19) });
     const contract: QAContract = {
-      schemaVersion: 2, id: '11111111-1111-4111-8111-111111111111', revision: 1,
+      schemaVersion: 3, id: '11111111-1111-4111-8111-111111111111', revision: 1,
       sourceContext: [], taskCandidates: [], coverageGaps: [],
+      taskPlans: [], proposals: [],
       criteria: [{ id: 'criterion-1', source: { organization: 'org', projectId: 'project', workItemId: 2, revision: 4, field: 'Microsoft.VSTS.Common.AcceptanceCriteria', excerptHash: 'a'.repeat(64) }, expectedBehavior: 'Search results are shown.', requiredLayers: ['browser'], scenarioIds: ['scenario-1'], ambiguityNotes: [] }],
       scenarios: [{ id: 'scenario-1', criterionIds: ['criterion-1'], layer: 'browser', preconditions: [], steps: [{ action: 'expectVisible', role: 'heading', name: 'Results' }], expectedObservations: ['Results heading visible.'], risk: 'low', approved: true }],
       approvedAt: '2026-09-27T12:00:00.000Z',

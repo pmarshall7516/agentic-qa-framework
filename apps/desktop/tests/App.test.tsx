@@ -2,6 +2,7 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { userEvent } from '@testing-library/user-event';
 import { App } from '../src/renderer/App.js';
 import type { DesktopApi, DesktopState } from '../src/shared/ipc.js';
 
@@ -54,7 +55,7 @@ describe('desktop M1 screens', () => {
     expect(connectedMarkup).not.toContain('accessToken');
   });
 
-  it('loads custom work item types when restoring a saved project on startup', async () => {
+  it('restores a saved project with the sprint picker and without work item mapping controls', async () => {
     const restoredState: DesktopState = {
       azureCliAvailable: true,
       accounts: [{ homeAccountId: 'account-1', tenantId: 'tenant-1', username: 'qa@example.com' }],
@@ -68,7 +69,55 @@ describe('desktop M1 screens', () => {
 
     render(<App api={testApi} />);
 
-    expect(await screen.findByLabelText('Map Feature Request')).toBeTruthy();
+    expect(await screen.findByRole('combobox', { name: 'Sprint' })).toBeTruthy();
+    expect(screen.queryByLabelText('Map Feature Request')).toBeNull();
     expect(listWorkItemTypes).toHaveBeenCalledOnce();
+  });
+
+  it('shows saved models with per-model reachability actions in Settings', async () => {
+    const user = userEvent.setup();
+    const model = { id: '77777777-7777-4777-8777-777777777777', providerId: 'openai' as const, modelId: 'gpt-6-luna', displayName: 'GPT-6 Luna', capabilities: { structuredOutput: true, toolUse: true }, maxOutputTokens: 1200, testStatus: 'unreachable' as const };
+    const initialState: DesktopState = { ...state, azureCliAvailable: true, accounts: [{ homeAccountId: 'account-1', tenantId: 'tenant-1', username: 'qa@example.com' }], selectedAccountId: 'account-1', selectedOrganization: 'contoso', selectedProject: { id: 'project-1', name: 'Portal' }, modelProvider: 'openai', modelProviderConfigured: true, modelId: 'gpt-6-luna', savedModels: [model] };
+    const testSavedModel = vi.fn(async () => ({ reachable: true as const, testStatus: 'reachable' as const, message: 'Model is reachable and completed a prompt.' }));
+    const getState = vi.fn(async () => ({ ...initialState, savedModels: [{ ...model, testStatus: 'reachable' as const, testedAt: '2026-09-30T12:00:00.000Z' }] }));
+    const testApi = { ...api, testSavedModel, getState, listBrowserTestAccounts: async () => [], isBrowserInstalled: async () => false, isRepoWorkerImageInstalled: async () => false } as DesktopApi;
+    render(<App api={testApi} initialState={initialState} />);
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    expect(await screen.findByText(/openai \/ gpt-6-luna/)).toBeTruthy();
+    expect(screen.getByText('Test Fail')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Retest' }));
+    expect(testSavedModel).toHaveBeenCalledWith(model.id);
+    const successBadge = await screen.findByText('Test Success');
+    expect(successBadge.className).toContain('test-status-success');
+    expect(await screen.findByText('Test Success. The model returned a response.')).toBeTruthy();
+  });
+
+  it('shows only the connected Claude account models after discovery', async () => {
+    const user = userEvent.setup();
+    const availableModel = { providerId: 'claude-code' as const, modelId: 'haiku', displayName: 'Claude Haiku (subscription)', capabilities: { structuredOutput: true, toolUse: true } };
+    const listProviderModels = vi.fn(async () => [availableModel]);
+    const initialState: DesktopState = {
+      ...state,
+      azureCliAvailable: true,
+      accounts: [{ homeAccountId: 'account-1', tenantId: 'tenant-1', username: 'qa@example.com' }],
+      selectedAccountId: 'account-1',
+      selectedOrganization: 'contoso',
+      selectedProject: { id: 'project-1', name: 'Portal' },
+      modelProvider: 'claude-code',
+      modelProviderConfigured: true,
+      modelProviderAccountEmail: 'qa@example.com',
+      savedModels: [],
+    };
+    const testApi = { ...api, listProviderModels, listOrganizations: async () => [], listBrowserTestAccounts: async () => [], isBrowserInstalled: async () => false, isRepoWorkerImageInstalled: async () => false } as unknown as DesktopApi;
+    render(<App api={testApi} initialState={initialState} />);
+
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    expect(screen.getAllByText('qa@example.com').length).toBeGreaterThan(1);
+    await user.click(screen.getByRole('button', { name: 'Check account models' }));
+    expect(listProviderModels).toHaveBeenCalledWith('claude-code');
+
+    await user.click(screen.getByRole('combobox', { name: 'Search and choose a supported model' }));
+    expect(await screen.findByRole('option', { name: /Claude Haiku \(subscription\).*haiku/ })).toBeTruthy();
+    expect(screen.queryByRole('option', { name: /Claude Sonnet/ })).toBeNull();
   });
 });

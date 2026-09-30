@@ -14,7 +14,11 @@ This glossary defines the product's core terms. Use these names consistently in 
 
 ## Planning and evidence
 
-**Acceptance Criterion**: A distinct expected behavior derived from a source requirement or explicitly added by a user. It retains its source and version.
+**Acceptance Criterion**: A distinct expected behavior in the reviewed QA Contract. It is either sourced from an Azure DevOps field with its ID/revision, or proposed by an agent from selected work-item context and explicitly accepted or edited by a user with source references retained. An agent proposal is not source truth until accepted into the local contract. _Avoid_: Treating agent-proposed text as an ADO field value.
+
+**Feature Summary**: A concise description of the combined user-visible behavior that selected Tasks are intended to build, inferred from their selected parent Requirement/Story and the selected Task descriptions. It is a planning aid, not execution evidence. _Avoid_: Testing the Story work item itself.
+
+**Saved Model**: A provider/model pair saved in local encrypted settings for later selection. A Saved Model is eligible for planning only after its latest reachability test succeeded using the current provider credential generation. _Avoid_: Assuming a listed model is reachable.
 
 **QA Contract**: The reviewed set of criteria, scenarios and evidence expectations for one selected requirement/task scope. _Avoid_: Prompt, test list.
 

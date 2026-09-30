@@ -178,7 +178,7 @@ describe('sprint work picker', () => {
     const api = { listProfileIterations: async () => [], listSprintTaskboard: async () => [] } as unknown as DesktopApi;
     render(<SprintWorkPicker api={api} activeAdoProfileId="profile-1" queuedIds={new Set()} onQueueChanged={vi.fn()} onError={vi.fn()} onNotice={onNotice} />);
     expect(await screen.findByRole('button', { name: 'Refresh sprints' })).toBeTruthy();
-    await waitFor(() => expect(onNotice).toHaveBeenCalledWith('No sprints were returned for the active profile team. Check the team name in Settings.'));
+    await waitFor(() => expect(onNotice).toHaveBeenCalledWith('No sprints are available for this project team. The sprint search stays available and has no options.'));
     expect(screen.getByRole('button', { name: 'Load active Stories' }).hasAttribute('disabled')).toBe(true);
   });
 

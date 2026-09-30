@@ -91,6 +91,10 @@ describe('desktop keyboard navigation', () => {
       modelProvider: 'openai',
       modelProviderConfigured: true,
       modelId: 'gpt-6-luna',
+      savedModels: [
+        { id: '77777777-7777-4777-8777-777777777777', providerId: 'openai', modelId: 'gpt-6-luna', displayName: 'GPT-6 Luna', capabilities: { structuredOutput: true, toolUse: true }, maxOutputTokens: 1200, testStatus: 'reachable', testedAt: '2026-09-29T12:00:00.000Z' },
+        { id: '88888888-8888-4888-8888-888888888888', providerId: 'openai', modelId: 'gpt-6-sol', displayName: 'GPT-6 Sol', capabilities: { structuredOutput: true, toolUse: true }, maxOutputTokens: 1200, testStatus: 'reachable', testedAt: '2026-09-29T12:00:00.000Z' },
+      ],
       queue: [],
     };
     const snapshot = {
@@ -108,11 +112,15 @@ describe('desktop keyboard navigation', () => {
     const taskEntry = { key: 'contoso:project-1:43', organization: 'contoso', projectId: 'project-1', workItemId: 43, queuedAt: '2026-09-27T12:01:30.000Z', stale: false };
     const source = { organization: 'contoso', projectId: 'project-1', workItemId: 42, revision: 3, field: 'Microsoft.VSTS.Common.AcceptanceCriteria', excerptHash: 'a'.repeat(64) };
     const plan = {
-      manifest: { schemaVersion: 1, runId, startedAt: '2026-09-27T12:02:00.000Z', sources: [source], targetKind: 'site', siteBaseUrl: 'https://staging.example.test', contractId: '11111111-1111-4111-8111-111111111111', contractRevision: 1, configHash: 'b'.repeat(64), toolVersions: { app: '1.0.0' }, limits: { runSeconds: 300 } },
+      manifest: { schemaVersion: 1, runId, startedAt: '2026-09-27T12:02:00.000Z', sources: [source], targetKind: 'site', siteBaseUrl: 'https://staging.example.test', providerId: 'openai', modelId: 'gpt-6-luna', contractId: '11111111-1111-4111-8111-111111111111', contractRevision: 1, configHash: 'b'.repeat(64), toolVersions: { app: '1.0.0' }, limits: { runSeconds: 300 } },
       contract: {
-        schemaVersion: 1, id: '11111111-1111-4111-8111-111111111111', revision: 1,
+        schemaVersion: 3, id: '11111111-1111-4111-8111-111111111111', revision: 1,
         criteria: [{ id: criterionId, source, expectedBehavior: 'Search results remain visible after filtering.', requiredLayers: ['browser'], scenarioIds: [scenarioId], ambiguityNotes: [] }],
         scenarios: [{ id: scenarioId, criterionIds: [criterionId], summary: 'Verify filtered search results', layer: 'browser', preconditions: [], steps: [{ action: 'expectVisible', role: 'heading', name: 'Results' }], expectedObservations: ['The Results heading is visible.'], risk: 'low', approved: true }],
+        sourceContext: [snapshot, taskSnapshot].map(({ id, ...item }) => ({ ...item, workItemId: id })), taskCandidates: [], coverageGaps: [],
+        featureSummary: 'The feature preserves the selected filters as the user browses filtered search results.',
+        taskPlans: [{ taskId: 43, taskSource: { organization: 'contoso', projectId: 'project-1', workItemId: 43, revision: 1, field: 'System.Title', excerptHash: 'c'.repeat(64) }, summary: 'Keep the selected filter state while results change.', criterionProposalIds: ['proposal-filter-results'], verificationIntent: ['Change a filter and verify the visible result list updates.'], unresolvedQuestions: [] }],
+        proposals: [{ id: 'proposal-filter-results', text: 'Changing a filter updates the visible results while retaining the selection.', sourceRefs: [source, { organization: 'contoso', projectId: 'project-1', workItemId: 43, revision: 1, field: 'System.Title', excerptHash: 'c'.repeat(64) }], ambiguityNotes: [], decision: 'PROPOSED' }],
         approvedAt: '2026-09-27T12:02:00.000Z',
       },
       notes: [],
@@ -157,6 +165,7 @@ describe('desktop keyboard navigation', () => {
         const queue = [...selectedIds].map((workItemId) => workItemId === 42 ? { entry, snapshot } : { entry: taskEntry, snapshot: taskSnapshot });
         return { ...signedInState, selectedOrganization: 'contoso', selectedProject: { id: 'project-1', name: 'Portal' }, queue, target };
       },
+      selectSavedModel: vi.fn(async () => ({ ...signedInState, queue: [...selectedIds].map((workItemId) => workItemId === 42 ? { entry, snapshot } : { entry: taskEntry, snapshot: taskSnapshot }) })),
       createDraftPlan,
       approvePlan,
       listRuns: async () => approved ? [{ manifest: plan.manifest, ...(executed ? { report: classified ? reviewedReport : report } : {}) }] : [],
@@ -212,9 +221,15 @@ describe('desktop keyboard navigation', () => {
     const startQa = screen.getByRole('button', { name: 'Start QA' });
     await tabTo(startQa);
     await user.keyboard('{Enter}');
+    const runModel = screen.getByRole('combobox', { name: 'Saved model for planning and every QA agent role' });
+    await tabTo(runModel);
+    await user.selectOptions(runModel, '77777777-7777-4777-8777-777777777777');
+    await waitFor(() => expect((runModel as HTMLSelectElement).value).toBe('77777777-7777-4777-8777-777777777777'));
+    expect(await screen.findByText('Tested model selected for planning and every QA agent role.')).toBeTruthy();
     const siteUrl = screen.getByRole('textbox', { name: 'Development or staging URL' });
     await tabTo(siteUrl);
     await user.keyboard('https://staging.example.test');
+    expect((siteUrl as HTMLInputElement).value).toBe('https://staging.example.test');
     const reviewPlan = screen.getByRole('button', { name: 'Prepare agentic QA plan' });
     await tabTo(reviewPlan);
     await user.keyboard('{Enter}');
@@ -222,10 +237,18 @@ describe('desktop keyboard navigation', () => {
     expect(screen.getByRole('heading', { name: 'Orchestrator plan' })).toBeTruthy();
     expect(screen.getByText(/Delegate to Playwright worker/)).toBeTruthy();
     expect(screen.getByText('1 Story · 1 Task')).toBeTruthy();
-    expect(screen.getByText('1 acceptance criterion · Browser checks')).toBeTruthy();
+    expect(screen.getByText('1 accepted · 1 proposed feature criteria · Browser checks')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Agentic feature plan' })).toBeTruthy();
+    expect(screen.getByText(/The feature preserves the selected filters/)).toBeTruthy();
+    expect(screen.getByText('Task #43 · verification plan')).toBeTruthy();
+    expect(screen.getByText('Agent proposal · sources #42 r3 Microsoft.VSTS.Common.AcceptanceCriteria · #43 r1 System.Title')).toBeTruthy();
     expect(screen.getByText('contoso / Portal')).toBeTruthy();
-    expect(screen.getByText(/Tasks provide context; they do not verify their Story's acceptance criteria/)).toBeTruthy();
+    expect(screen.getByText(/Tasks inform feature-level criteria and get a verification plan/)).toBeTruthy();
     expect(createDraftPlan).toHaveBeenCalledOnce();
+    const acceptProposal = screen.getByRole('button', { name: 'Accept as criterion' });
+    await tabTo(acceptProposal);
+    await user.keyboard('{Enter}');
+    expect(screen.getByText('2 acceptance criteria · Browser checks')).toBeTruthy();
     const approve = screen.getByRole('button', { name: 'Approve reviewed QA scope' });
     await tabTo(approve);
     await user.keyboard('{Enter}');

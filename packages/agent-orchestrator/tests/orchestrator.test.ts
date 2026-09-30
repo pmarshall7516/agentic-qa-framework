@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ProviderModel } from '@agentic-qa/domain/agent';
 import type { QAContract } from '@agentic-qa/domain/qa-contract';
 import type { AgentCompletionRequest, ModelProviderAdapter } from '@agentic-qa/model-adapters/provider';
-import { planQaRun, runAgenticQa } from '../src/index.js';
+import { planQaRun, runAgenticQa, synthesizeWorkItemPlan } from '../src/index.js';
 import { ORCHESTRATOR_SYSTEM_PROMPT } from '../src/prompts.js';
 
 const runId = '7e4d0603-7f9a-4a6e-8ed3-23d7a8c8d83c';
@@ -15,7 +15,7 @@ const envelope = {
 };
 const source = { organization: 'https://dev.azure.com/example', projectId: 'project', projectName: 'Project', type: 'User Story', state: 'Active', url: 'https://dev.azure.com/example/project/_workitems/edit/101', retrievedAt: now };
 const contract: QAContract = {
-  schemaVersion: 2, id: '462a8423-011d-43de-8eb1-5e09cd27f94c', revision: 1, approvedAt: now,
+  schemaVersion: 3, id: '462a8423-011d-43de-8eb1-5e09cd27f94c', revision: 1, approvedAt: now,
   criteria: [{ id: 'ac-submit', source: { organization: source.organization, projectId: source.projectId, workItemId: 101, revision: 7, field: 'Microsoft.VSTS.Common.AcceptanceCriteria', excerptHash: 'b'.repeat(64) }, expectedBehavior: 'Submitting the form stores the record.', requiredLayers: ['repo', 'browser'], scenarioIds: ['repo-check', 'browser-check'], ambiguityNotes: [] }],
   scenarios: [
     { id: 'repo-check', criterionIds: ['ac-submit'], layer: 'repo', preconditions: [], steps: [], expectedObservations: ['The API accepts a valid record.'], risk: 'low', approved: true },
@@ -24,7 +24,7 @@ const contract: QAContract = {
   sourceContext: [
     { ...source, workItemId: 101, revision: 7, kind: 'REQUIREMENT' as const, title: 'Create record', acceptanceCriteria: 'Submitting the form stores the record.' },
     { ...source, workItemId: 102, revision: 2, parentId: 101, type: 'Task', kind: 'TASK' as const, title: 'Wire form to API', description: 'Submit the form to the API.' },
-  ], taskCandidates: [], coverageGaps: [],
+  ], taskCandidates: [], coverageGaps: [], taskPlans: [], proposals: [],
 };
 const plan = {
   schemaVersion: 1 as const, runId, summary: 'Verify the API and visible form flow.', createdAt: now,
@@ -42,6 +42,7 @@ function fakeProvider(returnedPlan: unknown = plan): ModelProviderAdapter {
   return {
     providerId: 'openai',
     async listModels() { return [model]; },
+    async probe() {},
     async complete<T>(_key: string, request: AgentCompletionRequest) {
       const value = request.system.includes('Generate only unit/API test files') ? repositoryTests : request.system.includes('Write bounded Playwright scenarios') ? frontendScenarios : returnedPlan;
       return { value: request.schema.parse(value) as T, inputTokens: 500, outputTokens: 200 };
@@ -54,6 +55,33 @@ function validInput(provider = fakeProvider(), qaContract = contract) {
 }
 
 describe('agent orchestration', () => {
+  it('synthesizes a feature summary and one verification plan per selected Task', async () => {
+    const provider = fakeProvider({
+      featureSummary: 'The Story describes a filtered result experience across the selected implementation tasks.',
+      proposals: [{ id: 'filtering', text: 'Changing a filter updates the visible results.', sourceWorkItemIds: [101, 102], ambiguityNotes: [] }],
+      taskPlans: [{ taskId: 102, summary: 'Connect filter state to the results API.', criterionProposalIds: ['filtering'], verificationIntent: ['Check the API response reflects the selected filter.'], unresolvedQuestions: [] }],
+    });
+    const result = await synthesizeWorkItemPlan({
+      provider, apiKey: 'test-key', modelId: 'gpt-6-sol', items: [
+        { id: 101, kind: 'REQUIREMENT', type: 'User Story', title: 'Keep filters selected', description: 'Preserve selected filters while browsing.', acceptanceCriteria: 'Selections remain visible.' },
+        { id: 102, kind: 'TASK', type: 'Task', title: 'Connect filters to results', parentId: 101, description: 'Send filter state to the results API.' },
+      ],
+    });
+    expect(result.featureSummary).toContain('filtered result experience');
+    expect(result.taskPlans).toHaveLength(1);
+    expect(result.taskPlans[0]?.taskId).toBe(102);
+    expect(result.proposals[0]?.sourceWorkItemIds).toEqual([101, 102]);
+  });
+
+  it('rejects synthesis output that links criteria or Task plans outside selected work items', async () => {
+    const provider = fakeProvider({
+      featureSummary: 'A feature summary.',
+      proposals: [{ id: 'unknown', text: 'An unsupported behavior.', sourceWorkItemIds: [999], ambiguityNotes: [] }],
+      taskPlans: [{ taskId: 102, summary: 'Task plan.', criterionProposalIds: ['unknown'], verificationIntent: ['Verify behavior.'], unresolvedQuestions: [] }],
+    });
+    await expect(synthesizeWorkItemPlan({ provider, apiKey: 'test-key', modelId: 'gpt-6-sol', items: [{ id: 101, kind: 'REQUIREMENT', type: 'User Story', title: 'Story' }, { id: 102, kind: 'TASK', type: 'Task', title: 'Task' }] })).rejects.toThrow(/outside the selected source snapshots/i);
+  });
+
   it('lets the agent choose a justified layer set rather than requiring every draft layer', () => {
     expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain('choose the smallest evidence layer set');
     expect(ORCHESTRATOR_SYSTEM_PROMPT).toContain('draft contract layers are planning hints');

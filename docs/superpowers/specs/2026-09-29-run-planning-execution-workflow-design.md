@@ -2,6 +2,8 @@
 
 **Status:** approved for implementation, 2026-09-29. This design extends the existing M2–M4 local-first workflow. It does not close any M0 or M1–M4 release gate by itself.
 
+**Superseded planning behavior:** The plan-synthesis, missing-criteria and provider-call timing rules in this document were replaced on 2026-09-30 by [Agentic work-item planning and tested model selection](2026-09-30-agentic-work-item-planning-and-tested-models-design.md). The worker, evidence, privacy and verdict constraints remain applicable unless that newer design explicitly changes them.
+
 ## Purpose
 
 Make the end-to-end path from a read-only Azure DevOps (ADO) QA Queue to a reviewed plan, bounded worker execution, visible progress and criterion-linked evidence work reliably on Windows and macOS. The Orchestrator must explain what it plans to run, why each check exists, which worker owns it, what permissions it needs and what evidence it will retain.

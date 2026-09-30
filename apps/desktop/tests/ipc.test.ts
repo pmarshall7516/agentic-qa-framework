@@ -36,7 +36,7 @@ describe('validated desktop IPC', () => {
     const { handlers, api, ipc } = fixture();
     await expect(handlers.get('qa:get-state')!({ senderFrame: { url: 'http://127.0.0.1:5173/' } }, 'extra')).rejects.toThrow();
     expect(api.getState).not.toHaveBeenCalled();
-    expect(ipc.handle).toHaveBeenCalledTimes(61);
+    expect(ipc.handle).toHaveBeenCalledTimes(65);
     expect([...handlers.keys()]).toContain('qa:connect-claude-account');
     expect([...handlers.keys()]).toContain('qa:generate-model-suggestions');
     expect([...handlers.keys()]).toContain('qa:list-git-repositories');
@@ -44,6 +44,9 @@ describe('validated desktop IPC', () => {
     expect([...handlers.keys()]).toContain('qa:export-artifact');
     expect([...handlers.keys()]).toContain('qa:get-artifact-preview');
     expect([...handlers.keys()]).toContain('qa:get-run-progress');
+    expect([...handlers.keys()]).toContain('qa:get-saved-models');
+    expect([...handlers.keys()]).toContain('qa:test-saved-model');
+    expect([...handlers.keys()]).toContain('qa:select-saved-model');
     expect([...handlers.keys()]).toContain('qa:save-repository-config-draft');
     expect([...handlers.keys()]).toContain('qa:get-repository-config-draft');
     expect([...handlers.keys()]).toContain('qa:list-browser-test-accounts');
@@ -52,6 +55,17 @@ describe('validated desktop IPC', () => {
     expect([...handlers.keys()]).toContain('qa:list-sprint-taskboard');
     expect([...handlers.keys()]).not.toContain('qa:save-client-id');
     await expect(handlers.get('qa:list-git-refs')!({ senderFrame: { url: 'http://127.0.0.1:5173/' } }, '../invalid')).rejects.toThrow();
+  });
+
+  it('validates saved-model IDs before testing and dispatches only to the trusted main controller', async () => {
+    const { handlers, api } = fixture();
+    api.testSavedModel = vi.fn(async (id: string) => ({ reachable: true, testStatus: 'reachable', message: `model ${id} is reachable` }));
+    const sender = { senderFrame: { url: 'http://127.0.0.1:5173/' } };
+    await expect(handlers.get('qa:test-saved-model')!(sender, '../invalid')).rejects.toThrow();
+    expect(api.testSavedModel).not.toHaveBeenCalled();
+    const modelId = '77777777-7777-4777-8777-777777777777';
+    await expect(handlers.get('qa:test-saved-model')!(sender, modelId)).resolves.toMatchObject({ reachable: true });
+    expect(api.testSavedModel).toHaveBeenCalledWith(modelId);
   });
 
   it('discovers organizations only from a trusted renderer', async () => {

@@ -24,6 +24,7 @@ interface SourceRef {
 }
 interface Criterion {
   id: string; source: SourceRef | { userAdded: true; author: string };
+  proposalProvenance?: { proposalId: string; sourceRefs: SourceRef[]; decision: 'accepted' | 'edited' };
   expectedBehavior: string; requiredLayers: Array<'repo' | 'browser'>;
   scenarioIds: string[]; ambiguityNotes: string[];
 }
@@ -34,16 +35,22 @@ interface Scenario {
 }
 interface TaskCandidate { id: string; source: SourceRef; text: string;
   disposition: 'PROPOSED' | 'ACCEPTED' | 'REJECTED'; criterionId?: string; }
+interface CriterionProposal { id: string; text: string; sourceRefs: SourceRef[];
+  ambiguityNotes: string[]; decision: 'PROPOSED' | 'ACCEPTED' | 'EDITED' | 'REJECTED'; }
+interface TaskPlan { taskId: number; summary: string; criterionProposalIds: string[];
+  verificationIntent: string[]; scenarioIds: string[]; unresolvedQuestions: string[]; }
 interface CoverageGap { id: string; code: 'MISSING_REQUIREMENT_ACCEPTANCE_CRITERIA';
   source: SourceRef; message: string; }
 interface QAContract { schemaVersion: number; id: string; revision: number;
   sourceContext: WorkItemSnapshot[]; taskCandidates: TaskCandidate[];
-  coverageGaps: CoverageGap[]; criteria: Criterion[]; scenarios: Scenario[]; approvedAt: string; }
+  coverageGaps: CoverageGap[]; featureSummary?: string; taskPlans?: TaskPlan[];
+  proposals?: CriterionProposal[]; criteria: Criterion[]; scenarios: Scenario[]; approvedAt: string; }
 interface RunManifest { schemaVersion: number; runId: string; startedAt: string;
   sources: SourceRef[]; targetKind: TargetKind; sourceCommit?: string;
   sourceSnapshotHash?: string; siteBaseUrl?: string; contractId: string;
   contractRevision: number; configHash: string; toolVersions: Record<string,string>;
-  modelId?: string; limits: Record<string,number>; }
+  modelProvider?: string; modelId?: string; savedModelId?: string;
+  modelCredentialGeneration?: string; limits: Record<string,number>; }
 interface Observation { id: string; runId: string; scenarioId: string;
   status: 'PASSED' | 'FAILED' | 'SKIPPED' | 'ERROR'; worker: string;
   startedAt: string; endedAt: string; assertion: string;
@@ -68,11 +75,13 @@ Contract validation rejects a criterion with no required layer, no linked scenar
 
 ## Planning rules
 
-1. Split source acceptance criteria into atomic, testable behaviors while retaining field/section provenance. If source wording is ambiguous, preserve the wording and ask for clarification in the plan; do not invent product requirements.
-2. Child tasks and PR diff inform candidate regression scenarios. Mark their origin separately from actual acceptance criteria.
-3. For each criterion, propose positive, negative, boundary, authorization and persistence checks where relevant. Users can remove irrelevant checks; removals and rationale are recorded in the contract revision.
-4. Set required evidence **before** execution. A UI criterion needs an observable UI assertion; an API/data promise may need a repository integration test, network assertion or another direct proof. A command exit code alone may support a scenario but cannot prove a specific criterion without an assertion mapping.
-5. Show the plan and estimated actions/cost for approval. Generated executable code is validated against the contract and staged in a disposable workspace.
+1. Read each selected Requirement/Story and its selected child Tasks together. Treat the Story as feature context for the behavior built by those Tasks, not as a work item to test independently. Plan selected standalone Tasks as their own scope.
+2. Preserve ADO-sourced acceptance criteria as source context and retain field/revision provenance. The Orchestrator may propose additional feature-level criteria from selected work-item context, but these must be labeled agent-generated and link every source item/field/revision used. Never represent a proposal as ADO text or write it to ADO.
+3. The user must accept or edit a proposal before it becomes a QA Contract criterion. Rejected proposals remain distinguishable. Conflicting source criteria and Task context require an explicit ambiguity note and user resolution.
+4. Map every selected Task to concrete verification intent and the accepted feature criteria it supports. Task state or description alone is never evidence.
+5. For each accepted criterion, propose positive, negative, boundary, authorization and persistence checks where relevant. Users can remove irrelevant checks; removals and rationale are recorded in the contract revision.
+6. Set required evidence **before** execution. A UI criterion needs an observable UI assertion; an API/data promise may need a repository integration test, network assertion or another direct proof. A command exit code alone may support a scenario but cannot prove a specific criterion without an assertion mapping.
+7. Show the feature summary, source links, per-Task verification map, scenarios and estimated actions/cost for review. Generated executable code is validated against the accepted contract and staged in a disposable workspace.
 
 ## State machine
 
@@ -106,7 +115,7 @@ Criterion rules:
 - `BLOCKED`: a required check could not execute because of auth, target, environment, policy or unavailable worker.
 - `UNVERIFIED`: ambiguity, missing proof, test failure, flaky result, or an unapproved/omitted scenario leaves the criterion unresolved.
 
-Run verdict precedence: **`FAIL`** if any criterion is `FAILED`; otherwise **`BLOCKED`** if execution is cancelled, interrupted or blocked, or any criterion is `BLOCKED`; otherwise **`NEEDS_REVIEW`** if any criterion is `UNVERIFIED` or an unresolved high-risk finding exists; otherwise **`PASS`** if execution completed and every criterion is `VERIFIED`. This keeps `executionState` separate from `verdict`: if a confirmed product failure was observed before cancellation, the report is `CANCELLED` with verdict `FAIL`; without a confirmed failure, a cancelled run is `BLOCKED`. Reports show all secondary issues even when a higher-precedence status wins. No criterion, empty source requirement, or zero executed assertions cannot produce `PASS`.
+Run verdict precedence: **`FAIL`** if any criterion is `FAILED`; otherwise **`BLOCKED`** if execution is cancelled, interrupted or blocked, or any criterion is `BLOCKED`; otherwise **`NEEDS_REVIEW`** if any criterion is `UNVERIFIED`, any proposal/source conflict remains unresolved, or an unresolved high-risk finding exists; otherwise **`PASS`** if execution completed and every accepted criterion is `VERIFIED`. This keeps `executionState` separate from `verdict`: if a confirmed product failure was observed before cancellation, the report is `CANCELLED` with verdict `FAIL`; without a confirmed failure, a cancelled run is `BLOCKED`. Reports show all secondary issues even when a higher-precedence status wins. No accepted criterion, unresolved proposal/source gap, or zero executed assertions can produce `PASS`.
 
 ## Report contents
 

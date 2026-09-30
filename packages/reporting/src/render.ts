@@ -29,7 +29,9 @@ function sourceLabel(contract: QAContract, criterionId: string): string {
   const criterion = contract.criteria.find(({ id }) => id === criterionId);
   if (!criterion) return criterionId;
   const source = criterion.source;
-  return 'workItemId' in source ? `ADO ${source.organization}/${source.projectId}/#${source.workItemId} rev ${source.revision} (${source.field})` : `User added by ${source.author}`;
+  if ('workItemId' in source) return `ADO ${source.organization}/${source.projectId}/#${source.workItemId} rev ${source.revision} (${source.field})`;
+  if ('agentProposed' in source) return `Agent-proposed (${source.decision.toLowerCase()}) from ${source.sourceRefs.map(({ workItemId, revision }) => `#${workItemId} rev ${revision}`).join(', ')}`;
+  return `User added by ${source.author}`;
 }
 
 function delegationFlows(diagram: DelegationDiagram): string[] {
