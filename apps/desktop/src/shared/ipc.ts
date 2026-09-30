@@ -6,6 +6,8 @@ import type { QAContract } from '@agentic-qa/domain/qa-contract';
 import type { Finding, Observation, QAReport, RunManifest, RunProgressEvent } from '@agentic-qa/domain/run';
 import type { WorkItemKind, WorkItemTypeMappings } from '@agentic-qa/domain/work-item';
 import type { RepositoryConfig } from '@agentic-qa/repo-worker/config';
+import type { ProviderModel } from '@agentic-qa/domain/agent';
+import type { DelegationDiagram, DelegationPlan, RunBudget } from '@agentic-qa/domain/agent';
 
 export type AppScreen = 'connections' | 'project' | 'work-items' | 'queue' | 'run-setup' | 'plan' | 'history' | 'settings';
 
@@ -22,7 +24,8 @@ export interface DraftPlan {
   manifest: RunManifest;
   contract: QAContract;
   notes: string[];
-  repositoryCommands?: Array<{ id: string; label: string; executable: string; arguments: string[]; workingDirectory: string; timeoutSeconds: number; resultFormat?: 'junit' | 'none'; resultPaths: string[]; scenarioMappings: Array<{ scenarioId: string; testCaseIds: string[] }> }>;
+  repositoryCommands?: Array<{ id: string; label: string; executable: string; arguments: string[]; workingDirectory: string; timeoutSeconds: number; resultFormat?: 'junit' | 'trx' | 'none'; resultPaths: string[]; scenarioMappings: Array<{ scenarioId: string; testCaseIds: string[] }> }>;
+  envelopePreview?: { providerId: 'openai' | 'anthropic' | 'openrouter'; modelId: string; sourceIds: number[]; sourceRevisions: Record<string, number>; repositoryPaths: string[]; allowedOrigins: string[]; commandIds: string[]; excludedContext: string[]; budget: RunBudget };
 }
 
 export interface QueueItemView {
@@ -66,13 +69,14 @@ export interface DesktopState {
   queue: QueueItemView[];
   target?: TargetConfig;
   modelProviderConfigured?: boolean;
+  modelProvider?: 'openai' | 'anthropic' | 'openrouter';
   modelId?: string;
   modelMaxOutputTokens?: number;
 }
 
 export interface ModelPayloadPreview {
   previewId: string;
-  provider: 'OpenAI';
+  provider: 'OpenAI' | 'Anthropic';
   model: string;
   estimatedInputTokens: number;
   maxOutputTokens: number;
@@ -121,6 +125,9 @@ export interface DesktopApi {
   getRepositoryConfigDraft(target: TargetConfig): Promise<string>;
   saveRepositoryConfigDraft(input: { target: TargetConfig; content: string }): Promise<void>;
   createDraftPlan(previousRunId?: string): Promise<DraftPlan>;
+  importProviderKey(providerId: 'openai' | 'anthropic' | 'openrouter'): Promise<boolean>;
+  listProviderModels(providerId: 'openai' | 'anthropic' | 'openrouter'): Promise<ProviderModel[]>;
+  saveAgentModelSettings(input: { providerId: 'openai' | 'anthropic' | 'openrouter'; modelId: string; maxOutputTokens: number }): Promise<void>;
   importModelKey(): Promise<boolean>;
   clearModelKey(): Promise<void>;
   saveModelSettings(input: { model: string; maxOutputTokens: number }): Promise<void>;
@@ -128,7 +135,7 @@ export interface DesktopApi {
   generateModelSuggestions(previewId: string): Promise<DraftPlan>;
   approvePlan(plan: DraftPlan): Promise<void>;
   listRuns(): Promise<Array<{ manifest: RunManifest; report?: QAReport }>>;
-  getRun(runId: string): Promise<{ manifest: RunManifest; contract: QAContract; observations: Observation[]; findings: Finding[]; artifacts: Array<{ id: string; kind: string; sha256: string; bytes: number; redactionState: string; scenarioId?: string; stepId?: string; sequence?: number }>; report?: QAReport; reviewedReport?: QAReport } | undefined>;
+  getRun(runId: string): Promise<{ manifest: RunManifest; contract: QAContract; observations: Observation[]; findings: Finding[]; artifacts: Array<{ id: string; kind: string; sha256: string; bytes: number; redactionState: string; scenarioId?: string; stepId?: string; sequence?: number }>; report?: QAReport; reviewedReport?: QAReport; delegationPlan?: DelegationPlan; delegationDiagram?: DelegationDiagram; repositoryTests?: Array<{ commandId: string; path: string; content: string; scenarioIds: string[]; testCaseIds: string[] }>; reviewerReport?: { summary: string; criteria: Array<{ criterionId: string; assessment: 'supported' | 'contradicted' | 'inconclusive'; summary: string; observationIds: string[] }>; codeReview: Array<{ path: string; line: number; severity: 'low' | 'medium' | 'high'; comment: string; recommendation: string }> }; agentSummary?: string; agentUsage?: { inputTokens: number; outputTokens: number; providerCalls: number; costUsd: number } } | undefined>;
   getArtifactPreview(runId: string, artifactId: string): Promise<string>;
   getRunProgress(runId: string): Promise<RunProgressEvent[]>;
   exportReport(runId: string, format: 'html' | 'markdown' | 'json'): Promise<boolean>;

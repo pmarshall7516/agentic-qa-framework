@@ -37,10 +37,25 @@ describe('local report renderers', () => {
     expect(json).toContain('[REDACTED]');
   });
 
+  it('does not include generated repository test source in ordinary JSON report exports', () => {
+    const input = { ...bundle, repositoryTests: [{ commandId: 'repo-test', path: 'tests/generated.test.ts', content: 'const privateGeneratedTestSource = "do not export";', scenarioIds: ['s-1'], testCaseIds: ['c-1'] }] };
+    const json = renderReport(input, 'json');
+    expect(json).not.toContain('privateGeneratedTestSource');
+    expect(json).not.toContain('do not export');
+    expect(json).toContain('generated.test.ts');
+  });
+
   it('reports provider model and token usage without exposing credentials', () => {
     const input = { ...bundle, manifest: { ...bundle.manifest, modelId: 'gpt-5.6-terra', limits: { modelInputTokensUsed: 80, modelInputTokens: 12000, modelOutputTokensUsed: 40, modelOutputTokens: 1200 } } };
     expect(renderReport(input, 'markdown')).toContain('input tokens 80/12000');
     expect(renderReport(input, 'html')).toContain('output tokens 40/1200');
     expect(renderReport(input, 'json')).not.toContain('apiKey');
+  });
+
+  it('exports the validated delegation flow and reviewer summary in HTML and Markdown', () => {
+    const input = { ...bundle, delegationPlan: { summary: 'The orchestrator selected backend evidence.', assignments: [{ id: 'backend', label: 'Backend', layer: 'repo', status: 'completed', resultTypes: ['JUnit results'], evidenceIds: [] }] }, delegationDiagram: { nodes: [{ id: 'orchestrator', kind: 'orchestrator', label: 'Orchestrator' }, { id: 'agent:backend', kind: 'agent', label: 'Backend' }, { id: 'result:backend', kind: 'result', label: 'JUnit results' }, { id: 'agent:reviewer', kind: 'agent', label: 'Evidence Reviewer' }, { id: 'summary', kind: 'summary', label: 'Findings and proof' }], edges: [{ from: 'orchestrator', to: 'agent:backend' }, { from: 'agent:backend', to: 'result:backend' }, { from: 'result:backend', to: 'agent:reviewer' }, { from: 'agent:reviewer', to: 'summary' }] }, agentSummary: 'ac-1 · supported · observation 44444444-4444-4444-8444-444444444444' };
+    expect(renderReport(input, 'markdown')).toContain('Orchestrator → Backend → JUnit results');
+    expect(renderReport(input, 'html')).toContain('Evidence Reviewer');
+    expect(renderReport(input, 'markdown')).toContain('observation 44444444');
   });
 });

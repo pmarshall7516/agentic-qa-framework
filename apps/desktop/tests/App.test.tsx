@@ -46,7 +46,7 @@ describe('desktop M1 screens', () => {
     expect(connectedMarkup).toContain('QA Queue');
     expect(connectedMarkup).toContain('Runs');
     expect(connectedMarkup).toContain('Settings');
-    expect(connectedMarkup).toContain('aria-label="Main navigation"');
+    expect(connectedMarkup).toContain('aria-label="Workspace navigation"');
     expect(connectedMarkup).toContain('data-theme="dark"');
     expect(connectedMarkup).toContain('aria-current="page"');
     expect(connectedMarkup).toContain('contoso');

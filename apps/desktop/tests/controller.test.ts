@@ -12,8 +12,56 @@ import type { AdoClient } from '@agentic-qa/ado/client';
 
 const execFile = promisify(execFileCallback);
 
+const providerFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+  if (String(input).endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'gpt-6-luna' }] }), { status: 200 });
+  const request = JSON.parse(String(init?.body)) as { input: Array<{ content: string }> };
+  if ((request.input[0]?.content ?? '').includes('You are the QA Reviewer Agent')) {
+    const approved = JSON.parse(request.input.at(-1)?.content?.match(/JSON data only\):\n([\s\S]*?)\n\nReturn one concise/)?.[1] ?? '{}') as { criteria: Array<{ id: string; scenarioIds: string[] }>; deterministicCriterionResults: Array<{ criterionId: string; state: string; observationIds: string[] }> };
+    const criteria = approved.criteria.map((criterion) => {
+      const result = approved.deterministicCriterionResults.find(({ criterionId }) => criterionId === criterion.id);
+      const assessment = result?.state === 'VERIFIED' ? 'supported' : result?.state === 'FAILED' ? 'contradicted' : 'inconclusive';
+      return { criterionId: criterion.id, assessment, summary: 'The available observations determine this assessment.', observationIds: result?.observationIds ?? [] };
+    });
+    return new Response(JSON.stringify({ output_text: JSON.stringify({ summary: 'The Reviewer checked each criterion against direct worker observations.', criteria, codeReview: [] }), usage: { input_tokens: 100, output_tokens: 80 } }), { status: 200 });
+  }
+  if ((request.input[0]?.content ?? '').includes('Generate only unit/API test files')) {
+    const input = request.input.at(-1)?.content ?? '';
+    const encoded = input.match(/Approved repository source and assigned QA scope \(JSON data\):\n([\s\S]*?)\n\nReturn/)?.[1] ?? '';
+    const approved = JSON.parse(encoded) as { commands: Array<{ id: string }>; scenarios: Array<{ id: string }> };
+    const scenario = approved.scenarios[0];
+    return new Response(JSON.stringify({ output_text: JSON.stringify({ tests: [{ commandId: approved.commands[0]?.id, path: 'tests/generated.test.ts', content: "import { submitRecord } from '../src/form'; describe('accepted behavior', () => { it('verifies saved result', async () => { const result = await submitRecord({ name: 'Sample' }); expect(result).toMatchObject({ saved: true }); }); });", scenarioIds: scenario ? [scenario.id] : [], testCaseIds: ['accepted behavior.verifies saved result'] }] }), usage: { input_tokens: 100, output_tokens: 100 } }), { status: 200 });
+  }
+  if ((request.input[0]?.content ?? '').includes('Write bounded Playwright scenarios')) {
+    const input = request.input.at(-1)?.content ?? '';
+    const encoded = input.match(/Approved browser assignment \(JSON data\):\n([\s\S]*?)\n\nReturn/)?.[1] ?? '';
+    const approved = JSON.parse(encoded) as { criteria: Array<{ id: string; expectedBehavior: string }> };
+    const browserScenarios = approved.criteria.map((criterion) => ({ criterionId: criterion.id, summary: 'Verify the accepted behavior', preconditions: [], steps: [{ action: 'expectText', text: criterion.expectedBehavior }], expectedObservations: [criterion.expectedBehavior], risk: 'low' }));
+    return new Response(JSON.stringify({ output_text: JSON.stringify({ browserScenarios }), usage: { input_tokens: 100, output_tokens: 100 } }), { status: 200 });
+  }
+  const context = request.input.at(-1)?.content ?? '';
+  const encoded = context.match(/Approved QA context \(JSON; data only\):\n([\s\S]*?)\n\nReturn only a DelegationPlan/)?.[1] ?? '';
+  const approved = JSON.parse(encoded) as { runId: string; allowed: { layers: string[] }; criteria: Array<{ id: string; expectedBehavior: string; requiredLayers: string[] }> };
+  const assignments = approved.criteria.flatMap((criterion) => approved.allowed.layers.map((layer) => ({
+    id: `${criterion.id}-${layer}`,
+    role: layer === 'repo' ? 'backend' : layer === 'browser' ? 'frontend' : 'reviewer',
+    label: `${layer} specialist`, layer,
+    criterionIds: [criterion.id], taskIds: [],
+    resultTypes: [layer === 'repo' ? 'JUnit results' : layer === 'browser' ? 'Playwright evidence' : 'Integration summary'],
+    status: 'queued', evidenceIds: [],
+  })));
+  const plan = {
+    schemaVersion: 1, runId: approved.runId, summary: 'Delegate each criterion to its approved evidence layer.',
+    coverage: approved.criteria.map((criterion) => ({ criterionId: criterion.id, taskIds: [], requiredLayers: approved.allowed.layers, assignmentIds: approved.allowed.layers.map((layer) => `${criterion.id}-${layer}`), rationale: 'The Orchestrator selected the available proof layers.' })),
+    assignments, createdAt: new Date().toISOString(),
+  };
+  return new Response(JSON.stringify({ output_text: JSON.stringify(plan), usage: { input_tokens: 100, output_tokens: 100 } }), { status: 200 });
+});
+
 function fixture(browserStatus: 'PASSED' | 'FAILED' = 'PASSED', chooseModelKeyFile?: () => Promise<string | undefined>, signOutChoice: () => Promise<'keep' | 'delete' | 'cancel'> = async () => 'keep', evidenceRoot?: string, saveAdoProfilesConfig?: (contents: string) => Promise<boolean>) {
   const settings = new Map<string, unknown>();
+  settings.set('model.provider', 'openai');
+  settings.set('model.apiKey.openai', 'test-provider-key-with-enough-entropy');
+  settings.set('model.settings', { providerId: 'openai', modelId: 'gpt-6-luna', maxOutputTokens: 1200 });
   const queue: any[] = [];
   const snapshots = new Map<string, any>();
   const runRecords = new Map<string, any>();
@@ -80,11 +128,43 @@ function fixture(browserStatus: 'PASSED' | 'FAILED' = 'PASSED', chooseModelKeyFi
     observation: { id: randomUUID(), runId: input.runId, scenarioId: input.scenario.id, status: browserStatus, worker: 'browser', startedAt: '2026-09-27T12:00:00.000Z', endedAt: '2026-09-27T12:00:01.000Z', assertion: browserStatus === 'PASSED' ? 'Expected text is visible.' : 'Expected text was not visible.', artifactIds: [], sourceIdentity: new URL(input.target.siteBaseUrl).origin },
     artifacts: [], cancelled: false,
   }));
-  const controller = new DesktopController({ store, authFactory: async () => auth, ado, browserScenarioRunner: browserScenarioRunner as any, sitePreflight: async () => undefined, browserExecutablePath: () => process.execPath, confirmDeleteRun: async () => true, selectSignOutDataAction: signOutChoice, chooseModelKeyFile, evidenceRoot, saveAdoProfilesConfig });
+  const controller = new DesktopController({ store, authFactory: async () => auth, ado, browserScenarioRunner: browserScenarioRunner as any, sitePreflight: async () => undefined, browserExecutablePath: () => process.execPath, confirmDeleteRun: async () => true, selectSignOutDataAction: signOutChoice, chooseModelKeyFile, evidenceRoot, saveAdoProfilesConfig, providerFetch: providerFetch as typeof fetch });
   return { controller, settings, store, auth, ado, queue, snapshots, runRecords, browserScenarioRunner };
 }
 
 describe('desktop controller', () => {
+  it('requires a saved provider key and a supported agent model before creating a run plan', async () => {
+    const { controller, settings } = fixture();
+    settings.delete('model.provider');
+    settings.delete('model.apiKey.openai');
+    settings.delete('model.settings');
+    await expect(controller.createDraftPlan()).rejects.toThrow('Configure a provider API key and select a supported model');
+  });
+
+  it('stores provider credentials outside renderer state and validates selected models through discovery', async () => {
+    const providerFetch = vi.fn(async () => new Response(JSON.stringify({ data: [{ id: 'gpt-6-luna' }] }), { status: 200 }));
+    const { store, auth } = fixture();
+    const keyDirectory = await mkdtemp(join(tmpdir(), 'agentic-provider-key-'));
+    const keyPath = join(keyDirectory, 'key.txt');
+    const keyText = 'test-provider-key-with-enough-entropy';
+    await writeFile(keyPath, keyText, { mode: 0o600 });
+    try {
+      const securedController = new DesktopController({
+        store, authFactory: async () => auth, chooseModelKeyFile: async () => keyPath,
+        providerFetch: providerFetch as typeof fetch,
+      });
+      await securedController.importProviderKey('openai');
+      const models = await securedController.listProviderModels('openai');
+      expect(models.map(({ modelId }) => modelId)).toEqual(['gpt-6-luna']);
+      await securedController.saveAgentModelSettings({ providerId: 'openai', modelId: 'gpt-6-luna', maxOutputTokens: 1200 });
+      const state = await securedController.getState();
+      expect(state.modelProviderConfigured).toBe(true);
+      expect(state.modelId).toBe('gpt-6-luna');
+      expect(JSON.stringify(state)).not.toContain(keyText);
+      expect(providerFetch).toHaveBeenCalledTimes(2);
+    } finally { await rm(keyDirectory, { recursive: true, force: true }); }
+  });
+
   it('uses the injected Azure CLI auth adapter without returning credential data to the renderer', async () => {
     const { store, settings, auth } = fixture();
     settings.delete('entra.clientId');
@@ -386,12 +466,20 @@ describe('desktop controller', () => {
     const approved = { ...draft, contract: { ...draft.contract, scenarios: draft.contract.scenarios.map((scenario) => ({ ...scenario, approved: true })) } };
     await controller.approvePlan(approved);
     expect(store.createRun).toHaveBeenCalledOnce();
+    const storedContract = runRecords.get(draft.manifest.runId).contract;
+    expect(storedContract.scenarios.filter(({ layer }: { layer: string }) => layer === 'browser')).toHaveLength(2);
+    expect(storedContract.scenarios.find(({ layer }: { layer: string }) => layer === 'browser')?.steps)
+      .toEqual([{ action: 'expectText', text: 'Results show the title' }]);
     const report = await controller.startRun(draft.manifest.runId);
     expect(report.executionState).toBe('COMPLETED');
     expect(report.verdict).toBe('PASS');
     expect(report.criterionResults.every(({ state }: { state: string }) => state === 'VERIFIED')).toBe(true);
     expect(browserScenarioRunner).toHaveBeenCalledTimes(2);
     expect(runRecords.get(draft.manifest.runId).report).toEqual(report);
+    const agentRun = await controller.getRun(draft.manifest.runId);
+    expect(agentRun?.reviewerReport?.summary).toContain('Reviewer checked each criterion');
+    expect(agentRun?.agentSummary).toContain('observations');
+    expect(agentRun?.delegationDiagram?.nodes.find(({ id }) => id === 'agent:reviewer')).toMatchObject({ status: 'completed' });
     await expect(controller.approvePlan(approved)).rejects.toThrow('no longer current');
   });
 
@@ -591,45 +679,10 @@ describe('desktop controller', () => {
     expect(runRecords.get(draft.manifest.runId).progress.at(-1)).toMatchObject({ worker: 'orchestrator', state: 'FAILED', stage: 'interrupted-recovery' });
   });
 
-  it('requires a reviewed one-use provider preview and keeps the imported API key out of UI state', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'agentic-model-key-'));
-    const keyPath = join(directory, 'openai-key.txt');
-    await writeFile(keyPath, 'sk-test-provider-key', { mode: 0o600 });
-    const { controller, settings, queue, snapshots } = fixture('PASSED', async () => keyPath);
-    const requirement = { organization: 'org', projectId: 'project-1', projectName: 'Project One', id: 47, revision: 3, type: 'User Story', kind: 'REQUIREMENT', title: 'Search', state: 'Active', acceptanceCriteria: 'A search result appears', url: 'https://dev.azure.com/org/project-1/_workitems/edit/47', retrievedAt: '2026-09-27T12:00:00.000Z' };
-    queue.push({ key: 'org:project-1:47', organization: 'org', projectId: 'project-1', workItemId: 47, queuedAt: '2026-09-27T12:00:00.000Z', stale: false });
-    snapshots.set('org:project-1:47', requirement);
-    settings.set('run.target', { targetKind: 'site', siteBaseUrl: 'https://site.example.test', allowedOrigins: ['https://site.example.test'] });
-    const originalFetch = globalThis.fetch;
-    let criterionId = '';
-    const fetchMock = vi.fn(async () => {
-      const outputText = JSON.stringify({ suggestions: [{ criterionId, title: 'Check search result', expectedObservations: ['A search result appears'], steps: [{ action: 'expectText', text: 'A search result appears' }] }] });
-      const result = { output: [{ type: 'message', content: [{ type: 'output_text', text: outputText }] }], usage: { input_tokens: 100, output_tokens: 50 } };
-      return new Response(JSON.stringify(result), { status: 200 });
-    });
-    vi.stubGlobal('fetch', fetchMock);
-    try {
-      await expect(controller.previewModelRequest(randomUUID(), ['criterion-1'])).rejects.toThrow('Import an OpenAI API key');
-      await controller.importModelKey();
-      const state = await controller.getState();
-      expect(state.modelProviderConfigured).toBe(true);
-      expect(JSON.stringify(state)).not.toContain('sk-test-provider-key');
-      const draft = await controller.createDraftPlan();
-      criterionId = draft.contract.criteria[0].id;
-      const preview = await controller.previewModelRequest(draft.manifest.runId, draft.contract.criteria.map(({ id }) => id));
-      expect(JSON.stringify(preview.requestBody)).toContain('A search result appears');
-      expect(fetchMock).not.toHaveBeenCalled();
-      const suggested = await controller.generateModelSuggestions(preview.previewId);
-      expect(fetchMock).toHaveBeenCalledOnce();
-      expect(suggested.manifest.modelId).toBe(preview.model);
-      expect(suggested.manifest.limits).toMatchObject({ modelInputTokensUsed: 100, modelOutputTokensUsed: 50 });
-      expect(suggested.contract.scenarios.at(-1)).toMatchObject({ summary: 'Check search result', approved: false });
-      await expect(controller.generateModelSuggestions(preview.previewId)).rejects.toThrow('expired or was already used');
-      expect(fetchMock).toHaveBeenCalledOnce();
-    } finally {
-      vi.stubGlobal('fetch', originalFetch);
-      await rm(directory, { recursive: true, force: true });
-    }
+  it('keeps the optional suggestion route from bypassing mandatory agentic run planning', async () => {
+    const { controller } = fixture();
+    await expect(controller.previewModelRequest(randomUUID(), ['criterion-1']))
+      .rejects.toThrow('This plan is no longer current');
   });
 
   it('creates and saves an encrypted app-local repository config starter without editing the repository', async () => {
@@ -660,6 +713,32 @@ describe('desktop controller', () => {
     } finally { await rm(repositoryPath, { recursive: true, force: true }); }
   });
 
+  it('delegates repository test generation, persists reviewable source, and maps it to approved JUnit evidence', async () => {
+    const { controller, settings, queue, snapshots, store, runRecords } = fixture();
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'qa-generated-repo-test-'));
+    const source = join(repositoryPath, 'src');
+    await mkdir(source, { recursive: true });
+    await writeFile(join(repositoryPath, 'package.json'), JSON.stringify({ name: 'fixture', scripts: { test: 'vitest run' } }));
+    await writeFile(join(source, 'form.ts'), 'export function submitRecord(value) { return api.post("/records", value); }');
+    await mkdir(join(repositoryPath, 'tests'), { recursive: true });
+    await writeFile(join(repositoryPath, '.agentic-qa.yml'), `schemaVersion: 1\nproject:\n  name: fixture\nrepository:\n  include: ["**/*.ts", package.json]\n  exclude: []\nsetup: []\ntests:\n  - id: unit\n    label: Run JUnit tests\n    executable: npm\n    arguments: [test, --, --reporter=junit, --outputFile=reports/junit.xml]\n    workingDirectory: .\n    timeoutSeconds: 30\n    network: none\n    resultFormat: junit\n    resultPaths: [reports/junit.xml]\n    scenarioMappings: []\nlimits:\n  browserActions: 100\n  runSeconds: 1800\n  artifactMiB: 500\n`);
+    const requirement = { organization: 'org', projectId: 'project-1', projectName: 'Project One', id: 92, revision: 1, type: 'User Story', kind: 'REQUIREMENT', title: 'Save record', state: 'Active', acceptanceCriteria: 'Submitting the form stores a record.', url: 'https://dev.azure.com/org/project-1/_workitems/edit/92', retrievedAt: '2026-09-27T12:00:00.000Z' };
+    queue.push({ key: 'org:project-1:92', organization: 'org', projectId: 'project-1', workItemId: 92, queuedAt: '2026-09-27T12:00:00.000Z', stale: false });
+    snapshots.set('org:project-1:92', requirement);
+    settings.set('run.target', { targetKind: 'repository', repositorySource: 'local', repositoryPath, allowedOrigins: [] });
+    try {
+      const draft = await controller.createDraftPlan();
+      expect(draft.envelopePreview?.commandIds).toEqual(['unit']);
+      await controller.approvePlan({ ...draft, contract: { ...draft.contract, scenarios: draft.contract.scenarios.map((scenario) => ({ ...scenario, approved: true })) } });
+      const detail = await controller.getRun(draft.manifest.runId);
+      expect(detail?.repositoryTests).toMatchObject([{ path: 'tests/generated.test.ts', commandId: 'unit', testCaseIds: ['accepted behavior.verifies saved result'] }]);
+      expect(detail?.repositoryTests?.[0]?.content).toContain('submitRecord({ name: \'Sample\' })');
+      const stored = runRecords.get(draft.manifest.runId);
+      expect(stored.contract.scenarios.some(({ layer }: { layer: string }) => layer === 'repo')).toBe(true);
+      expect(store.createRun).toHaveBeenCalledOnce();
+    } finally { await rm(repositoryPath, { recursive: true, force: true }); }
+  });
+
   it('discovers a repository test command and creates a plan without manual repository configuration', async () => {
     const { controller, settings, queue, snapshots } = fixture();
     const repositoryPath = await mkdtemp(join(tmpdir(), 'qa-auto-config-repo-'));
@@ -681,10 +760,28 @@ describe('desktop controller', () => {
         expect.objectContaining({ label: 'Discovered npm test script', executable: 'npm', arguments: ['test'], resultFormat: 'none', scenarioMappings: [] }),
       ]));
       expect(draft.contract.scenarios.some(({ layer }) => layer === 'browser')).toBe(true);
-      expect(draft.notes.some((note) => note.includes('added it automatically'))).toBe(true);
+      expect(draft.notes.some((note) => note.includes('added its exact command automatically'))).toBe(true);
       expect(draft.notes.join(' ')).not.toContain('No repository check configuration is available');
       await controller.approvePlan({ ...draft, contract: { ...draft.contract, scenarios: draft.contract.scenarios.map((scenario) => ({ ...scenario, approved: true })) } });
       expect(settings.get(`run.target.${draft.manifest.runId}`)).toMatchObject({ targetKind: 'both', repositoryPath });
+    } finally { await rm(repositoryPath, { recursive: true, force: true }); }
+  });
+
+  it('discovers a .NET solution as a diagnostic test command without restoring dependencies', async () => {
+    const { controller, settings, queue, snapshots } = fixture();
+    const repositoryPath = await mkdtemp(join(tmpdir(), 'qa-auto-dotnet-config-'));
+    try {
+      await writeFile(join(repositoryPath, 'DerseVista.slnx'), '<Solution />');
+      await writeFile(join(repositoryPath, 'DerseVista.csproj'), '<Project Sdk="Microsoft.NET.Sdk" />');
+      const requirement = { organization: 'org', projectId: 'project-1', projectName: 'Project One', id: 119, revision: 1, type: 'User Story', kind: 'REQUIREMENT', title: 'Availability', state: 'Active', acceptanceCriteria: 'Sold inventory cannot be reserved twice.', url: 'https://dev.azure.com/org/project-1/_workitems/edit/119', retrievedAt: '2026-09-27T12:00:00.000Z' };
+      queue.push({ key: 'org:project-1:119', organization: 'org', projectId: 'project-1', workItemId: 119, queuedAt: '2026-09-27T12:00:00.000Z', stale: false });
+      snapshots.set('org:project-1:119', requirement);
+      settings.set('run.target', { targetKind: 'repository', repositorySource: 'local', repositoryPath, allowedOrigins: [] });
+      const draft = await controller.createDraftPlan();
+      expect(draft.repositoryCommands).toEqual(expect.arrayContaining([
+        expect.objectContaining({ executable: 'dotnet', arguments: ['test', 'DerseVista.slnx', '--no-restore'], resultFormat: 'none', scenarioMappings: [] }),
+      ]));
+      expect(draft.notes.join(' ')).toContain('diagnostic');
     } finally { await rm(repositoryPath, { recursive: true, force: true }); }
   });
 

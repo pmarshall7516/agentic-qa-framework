@@ -11,12 +11,13 @@ import { ObservationSchema, type Observation } from '@agentic-qa/domain/run';
 import type { RepositoryConfig } from './config.js';
 import { createRepositorySnapshot } from './snapshot.js';
 
-export const REPO_WORKER_IMAGE = 'node:22-bookworm-slim';
-const ALLOWED_COMMANDS = new Set(['node', 'npm', 'npx']);
+export const REPO_WORKER_IMAGE = 'agenticqa/repo-worker:node22-dotnet10-v1';
+const ALLOWED_COMMANDS = new Set(['node', 'npm', 'npx', 'dotnet']);
 
 export interface RepoCapturedArtifact { kind: 'log' | 'test-result'; commandId: string; scenarioIds: string[]; path: string }
 export interface RepoExecutionResult { snapshot: { sha256: string; copiedFiles: number; totalBytes: number; excludedPaths: string[] }; observations: Observation[]; artifacts: RepoCapturedArtifact[]; blocked?: string }
-export interface RepoRunnerOptions { runId: string; repositoryPath: string; config: RepositoryConfig; snapshotPath: string; artifactDirectory?: string; maxArtifactBytes?: number; timeoutMs: number; expectedSnapshotHash?: string; signal?: AbortSignal; dockerPath?: string; workerImage?: string }
+export interface GeneratedRepositoryTest { path: string; content: string }
+export interface RepoRunnerOptions { runId: string; repositoryPath: string; config: RepositoryConfig; snapshotPath: string; artifactDirectory?: string; maxArtifactBytes?: number; generatedTests?: GeneratedRepositoryTest[]; timeoutMs: number; expectedSnapshotHash?: string; signal?: AbortSignal; dockerPath?: string; workerImage?: string }
 
 function runProcess(executable: string, args: string[], timeoutMs: number, signal?: AbortSignal, input?: Readable): Promise<{ code: number; output: string; errorOutput: string; cancelled: boolean; timedOut: boolean }> {
   return new Promise((resolvePromise, reject) => {
@@ -81,7 +82,7 @@ function safeContainerPath(value: string): string {
 }
 
 function safeResultPath(value: string): string {
-  if (value.startsWith('/') || value.includes('\\') || value.split('/').includes('..') || value.includes('\0')) throw new Error(`Invalid JUnit result path: ${value}`);
+  if (value.startsWith('/') || value.includes('\\') || value.split('/').includes('..') || value.includes('\0')) throw new Error(`Invalid structured test-result path: ${value}`);
   return value;
 }
 
@@ -99,6 +100,22 @@ export async function parseJUnit(content: string): Promise<Array<{ name: string;
   return cases;
 }
 
+export async function parseTrx(content: string): Promise<Array<{ name: string; passed: boolean; message: string }>> {
+  if (Buffer.byteLength(content) > 50 * 1024 * 1024) throw new Error('TRX result exceeds the 50 MiB parser limit.');
+  if (/<!DOCTYPE|<!ENTITY/i.test(content)) throw new Error('TRX documents cannot define DTDs or custom entities.');
+  const parsed = await parseStringPromise(content, { explicitArray: false, attrkey: '$', strict: true });
+  const root = parsed.TestRun ?? parsed['mstest:TestRun'];
+  const resultNode = root?.Results;
+  const values = resultNode?.UnitTestResult ? (Array.isArray(resultNode.UnitTestResult) ? resultNode.UnitTestResult : [resultNode.UnitTestResult]) : [];
+  const cases = values.map((result: any) => {
+    const error = result.Output?.ErrorInfo;
+    const message = String(error?.Message ?? error?.StackTrace ?? (result.$?.outcome === 'NotExecuted' ? 'Skipped test' : 'Test passed')).slice(0, 1000);
+    return { name: String(result.$?.testName ?? 'unknown').slice(0, 400), passed: result.$?.outcome === 'Passed', message };
+  });
+  if (cases.length > 20_000) throw new Error('TRX result exceeds the 20,000 testcase parser limit.');
+  return cases;
+}
+
 export function mapJUnitAssertions(cases: Array<{ name: string; passed: boolean }>, mappings: RepositoryConfig['tests'][number]['scenarioMappings']): Array<{ scenarioId: string; status: Observation['status']; assertion: string }> {
   return mappings.map((mapping) => {
     const matched = cases.filter(({ name }) => mapping.testCaseIds.includes(name));
@@ -109,10 +126,43 @@ export function mapJUnitAssertions(cases: Array<{ name: string; passed: boolean 
   });
 }
 
+export async function installGeneratedTests(snapshotPath: string, tests: GeneratedRepositoryTest[]): Promise<void> {
+  if (tests.length > 20) throw new Error('The backend specialist generated more than 20 test files.');
+  let totalBytes = 0;
+  for (const test of tests) {
+    const testSegments = test.path.split('/');
+    const csharpTest = /\.cs$/i.test(test.path) && testSegments.some((segment) => /^tests?$/i.test(segment));
+    const scriptTest = /\.(?:test|spec)\.(?:js|jsx|ts|tsx|mjs|cjs|mts|cts)$/i.test(test.path);
+    if ((!csharpTest && !scriptTest) || test.path.includes('..') || test.path.includes('\\') || test.path.startsWith('/')) throw new Error('A generated repository test path is outside the test-file policy.');
+    const bytes = Buffer.byteLength(test.content);
+    totalBytes += bytes;
+    if (!bytes || bytes > 100_000 || totalBytes > 500_000) throw new Error('Generated repository tests exceed the approved file-size limits.');
+    const destination = resolve(snapshotPath, test.path);
+    const inside = relative(snapshotPath, destination);
+    if (!inside || inside === '..' || inside.startsWith(`..${sep}`) || resolve(snapshotPath, inside) !== destination) throw new Error('Generated repository test escaped its disposable snapshot.');
+    const components = inside.split(sep);
+    let parent = snapshotPath;
+    for (const component of components.slice(0, -1)) {
+      parent = join(parent, component);
+      try {
+        const info = await lstat(parent);
+        if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Generated test path traverses a non-directory or symbolic link.');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        await mkdir(parent, { mode: 0o700 });
+      }
+    }
+    try { await writeFile(destination, test.content, { flag: 'wx', mode: 0o600 }); }
+    catch { throw new Error(`Could not safely add generated test ${test.path}; the path already exists or is unavailable.`); }
+  }
+}
+
 export async function runRepositoryChecks(options: RepoRunnerOptions): Promise<RepoExecutionResult> {
   const observationFor = (scenarioId: string, status: Observation['status'], assertion: string, startedAt: string): Observation => ObservationSchema.parse({ id: randomUUID(), runId: options.runId, scenarioId, status, worker: 'repo', startedAt, endedAt: new Date().toISOString(), assertion, artifactIds: [], sourceIdentity: 'disposable repository snapshot' });
   const snapshot = await createRepositorySnapshot({ sourcePath: options.repositoryPath, destinationPath: options.snapshotPath, config: options.config });
   if (options.expectedSnapshotHash && snapshot.sha256 !== options.expectedSnapshotHash) return { snapshot, observations: [], artifacts: [], blocked: 'Repository source files changed after the plan was reviewed. Create a new plan.' };
+  try { await installGeneratedTests(options.snapshotPath, options.generatedTests ?? []); }
+  catch (error) { return { snapshot, observations: [], artifacts: [], blocked: error instanceof Error ? error.message : 'Generated tests could not be added to the disposable snapshot.' }; }
   const observations: Observation[] = [];
   const artifacts: RepoCapturedArtifact[] = [];
   let capturedArtifactBytes = 0;
@@ -160,7 +210,7 @@ export async function runRepositoryChecks(options: RepoRunnerOptions): Promise<R
       await captureArtifact('log', command.id, scenarioIds, `STDOUT (last 100 KB)\n${result.output || '(empty)'}\n\nSTDERR (last 4 KB)\n${result.errorOutput || '(empty)'}\n`);
       if (result.cancelled) { observations.push(observationFor(command.id, 'ERROR', 'Repository command was cancelled.', startedAt)); break; }
       if (result.timedOut) { observations.push(observationFor(command.id, 'ERROR', `Repository command exceeded ${command.timeoutSeconds} seconds.`, startedAt)); break; }
-      if (command.resultFormat === 'junit') {
+      if (command.resultFormat === 'junit' || command.resultFormat === 'trx') {
         const cases: Array<{ name: string; passed: boolean; message: string }> = [];
         await mkdir(resultRoot, { recursive: true, mode: 0o700 });
         for (const [index, path] of mappedResultPaths.entries()) {
@@ -176,7 +226,7 @@ export async function runRepositoryChecks(options: RepoRunnerOptions): Promise<R
             const info = await lstat(resultPath);
             if (!info.isFile() || info.isSymbolicLink()) continue;
             content = await readFile(resultPath, 'utf8');
-            cases.push(...await parseJUnit(content));
+            cases.push(...await (command.resultFormat === 'trx' ? parseTrx(content) : parseJUnit(content)));
           } catch { /* missing or invalid reports are represented as missing evidence */ }
           if (content !== undefined) {
             if (capturedArtifactBytes + Buffer.byteLength(content) > (options.maxArtifactBytes ?? 500 * 1024 * 1024)) throw new Error('JUnit output exceeds the remaining evidence size limit.');
@@ -184,8 +234,8 @@ export async function runRepositoryChecks(options: RepoRunnerOptions): Promise<R
           }
         }
         if (!cases.length) {
-          for (const mapping of command.scenarioMappings) observations.push(observationFor(mapping.scenarioId, 'ERROR', 'JUnit output was empty or missing; a zero process exit cannot verify a criterion.', startedAt));
-          if (!command.scenarioMappings.length) observations.push(observationFor(command.id, 'ERROR', 'JUnit output was empty or missing.', startedAt));
+          for (const mapping of command.scenarioMappings) observations.push(observationFor(mapping.scenarioId, 'ERROR', `${command.resultFormat.toLocaleUpperCase('en-US')} output was empty or missing; a zero process exit cannot verify a criterion.`, startedAt));
+          if (!command.scenarioMappings.length) observations.push(observationFor(command.id, 'ERROR', `${command.resultFormat.toLocaleUpperCase('en-US')} output was empty or missing.`, startedAt));
         } else if (command.scenarioMappings.length) {
           const mappedCaseIds = new Set(command.scenarioMappings.flatMap(({ testCaseIds }) => testCaseIds));
           for (const mapped of mapJUnitAssertions(cases, command.scenarioMappings)) observations.push(observationFor(mapped.scenarioId, mapped.status, mapped.assertion, startedAt));

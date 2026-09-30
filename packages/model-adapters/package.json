@@ -3,6 +3,6 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "exports": { "./openai": "./src/openai.ts" },
+  "exports": { "./openai": "./src/openai.ts", "./anthropic": "./src/anthropic.ts", "./openrouter": "./src/openrouter.ts", "./provider": "./src/provider.ts" },
   "dependencies": { "@agentic-qa/domain": "*", "zod": "^4.6.5" }
 }

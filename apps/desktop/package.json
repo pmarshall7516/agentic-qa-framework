@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@agentic-qa/ado": "*",
+    "@agentic-qa/agent-orchestrator": "*",
     "@agentic-qa/browser-worker": "*",
     "@agentic-qa/domain": "*",
     "@agentic-qa/model-adapters": "*",
@@ -54,6 +55,12 @@
       "dist/**/*",
       "dist-electron/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../../packages/repo-worker/image",
+        "to": "repo-worker"
+      }
     ],
     "npmRebuild": false,
     "asarUnpack": [

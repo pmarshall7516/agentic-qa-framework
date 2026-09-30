@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile as execFileCallback } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, relative, isAbsolute, sep, basename } from 'node:path';
 import type { AccountSummary, AdoAuthService } from '@agentic-qa/ado/auth';
@@ -19,11 +19,18 @@ import { decryptArtifact, deleteRunEvidence, encryptArtifact } from '@agentic-qa
 import { access, readFile, stat, writeFile } from 'node:fs/promises';
 import { mkdir } from 'node:fs/promises';
 import { readRepositoryConfig, RepositoryConfigSchema, type RepositoryConfig } from '@agentic-qa/repo-worker/config';
-import { createRepositorySnapshot } from '@agentic-qa/repo-worker/snapshot';
+import { createRepositorySnapshot, readRepositoryContext } from '@agentic-qa/repo-worker/snapshot';
 import { runRepositoryChecks } from '@agentic-qa/repo-worker/runner';
 import { isExcludedRepositoryPath } from '@agentic-qa/repo-worker/snapshot';
 import micromatch from 'micromatch';
 import { buildModelPayload, requestScenarioSuggestions } from '@agentic-qa/model-adapters/openai';
+import { openAiAdapter } from '@agentic-qa/model-adapters/openai';
+import { anthropicAdapter } from '@agentic-qa/model-adapters/anthropic';
+import { openRouterAdapter } from '@agentic-qa/model-adapters/openrouter';
+import { validateApiKey } from '@agentic-qa/model-adapters/provider';
+import type { ProviderModel } from '@agentic-qa/domain/agent';
+import { buildDelegationDiagram, DelegationDiagramSchema, DelegationPlanSchema, ProviderModelSchema, RunBudgetSchema, RunEnvelopeSchema } from '@agentic-qa/domain/agent';
+import { EvidenceLinkedReviewSchema, planQaRun, RepositoryTestDraftSchema, reviewQaRun } from '@agentic-qa/agent-orchestrator';
 import type { AdoRunProfile, AdoRunProfileInput, DesktopState, DraftPlan, QueueItemView, SearchItemsInput, TargetConfig } from '../shared/ipc.js';
 
 const SETTING = {
@@ -35,7 +42,10 @@ const SETTING = {
   activeProfile: 'ado.activeProfile',
 } as const;
 
-const ModelSettingsSchema = z.object({ model: z.string().regex(/^[a-zA-Z0-9._:-]{1,80}$/), maxOutputTokens: z.number().int().min(256).max(4096) }).strict();
+type SupportedProviderId = 'openai' | 'anthropic' | 'openrouter';
+const ProviderIdSchema = z.enum(['openai', 'anthropic', 'openrouter']);
+const providerAdapter = (providerId: SupportedProviderId) => providerId === 'openai' ? openAiAdapter : providerId === 'anthropic' ? anthropicAdapter : openRouterAdapter;
+const ModelSettingsSchema = z.object({ providerId: ProviderIdSchema.default('openai'), modelId: z.string().regex(/^[a-zA-Z0-9._:-]{1,200}$/), maxOutputTokens: z.number().int().min(256).max(32_000) }).strict();
 const WorkItemTypeMappingsSchema = z.record(z.string().min(1).max(120), z.enum(['REQUIREMENT', 'TASK', 'OTHER']));
 const execFile = promisify(execFileCallback);
 const ProjectSchema = z.object({ id: z.string().min(1).max(200), name: z.string().min(1).max(200), state: z.string().max(80).optional() }).strict();
@@ -107,6 +117,7 @@ export class DesktopController {
   private readonly chooseModelKeyFile?: () => Promise<string | undefined>;
   private readonly readAdoProfilesConfig?: () => Promise<string | undefined>;
   private readonly saveAdoProfilesConfig?: (contents: string) => Promise<boolean>;
+  private readonly providerFetch: typeof fetch;
   private readonly pendingModelPreviews = new Map<string, { runId: string; draftHash: string; preview: ReturnType<typeof buildModelPayload>; includedCriterionIds: string[]; expiresAt: number }>();
 
   constructor(options: {
@@ -131,6 +142,7 @@ export class DesktopController {
     chooseModelKeyFile?: () => Promise<string | undefined>;
     readAdoProfilesConfig?: () => Promise<string | undefined>;
     saveAdoProfilesConfig?: (contents: string) => Promise<boolean>;
+    providerFetch?: typeof fetch;
   }) {
     this.store = options.store;
     this.ado = options.ado ?? new AdoClient();
@@ -158,18 +170,21 @@ export class DesktopController {
     this.chooseModelKeyFile = options.chooseModelKeyFile;
     this.readAdoProfilesConfig = options.readAdoProfilesConfig;
     this.saveAdoProfilesConfig = options.saveAdoProfilesConfig;
+    this.providerFetch = options.providerFetch ?? fetch;
   }
 
   async getState(): Promise<DesktopState> {
     const selectedAccountId = await this.setting<string>(SETTING.accountId);
     if (selectedAccountId) await this.migrateLegacySelections(selectedAccountId);
-    const [organization, project, entries, target, modelKey, modelSettings] = await Promise.all([
+    const configuredProvider = await this.setting<SupportedProviderId>('model.provider') ?? 'openai';
+    const [organization, project, entries, target, providerId, modelKey, modelSettings] = await Promise.all([
       this.setting<string>(SETTING.organization),
       this.setting<AdoProject>(SETTING.project),
       this.store.getQueue(),
       this.setting<TargetConfig>('run.target'),
-      this.setting<string>('model.apiKey'),
-      this.setting<{ model: string; maxOutputTokens: number }>('model.settings'),
+      this.setting<SupportedProviderId>('model.provider'),
+      this.setting<string>(`model.apiKey.${configuredProvider}`),
+      this.setting<{ providerId?: SupportedProviderId; modelId?: string; model?: string; maxOutputTokens: number }>('model.settings'),
     ]);
     const auth = await this.getAuth().catch(() => undefined);
     const accounts = auth ? await auth.getAccounts().catch(() => []) : [];
@@ -192,24 +207,52 @@ export class DesktopController {
       queue,
       ...(target ? { target } : {}),
       modelProviderConfigured: Boolean(modelKey),
-      modelId: modelSettings?.model ?? 'gpt-5.6-terra',
+      modelProvider: providerId ?? modelSettings?.providerId ?? 'openai',
+      modelId: modelSettings?.modelId ?? modelSettings?.model ?? '',
       modelMaxOutputTokens: modelSettings?.maxOutputTokens ?? 1200,
     };
   }
 
   async importModelKey(): Promise<boolean> {
+    return this.importProviderKey('openai');
+  }
+
+  async importProviderKey(providerIdInput: SupportedProviderId): Promise<boolean> {
+    const providerId = ProviderIdSchema.parse(providerIdInput);
     const path = await this.chooseModelKeyFile?.();
     if (!path) return false;
     if ((await stat(path)).size > 2048) throw new Error('The selected API key file is too large. Choose a text file containing only one key.');
     const apiKey = (await readFile(path, 'utf8')).trim();
-    if (apiKey.length < 20 || apiKey.length > 500 || /[\r\n]/.test(apiKey)) throw new Error('The selected file must contain one OpenAI API key on a single line.');
-    await this.store.setSetting('model.apiKey', apiKey);
+    if (apiKey.length < 20 || apiKey.length > 500 || /[\r\n]/.test(apiKey)) throw new Error('The selected file must contain one provider API key on a single line.');
+    validateApiKey(apiKey);
+    await this.store.setSetting(`model.apiKey.${providerId}`, apiKey);
+    await this.store.setSetting('model.provider', providerId);
     this.pendingModelPreviews.clear();
     return true;
   }
 
+  async listProviderModels(providerIdInput: SupportedProviderId): Promise<ProviderModel[]> {
+    const providerId = ProviderIdSchema.parse(providerIdInput);
+    const apiKey = await this.setting<string>(`model.apiKey.${providerId}`);
+    if (!apiKey) throw new Error(`Connect an ${providerId === 'openai' ? 'OpenAI' : 'Anthropic'} API key before discovering models.`);
+    return providerAdapter(providerId).listModels(apiKey, this.providerFetch);
+  }
+
+  async saveAgentModelSettings(input: { providerId: SupportedProviderId; modelId: string; maxOutputTokens: number }): Promise<void> {
+    const settings = ModelSettingsSchema.parse(input);
+    const key = await this.setting<string>(`model.apiKey.${settings.providerId}`);
+    if (!key) throw new Error('Connect the selected provider before saving its model.');
+    const models = await providerAdapter(settings.providerId).listModels(key, this.providerFetch);
+    if (!models.some((model) => model.modelId === settings.modelId && model.capabilities.structuredOutput && model.capabilities.toolUse)) throw new Error('Choose a discovered model that supports structured output and tool use.');
+    await this.store.setSetting('model.provider', settings.providerId);
+    await this.store.setSetting('model.settings', settings);
+    this.pendingModelPreviews.clear();
+  }
+
   async clearModelKey(): Promise<void> {
-    await this.store.setSetting('model.apiKey', null);
+    const providerId = await this.setting<SupportedProviderId>('model.provider') ?? 'openai';
+    await this.store.setSetting(`model.apiKey.${providerId}`, null);
+    await this.store.setSetting('model.settings', null);
     this.pendingModelPreviews.clear();
   }
 
@@ -221,14 +264,16 @@ export class DesktopController {
 
   async previewModelRequest(runIdInput: string, includedCriterionIdsInput: string[]) {
     const runId = z.string().uuid().parse(runIdInput);
-    if (!(await this.setting<string>('model.apiKey'))) throw new Error('Import an OpenAI API key before requesting AI scenario suggestions.');
+    if (!(await this.setting<string>('model.apiKey.openai') ?? await this.setting<string>('model.apiKey'))) throw new Error('Import an OpenAI API key before requesting AI scenario suggestions.');
     const draft = this.pendingPlans.get(runId);
     if (!draft) throw new Error('This plan is no longer current. Create a fresh draft before previewing a provider request.');
     const eligibleIds = new Set(draft.contract.criteria.filter(({ requiredLayers }) => requiredLayers.includes('browser')).map(({ id }) => id));
     const includedCriterionIds = z.array(z.string().min(1).max(120)).min(1).max(50).parse(includedCriterionIdsInput);
     if (new Set(includedCriterionIds).size !== includedCriterionIds.length || includedCriterionIds.some((id) => !eligibleIds.has(id))) throw new Error('The provider preview may include only selected browser criteria from this plan.');
-    const settings = ModelSettingsSchema.parse(await this.setting('model.settings') ?? { model: 'gpt-5.6-terra', maxOutputTokens: 1200 });
-    const preview = buildModelPayload(draft, settings.model, settings.maxOutputTokens, includedCriterionIds);
+    const saved = await this.setting<{ modelId?: string; model?: string; maxOutputTokens: number }>('model.settings');
+    const model = saved?.modelId ?? saved?.model ?? '';
+    if (!model) throw new Error('Select a supported provider model before requesting suggestions.');
+    const preview = buildModelPayload(draft, model, saved?.maxOutputTokens ?? 1200, includedCriterionIds);
     const previewId = randomUUID();
     for (const [id, pending] of this.pendingModelPreviews) if (pending.expiresAt <= Date.now() || pending.runId === runId) this.pendingModelPreviews.delete(id);
     while (this.pendingModelPreviews.size >= 20) this.pendingModelPreviews.delete(this.pendingModelPreviews.keys().next().value!);
@@ -243,7 +288,7 @@ export class DesktopController {
     if (!pending || pending.expiresAt <= Date.now()) throw new Error('This provider preview has expired or was already used. Review a fresh payload before sending.');
     const draft = this.pendingPlans.get(pending.runId);
     if (!draft || sha256(JSON.stringify(draft)) !== pending.draftHash) throw new Error('The plan changed after the provider preview. Review a fresh payload before sending.');
-    const apiKey = await this.setting<string>('model.apiKey');
+    const apiKey = await this.setting<string>('model.apiKey.openai') ?? await this.setting<string>('model.apiKey');
     if (!apiKey) throw new Error('The OpenAI API key was cleared. Import a key and review a fresh payload.');
     const { suggestions, usage } = await requestScenarioSuggestions(apiKey, pending.preview);
     const browserCriteria = new Set(pending.includedCriterionIds);
@@ -836,6 +881,7 @@ export class DesktopController {
   }
 
   async createDraftPlan(previousRunId?: string): Promise<DraftPlan> {
+    const configuredAgent = await this.requireConfiguredAgent();
     this.pendingPlans.clear();
     let target = TargetSchema.parse(await this.setting<TargetConfig>('run.target'));
     if (previousRunId) {
@@ -931,7 +977,7 @@ export class DesktopController {
       const unmapped = scenarios.filter(({ layer }) => layer === 'repo').filter(({ id }) => !mapped.has(id)).map(({ id }) => id);
       if (unmapped.length) notes.push(`Map each Repository Scenario to exact JUnit testcase identities using scenarioMappings in .agentic-qa.yml, then refresh this plan: ${unmapped.join(', ')}`);
     }
-    if (repositoryConfigAutoDetected) notes.push('The app found the repository’s existing npm test script and added it automatically. It will run in Docker with networking disabled; dependencies are not installed automatically. Until exact JUnit testcase mappings exist, this command is diagnostic and does not prove an Acceptance Criterion.');
+    if (repositoryConfigAutoDetected) notes.push('The app found a supported repository test entry point and added its exact command automatically. It will run in Docker with networking disabled; dependencies are not installed or restored automatically. Until exact JUnit/TRX testcase mappings exist, this command is diagnostic and does not prove an Acceptance Criterion.');
     const contract: QAContract = QAContractSchema.parse({ schemaVersion: 2, id: randomUUID(), revision: 1, sourceContext, taskCandidates, coverageGaps, criteria, scenarios });
     const startedAt = new Date().toISOString();
     const sourceRefs = snapshots.map((snapshot) => ({
@@ -948,19 +994,34 @@ export class DesktopController {
       sourceSnapshotHash: repositorySnapshotHash ?? sha256(JSON.stringify(snapshots)),
       contractId: contract.id, contractRevision: contract.revision,
       configHash: fingerprint.value,
-      toolVersions: { app: '1.0.0', electron: process.versions.electron ?? 'unknown', playwright: '1.63.0', repositoryWorker: 'node:22-bookworm-slim', repositoryWorkerProtocol: '1' },
-      limits: { runSeconds: 1800, browserActions: 100, artifactMiB: 500 },
+      toolVersions: { app: '1.0.0', electron: process.versions.electron ?? 'unknown', playwright: '1.63.0', repositoryWorker: 'agenticqa/repo-worker:node22-dotnet10-v1', repositoryWorkerProtocol: '1' },
+      providerId: configuredAgent.providerId,
+      modelId: configuredAgent.modelId,
+      limits: { runSeconds: 1800, browserActions: 100, artifactMiB: 500, modelInputTokens: 12_000, modelOutputTokens: configuredAgent.maxOutputTokens, maxCostUsd: 1, maxProviderCalls: 12, maxAgents: 6, maxParallelAgents: 2 },
       ...(previousRunId ? { previousRunId } : {}),
     });
     const repositoryCommands = repositoryConfig ? [...repositoryConfig.setup, ...repositoryConfig.tests].map(({ id, label, executable, arguments: args, workingDirectory, timeoutSeconds, resultFormat, resultPaths, scenarioMappings }) => ({ id, label, executable, arguments: args, workingDirectory, timeoutSeconds, ...(resultFormat ? { resultFormat } : {}), resultPaths, scenarioMappings })) : undefined;
-    const draft = { manifest, contract, notes, ...(repositoryCommands ? { repositoryCommands } : {}) };
+    const envelopePreview = {
+      providerId: configuredAgent.providerId,
+      modelId: configuredAgent.modelId,
+      sourceIds: sourceContext.map(({ workItemId }) => workItemId),
+      sourceRevisions: Object.fromEntries(sourceContext.map(({ organization, projectId, workItemId, revision }) => [`${organization}:${projectId}:${workItemId}`, revision])),
+      repositoryPaths: repositoryConfig?.repository.include ?? [],
+      allowedOrigins: target.allowedOrigins,
+      commandIds: (repositoryCommands ?? []).map(({ id }) => id),
+      excludedContext: [],
+      budget: RunBudgetSchema.parse({ maxCostUsd: 1, maxInputTokens: 12_000, maxOutputTokens: configuredAgent.maxOutputTokens, maxProviderCalls: 12, maxAgents: 6, maxParallelAgents: 2, maxRetries: 1, maxRunSeconds: 1800, maxBrowserActions: 100, maxArtifactMiB: 500 }),
+    };
+    const draft = { manifest, contract, notes, envelopePreview, ...(repositoryCommands ? { repositoryCommands } : {}) };
     this.pendingPlans.set(manifest.runId, draft);
     return draft;
   }
 
   async approvePlan(input: DraftPlan): Promise<void> {
+    const configuredAgent = await this.requireConfiguredAgent();
     const original = this.pendingPlans.get(input.manifest.runId);
     if (!original || JSON.stringify(original.manifest) !== JSON.stringify(input.manifest) || JSON.stringify(original.repositoryCommands ?? []) !== JSON.stringify(input.repositoryCommands ?? [])) throw new Error('This plan is no longer current. Create a fresh draft and review it again.');
+    if (JSON.stringify(original.envelopePreview) !== JSON.stringify(input.envelopePreview)) throw new Error('The approved run envelope cannot be changed in the renderer. Create a fresh plan to change its scope.');
     const contract = validateReadyContract({ ...input.contract, approvedAt: new Date().toISOString() });
     if (contract.id !== original.contract.id || contract.revision !== original.contract.revision) throw new Error('Contract identity cannot change while approving a plan.');
     if (JSON.stringify(contract.sourceContext) !== JSON.stringify(original.contract.sourceContext) || JSON.stringify(contract.coverageGaps) !== JSON.stringify(original.contract.coverageGaps)) throw new Error('ADO source context and coverage gaps are frozen. Refresh the source and create a new plan to change them.');
@@ -985,19 +1046,106 @@ export class DesktopController {
     await this.validateCurrentSourceRevisions(original.manifest);
     const target = await this.setting<TargetConfig>('run.target');
     if (!target || (await this.configFingerprint(target)).value !== original.manifest.configHash) throw new Error('Run target or repository config changed after plan creation. Create a new plan.');
+    let approvedRepositoryConfig: RepositoryConfig | undefined;
+    let automaticRepositoryConfig = true;
+    let approvedRepositoryContext: Array<{ path: string; content: string }> = [];
     if (target.targetKind !== 'site') {
       let temporary = '';
       try {
         let sourcePath = target.repositoryPath;
         if (!sourcePath) { await mkdir(this.scratchRoot, { recursive: true, mode: 0o700 }); temporary = await mkdtemp(join(this.scratchRoot, 'agentic-qa-config-')); sourcePath = await this.prepareRepositorySource(target, temporary); }
         const { config, automatic } = await this.loadRepositoryConfig(target, sourcePath);
-        const mappings = new Set(config.tests.flatMap(({ scenarioMappings }) => scenarioMappings.map(({ scenarioId }) => scenarioId)));
-        const missing = input.contract.scenarios.filter(({ layer }) => layer === 'repo').filter(({ id }) => !mappings.has(id)).map(({ id }) => id);
-        if (missing.length && !automatic) throw new Error(`Map all Repository Scenarios to JUnit tests in .agentic-qa.yml and refresh the plan before approval: ${missing.join(', ')}`);
+        approvedRepositoryConfig = config;
+        automaticRepositoryConfig = automatic;
+        approvedRepositoryContext = await readRepositoryContext({ sourcePath, config, maxFiles: 24, maxBytes: 60_000 });
       } finally { if (temporary) await rm(temporary, { recursive: true, force: true }).catch(() => undefined); }
     }
-    await this.store.createRun(original.manifest, contract);
-    await this.store.setSetting(`run.target.${original.manifest.runId}`, target);
+    if (!original.envelopePreview) throw new Error('This plan has no approved run envelope. Create a fresh agentic plan.');
+    const { modelId: defaultModelId, ...previewFields } = original.envelopePreview;
+    const approvedEnvelope = RunEnvelopeSchema.parse({
+      schemaVersion: 1,
+      ...previewFields,
+      runId: original.manifest.runId,
+      defaultModelId,
+      approvedAt: new Date().toISOString(),
+      contextHash: sha256(JSON.stringify({ contract, envelopePreview: original.envelopePreview, configHash: original.manifest.configHash, sourceSnapshotHash: original.manifest.sourceSnapshotHash })),
+    });
+    const plannedAgents = await planQaRun({
+      envelope: approvedEnvelope,
+      contract,
+      apiKey: configuredAgent.apiKey,
+      provider: providerAdapter(configuredAgent.providerId),
+      repositoryContext: approvedRepositoryContext,
+      repositoryCommands: approvedRepositoryConfig?.tests.map(({ id, resultFormat, resultPaths }) => ({ id, resultFormat, resultPaths })) ?? [],
+      fetcher: this.providerFetch,
+    });
+    if (plannedAgents.plan.assignments.some(({ layer }) => layer === 'integration')) throw new Error('This app release does not yet execute integration-layer assignments. Refresh the plan and choose repository and/or browser coverage.');
+    const selectedLayersByCriterion = new Map(plannedAgents.plan.coverage.map(({ criterionId, requiredLayers }) => [criterionId, requiredLayers]));
+    const generatedBrowserScenarios = plannedAgents.browserScenarios.map((scenario) => ({
+      id: `agent-${randomUUID()}`,
+      criterionIds: [scenario.criterionId],
+      summary: scenario.summary,
+      layer: 'browser' as const,
+      preconditions: scenario.preconditions,
+      steps: scenario.steps,
+      expectedObservations: scenario.expectedObservations,
+      risk: scenario.risk,
+      approved: true,
+    }));
+    for (const test of plannedAgents.repositoryTests) {
+      if (!micromatch.isMatch(test.path, approvedRepositoryConfig?.repository.include ?? []) || (approvedRepositoryConfig?.repository.exclude.some((pattern) => micromatch.isMatch(test.path, pattern)))) {
+        throw new Error('A generated backend test path is outside the approved repository include/exclude scope. Refresh the repository configuration before approving the plan.');
+      }
+    }
+    const scenarios = [
+      ...contract.scenarios.flatMap((scenario) => {
+        if (scenario.layer !== 'repo') return [];
+        const criterionIds = scenario.criterionIds.filter((id) => selectedLayersByCriterion.get(id)?.includes('repo'));
+        return criterionIds.length ? [{ ...scenario, criterionIds }] : [];
+      }),
+      ...generatedBrowserScenarios,
+    ];
+    const finalContract = validateReadyContract(QAContractSchema.parse({
+      ...contract,
+      revision: contract.revision + 1,
+      criteria: contract.criteria.map((criterion) => {
+        const requiredLayers = selectedLayersByCriterion.get(criterion.id) ?? [];
+        if (!requiredLayers.length) throw new Error(`The orchestrator did not select an evidence layer for criterion ${criterion.id}.`);
+        return { ...criterion, requiredLayers, scenarioIds: scenarios.filter(({ criterionIds }) => criterionIds.includes(criterion.id)).map(({ id }) => id) };
+      }),
+      scenarios,
+    }));
+    if (approvedRepositoryConfig && !automaticRepositoryConfig) {
+      const mappings = new Set(approvedRepositoryConfig.tests.flatMap(({ scenarioMappings }) => scenarioMappings.map(({ scenarioId }) => scenarioId)));
+      const generatedScenarioIds = new Set(plannedAgents.repositoryTests.flatMap(({ scenarioIds }) => scenarioIds));
+      const missing = finalContract.scenarios.filter(({ layer, id }) => layer === 'repo' && !generatedScenarioIds.has(id)).filter(({ id }) => !mappings.has(id)).map(({ id }) => id);
+      if (missing.length) throw new Error(`Map the orchestrator-selected Repository Scenarios to JUnit tests in .agentic-qa.yml and refresh the plan: ${missing.join(', ')}`);
+    }
+    const finalManifest = RunManifestSchema.parse({
+      ...original.manifest,
+      providerId: configuredAgent.providerId,
+      modelId: configuredAgent.modelId,
+      contractRevision: finalContract.revision,
+      limits: {
+        ...original.manifest.limits,
+        modelInputTokensUsed: plannedAgents.usage.inputTokens,
+        modelOutputTokensUsed: plannedAgents.usage.outputTokens,
+        modelProviderCallsUsed: plannedAgents.usage.providerCalls,
+        estimatedCostUsd: plannedAgents.usage.costUsd,
+      },
+    });
+    await this.store.createRun(finalManifest, finalContract);
+    await this.store.setSetting(`run.target.${finalManifest.runId}`, target);
+    await this.store.setSetting(`run.agent.${finalManifest.runId}`, {
+      envelope: approvedEnvelope,
+      delegationPlan: plannedAgents.plan,
+      delegationDiagram: plannedAgents.diagram,
+      agentUsage: plannedAgents.usage,
+      selectedModels: plannedAgents.selectedModels,
+      selectedModelDetails: plannedAgents.selectedModelDetails,
+      repositoryTests: plannedAgents.repositoryTests,
+      repositoryContext: approvedRepositoryContext,
+    });
     this.pendingPlans.delete(input.manifest.runId);
   }
 
@@ -1096,7 +1244,17 @@ export class DesktopController {
   async getRun(runId: string) {
     const run = await this.store.getRun(z.string().uuid().parse(runId));
     if (!run) return undefined;
-    return { ...run, artifacts: run.artifacts.map(({ id, kind, sha256, bytes, redactionState, scenarioId, stepId, sequence }) => ({ id, kind, sha256, bytes, redactionState, ...(scenarioId ? { scenarioId } : {}), ...(stepId ? { stepId } : {}), ...(sequence ? { sequence } : {}) })) };
+    const agentData = await this.setting<{ delegationPlan?: unknown; delegationDiagram?: unknown; repositoryTests?: unknown; agentUsage?: { inputTokens: number; outputTokens: number; providerCalls: number; costUsd: number }; agentSummary?: string; reviewerReport?: unknown }>(`run.agent.${run.manifest.runId}`);
+    return {
+      ...run,
+      ...(agentData?.delegationPlan ? { delegationPlan: DelegationPlanSchema.parse(agentData.delegationPlan) } : {}),
+      ...(agentData?.delegationDiagram ? { delegationDiagram: DelegationDiagramSchema.parse(agentData.delegationDiagram) } : {}),
+      ...(agentData?.repositoryTests ? { repositoryTests: z.array(RepositoryTestDraftSchema).max(40).parse(agentData.repositoryTests) } : {}),
+      ...(agentData?.agentUsage ? { agentUsage: agentData.agentUsage } : {}),
+      ...(agentData?.agentSummary ? { agentSummary: agentData.agentSummary } : {}),
+      ...(agentData?.reviewerReport ? { reviewerReport: EvidenceLinkedReviewSchema.parse(agentData.reviewerReport) } : {}),
+      artifacts: run.artifacts.map(({ id, kind, sha256, bytes, redactionState, scenarioId, stepId, sequence }) => ({ id, kind, sha256, bytes, redactionState, ...(scenarioId ? { scenarioId } : {}), ...(stepId ? { stepId } : {}), ...(sequence ? { sequence } : {}) })),
+    };
   }
 
   async getArtifactPreview(runIdInput: string, artifactIdInput: string): Promise<string> {
@@ -1209,6 +1367,7 @@ export class DesktopController {
   }
 
   async startRun(runIdInput: string): Promise<QAReport> {
+    await this.requireConfiguredAgent();
     if (this.runStarting || this.activeRuns.size) throw new Error('Another QA run is already active.');
     this.runStarting = true;
     try { return await this.executeRun(runIdInput); }
@@ -1222,12 +1381,16 @@ export class DesktopController {
     if (archived.report) throw new Error('This immutable run already has a final report. Create a new run to retry.');
     if (archived.observations.length || archived.findings.length || archived.artifacts.length) throw new Error('This run contains partial evidence from a previous attempt. Its interrupted report is being recovered in History; create a new run to retry.');
     const manifest = archived.manifest;
+    const agentData = await this.setting<{ envelope?: unknown; delegationPlan?: unknown; delegationDiagram?: unknown; repositoryTests?: Array<{ commandId: string; path: string; content: string; scenarioIds: string[]; testCaseIds: string[] }>; repositoryContext?: Array<{ path: string; content: string }>; agentUsage?: { inputTokens: number; outputTokens: number; providerCalls: number; costUsd: number }; selectedModels?: Partial<Record<'backend' | 'frontend' | 'reviewer', string>>; selectedModelDetails?: Partial<Record<'backend' | 'frontend' | 'reviewer', unknown>>; reviewerReport?: unknown }>(`run.agent.${runId}`);
+    if (!agentData?.delegationPlan) throw new Error('This run has no persisted Orchestrator plan. Recreate it after configuring a provider and model.');
+    const delegationPlan = DelegationPlanSchema.parse(agentData.delegationPlan);
+    if (delegationPlan.runId !== runId) throw new Error('The saved delegation plan does not match the run manifest.');
     const target = TargetSchema.parse(await this.setting<TargetConfig>(`run.target.${runId}`));
     if ((await this.configFingerprint(target)).value !== manifest.configHash) throw new Error('Run configuration or repository config no longer matches its approved manifest.');
     if (target.targetKind !== 'repository' && !(await this.isBrowserInstalled())) throw new Error('Install the local Chromium browser from Run setup before starting this site run.');
     const abort = new AbortController();
     this.activeRuns.set(runId, abort);
-    await this.progress(runId, 'orchestrator', 'RUNNING', 'run-approved', 'Orchestrator accepted the approved manifest and assigned deterministic worker lanes.');
+    await this.progress(runId, 'orchestrator', 'RUNNING', 'run-approved', `Orchestrator delegated ${delegationPlan.assignments.length} assignment(s) across ${new Set(delegationPlan.assignments.map(({ layer }) => layer)).size} selected evidence layer(s).`);
     let scratch = '';
     const observations: Observation[] = [];
     const findings: Finding[] = [];
@@ -1249,17 +1412,43 @@ export class DesktopController {
         try { await this.sitePreflight(manifest.siteBaseUrl); }
         catch (error) { executionState = 'BLOCKED'; siteBlocked = true; blockedReason = error instanceof Error ? error.message : 'Site preflight failed.'; }
       }
+      const assignedRepositoryScenarioIds = new Set(delegationPlan.assignments
+        .filter(({ layer }) => layer === 'repo')
+        .flatMap((assignment) => archived.contract.scenarios
+          .filter(({ layer, criterionIds }) => layer === 'repo' && criterionIds.some((id) => assignment.criterionIds.includes(id)))
+          .map(({ id }) => id)));
       if (target.targetKind !== 'site') {
         await this.progress(runId, 'repo', 'RUNNING', 'repository-checks', 'Repository worker is snapshotting the configured files and running the approved command arrays.');
         try {
           const repositorySourcePath = target.repositoryPath ?? await this.prepareRepositorySource(target, join(scratch, 'ado-source'));
           const { config, automatic } = await this.loadRepositoryConfig(target, repositorySourcePath);
-          const repositoryScenarios = archived.contract.scenarios.filter(({ layer }) => layer === 'repo');
-          const mapped = new Set(config.tests.flatMap(({ scenarioMappings }) => scenarioMappings.map(({ scenarioId }) => scenarioId)));
+          const generatedRepositoryTests = agentData.repositoryTests ?? [];
+          const generatedMappings = new Map<string, Map<string, Set<string>>>();
+          for (const generatedTest of generatedRepositoryTests) {
+            for (const scenarioId of generatedTest.scenarioIds) {
+              const byScenario = generatedMappings.get(generatedTest.commandId) ?? new Map<string, Set<string>>();
+              const cases = byScenario.get(scenarioId) ?? new Set<string>();
+              generatedTest.testCaseIds.forEach((id) => cases.add(id));
+              byScenario.set(scenarioId, cases);
+              generatedMappings.set(generatedTest.commandId, byScenario);
+            }
+          }
+          const executionConfig = RepositoryConfigSchema.parse({
+            ...config,
+            tests: config.tests.map((command) => {
+              const generatedForCommand = generatedMappings.get(command.id);
+              if (!generatedForCommand) return command;
+              const scenarioMappings = [...command.scenarioMappings.filter(({ scenarioId }) => !generatedForCommand.has(scenarioId))];
+              for (const [scenarioId, testCaseIds] of generatedForCommand) scenarioMappings.push({ scenarioId, testCaseIds: [...testCaseIds] });
+              return { ...command, resultFormat: command.resultFormat === 'trx' ? 'trx' as const : 'junit' as const, scenarioMappings };
+            }),
+          });
+          const repositoryScenarios = archived.contract.scenarios.filter(({ layer, id }) => layer === 'repo' && assignedRepositoryScenarioIds.has(id));
+          const mapped = new Set(executionConfig.tests.flatMap(({ scenarioMappings }) => scenarioMappings.map(({ scenarioId }) => scenarioId)));
           const unmapped = repositoryScenarios.filter(({ id }) => !mapped.has(id));
           if (unmapped.length && !automatic) throw new Error(`Map the following approved repository scenarios to JUnit test commands in .agentic-qa.yml: ${unmapped.map(({ id }) => id).join(', ')}`);
           const result = await runRepositoryChecks({
-            runId, repositoryPath: repositorySourcePath, config, snapshotPath: join(scratch, 'repository'),
+            runId, repositoryPath: repositorySourcePath, config: executionConfig, snapshotPath: join(scratch, 'repository'), generatedTests: generatedRepositoryTests.map(({ path, content }) => ({ path, content })),
             artifactDirectory: join(scratch, 'repository-artifacts'),
             maxArtifactBytes: (manifest.limits.artifactMiB ?? 500) * 1024 * 1024,
             timeoutMs: Math.max(1, deadlineAt - Date.now()), expectedSnapshotHash: manifest.sourceSnapshotHash, signal: abort.signal,
@@ -1289,7 +1478,12 @@ export class DesktopController {
           await this.progress(runId, 'repo', 'FAILED', 'repository-checks', 'Repository worker could not complete the approved checks. Review the run report for the blocked reason.');
         }
       }
-      const browserScenarios = archived.contract.scenarios.filter(({ layer }) => layer === 'browser');
+      const assignedBrowserScenarioIds = new Set(delegationPlan.assignments
+        .filter(({ layer }) => layer === 'browser')
+        .flatMap((assignment) => archived.contract.scenarios
+          .filter(({ layer, criterionIds }) => layer === 'browser' && criterionIds.some((id) => assignment.criterionIds.includes(id)))
+          .map(({ id }) => id)));
+      const browserScenarios = archived.contract.scenarios.filter(({ layer, id }) => layer === 'browser' && assignedBrowserScenarioIds.has(id));
       let actionsUsed = 0;
       for (const scenario of browserScenarios) {
         if (abort.signal.aborted) { executionState = 'CANCELLED'; break; }
@@ -1346,6 +1540,22 @@ export class DesktopController {
       }));
       for (const finding of findings) await this.store.appendFinding(runId, finding);
 
+      const updatedPlan = DelegationPlanSchema.parse({
+        ...delegationPlan,
+        assignments: delegationPlan.assignments.map((assignment) => {
+          const scenarios = archived.contract.scenarios.filter(({ layer, criterionIds }) => layer === assignment.layer && criterionIds.some((id) => assignment.criterionIds.includes(id)));
+          const assignedObservations = observations.filter(({ scenarioId }) => scenarios.some(({ id }) => id === scenarioId));
+          const done = scenarios.length > 0 && assignedObservations.length >= scenarios.length;
+          const status = done ? 'completed' : executionState === 'CANCELLED' || executionState === 'BLOCKED' ? 'blocked' : 'skipped';
+          const artifactIds = assignedObservations.flatMap(({ artifactIds }) => artifactIds);
+          return {
+            ...assignment, status,
+            summary: done ? `${assignedObservations.length} assigned scenario(s) produced direct observations.` : `${assignedObservations.length}/${scenarios.length} assigned scenario(s) produced observations; required evidence is incomplete.`,
+            evidenceIds: [...new Set([...assignedObservations.map(({ id }) => id), ...artifactIds])],
+          };
+        }),
+      });
+
       const criterionResults = archived.contract.criteria.map((criterion) => {
         const linked = archived.contract.scenarios.filter(({ id }) => criterion.scenarioIds.includes(id));
         const linkedObservations = observations.filter(({ scenarioId }) => criterion.scenarioIds.includes(scenarioId));
@@ -1361,6 +1571,82 @@ export class DesktopController {
         const state: CriterionResult['state'] = !missingEvidence.length ? 'VERIFIED' : blocked ? 'BLOCKED' : 'UNVERIFIED';
         const findingIds = findings.filter((finding) => finding.observationIds.some((id) => linkedObservations.some((observation) => observation.id === id))).map(({ id }) => id);
         return { criterionId: criterion.id, state, observationIds: linkedObservations.map(({ id }) => id), missingEvidence, findingIds };
+      });
+      let reviewerStatus: 'completed' | 'blocked' = 'completed';
+      let reviewerReport: unknown;
+      let agentUsage = agentData.agentUsage ?? { inputTokens: 0, outputTokens: 0, providerCalls: 0, costUsd: 0 };
+      let agentSummary = '';
+      try {
+        await this.progress(runId, 'orchestrator', 'RUNNING', 'evidence-review', 'Reviewer Agent is checking direct observations and bounded repository/test code.');
+        const configuredAgent = await this.requireConfiguredAgent();
+        const approvedEnvelope = RunEnvelopeSchema.parse(agentData.envelope);
+        if (configuredAgent.providerId !== approvedEnvelope.providerId) throw new Error('The configured provider changed after this run was approved.');
+        const reviewerModelId = agentData.selectedModels?.reviewer ?? approvedEnvelope.defaultModelId;
+        const reviewerModel = ProviderModelSchema.parse(agentData.selectedModelDetails?.reviewer);
+        const reviewed = await reviewQaRun({
+          provider: providerAdapter(configuredAgent.providerId), apiKey: configuredAgent.apiKey, model: reviewerModel, modelId: reviewerModelId,
+          runId, criteria: archived.contract.criteria.map(({ id, expectedBehavior, scenarioIds }) => ({ id, expectedBehavior, scenarioIds })),
+          criterionResults, observations, findings, repositoryTests: (agentData.repositoryTests ?? []).map(({ path, content, scenarioIds, testCaseIds }) => ({ path, content, scenarioIds, testCaseIds })),
+          repositoryContext: agentData.repositoryContext ?? [],
+          remainingBudget: {
+            inputTokens: Math.max(0, approvedEnvelope.budget.maxInputTokens - agentUsage.inputTokens),
+            outputTokens: Math.max(0, approvedEnvelope.budget.maxOutputTokens - agentUsage.outputTokens),
+            providerCalls: Math.max(0, approvedEnvelope.budget.maxProviderCalls - agentUsage.providerCalls),
+            costUsd: Math.max(0, approvedEnvelope.budget.maxCostUsd - agentUsage.costUsd),
+          },
+          fetcher: this.providerFetch,
+        });
+        reviewerReport = reviewed.report;
+        agentUsage = {
+          inputTokens: agentUsage.inputTokens + reviewed.usage.inputTokens,
+          outputTokens: agentUsage.outputTokens + reviewed.usage.outputTokens,
+          providerCalls: agentUsage.providerCalls + reviewed.usage.providerCalls,
+          costUsd: agentUsage.costUsd + reviewed.usage.costUsd,
+        };
+        agentSummary = [
+          `AI Reviewer summary: ${reviewed.report.summary}`,
+          ...reviewed.report.criteria.map(({ criterionId, assessment, summary, observationIds }) => `${criterionId} · ${assessment} · ${summary} · observations ${observationIds.join(', ') || 'none'}`),
+          ...reviewed.report.codeReview.map(({ kind, path, line, severity, comment, recommendation, criterionIds }) => `Code review · ${kind} · ${severity} · ${path}:${line} · criteria ${criterionIds.join(', ')} · ${comment} Recommendation: ${recommendation}`),
+        ].join('\n').slice(0, 4000);
+        for (const note of reviewed.report.codeReview.filter(({ kind, severity }) => kind === 'test_coverage' && (severity === 'medium' || severity === 'high'))) {
+          for (const criterionId of note.criterionIds) {
+            const index = criterionResults.findIndex((result) => result.criterionId === criterionId);
+            if (index < 0) continue;
+            const result = criterionResults[index]!;
+            const rationale = `AI Reviewer raised a ${note.severity} test-coverage concern at ${note.path}:${note.line}: ${note.comment} Recommendation: ${note.recommendation}`;
+            const reviewerFinding = FindingSchema.parse({
+              id: randomUUID(), kind: 'INSUFFICIENT_EVIDENCE', criterionId,
+              observationIds: result.observationIds, rationale, highRisk: note.severity === 'high', unresolved: true,
+            });
+            findings.push(reviewerFinding);
+            await this.store.appendFinding(runId, reviewerFinding);
+            criterionResults[index] = {
+              ...result,
+              state: result.state === 'VERIFIED' ? 'UNVERIFIED' : result.state,
+              missingEvidence: [...result.missingEvidence, rationale],
+              findingIds: [...result.findingIds, reviewerFinding.id],
+            };
+          }
+        }
+        await this.progress(runId, 'orchestrator', 'COMPLETED', 'evidence-review', 'Reviewer Agent returned validated criterion links and repository code-review notes.');
+      } catch (error) {
+        reviewerStatus = 'blocked';
+        executionState = 'BLOCKED';
+        blockedReason = `Reviewer Agent could not complete: ${error instanceof Error ? error.message : 'provider review failed.'}`;
+        agentSummary = blockedReason;
+        const reviewerFinding = FindingSchema.parse({ id: randomUUID(), kind: 'ENVIRONMENT_FAILURE', observationIds: observations.map(({ id }) => id), rationale: blockedReason, highRisk: false, unresolved: true });
+        findings.push(reviewerFinding);
+        await this.store.appendFinding(runId, reviewerFinding);
+        await this.progress(runId, 'orchestrator', 'FAILED', 'evidence-review', 'Reviewer Agent could not complete. The run report records the reason.');
+      }
+      const updatedDiagram = buildDelegationDiagram(updatedPlan, reviewerStatus);
+      await this.store.setSetting(`run.agent.${runId}`, {
+        ...agentData,
+        delegationPlan: updatedPlan,
+        delegationDiagram: updatedDiagram,
+        agentUsage,
+        agentSummary,
+        ...(reviewerReport ? { reviewerReport } : {}),
       });
       const verdict = computeVerdict({ executionState, criterionResults, findings, coverageGaps: archived.contract.coverageGaps });
       let explanation = verdict === 'PASS'
@@ -1396,6 +1682,15 @@ export class DesktopController {
   private async rawSetting<T>(key: string): Promise<T | undefined> {
     const value = await this.store.getSetting(key);
     return value === null || value === undefined ? undefined : value as T;
+  }
+
+  private async requireConfiguredAgent(): Promise<{ providerId: SupportedProviderId; modelId: string; maxOutputTokens: number; apiKey: string }> {
+    const providerId = await this.setting<SupportedProviderId>('model.provider');
+    const saved = await this.setting<{ providerId?: SupportedProviderId; modelId?: string; model?: string; maxOutputTokens?: number }>('model.settings');
+    const key = providerId ? await this.setting<string>(`model.apiKey.${providerId}`) : undefined;
+    const modelId = saved?.modelId ?? saved?.model;
+    if (!providerId || !key || !modelId || saved?.providerId !== providerId) throw new Error('Configure a provider API key and select a supported model in Settings before planning or running QA.');
+    return { providerId, modelId, maxOutputTokens: Math.max(256, Math.min(saved?.maxOutputTokens ?? 1200, 32_000)), apiKey: key };
   }
 
   private async setSetting(key: string, value: unknown): Promise<void> {
@@ -1487,21 +1782,24 @@ export class DesktopController {
     try { return { ...(await readRepositoryConfig(sourcePath)), automatic: false }; }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      let packageManifest: { name?: unknown; scripts?: { test?: unknown } };
+      let packageManifest: { name?: unknown; scripts?: { test?: unknown } } | undefined;
       try { packageManifest = JSON.parse(await readFile(join(sourcePath, 'package.json'), 'utf8')); }
       catch (manifestError) {
-        if ((manifestError as NodeJS.ErrnoException).code === 'ENOENT') throw new Error('Automatic repository checks currently support a root package.json with a test script. This repository has no supported test entry point; choose Browser-only in Run setup or add a repository test script.');
-        throw new Error('The root package.json could not be read for automatic test discovery. Fix the manifest or choose Browser-only in Run setup.');
+        if ((manifestError as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('The root package.json could not be read for automatic test discovery. Fix the manifest or configure an exact repository command.');
       }
-      if (!packageManifest || typeof packageManifest !== 'object' || typeof packageManifest.scripts?.test !== 'string' || !packageManifest.scripts.test.trim()) {
-        throw new Error('The root package.json has no test script for automatic repository checks. Choose Browser-only in Run setup or add a test script.');
-      }
+      const rootFiles = await readdir(sourcePath, { withFileTypes: true });
+      const solution = rootFiles.filter((entry) => entry.isFile() && /\.slnx?$/i.test(entry.name)).map(({ name }) => name).sort()[0];
+      const hasNpmTest = typeof packageManifest?.scripts?.test === 'string' && Boolean(packageManifest.scripts.test.trim());
+      if (!hasNpmTest && !solution) throw new Error('No supported automatic test entry point was found. Configure an exact repository command or choose Browser-only in Run setup.');
+      const test = solution && !hasNpmTest
+        ? { id: 'auto-dotnet-test', label: `Discovered .NET solution test (${solution})`, executable: 'dotnet' as const, arguments: ['test', solution, '--no-restore'], workingDirectory: '.', timeoutSeconds: 1200, network: 'none' as const, resultFormat: 'none' as const, resultPaths: [], scenarioMappings: [] }
+        : { id: 'auto-npm-test', label: 'Discovered npm test script', executable: 'npm' as const, arguments: ['test'], workingDirectory: '.', timeoutSeconds: 600, network: 'none' as const, resultFormat: 'none' as const, resultPaths: [], scenarioMappings: [] };
       const config = RepositoryConfigSchema.parse({
         schemaVersion: 1,
-        project: { name: typeof packageManifest.name === 'string' && packageManifest.name.trim() ? packageManifest.name.slice(0, 160) : 'QA project' },
+        project: { name: typeof packageManifest?.name === 'string' && packageManifest.name.trim() ? packageManifest.name.slice(0, 160) : basename(sourcePath) || 'QA project' },
         repository: { include: ['**/*'], exclude: [] },
         setup: [],
-        tests: [{ id: 'auto-npm-test', label: 'Discovered npm test script', executable: 'npm', arguments: ['test'], workingDirectory: '.', timeoutSeconds: 600, network: 'none', resultFormat: 'none', resultPaths: [], scenarioMappings: [] }],
+        tests: [test],
       });
       return { config, sha256: sha256(JSON.stringify(config)), automatic: true };
     }
@@ -1521,11 +1819,13 @@ export class DesktopController {
       await writeFile(join(destination, '.agentic-qa.yml'), configText, { mode: 0o600, flag: 'wx' });
     } else {
       const packageItem = items.find((item) => !item.isFolder && item.path === '/package.json');
+      const solutionItem = items.filter((item) => !item.isFolder && /^\/[^/]+\.slnx?$/i.test(item.path)).sort((a, b) => a.path.localeCompare(b.path))[0];
       if (packageItem) {
         const packageText = await this.ado.getGitItemContent(token, source.organization, source.id, source.commit, packageItem.path);
         if (Buffer.byteLength(packageText, 'utf8') > 1024 * 1024) throw new Error('The root package.json exceeds the automatic discovery size limit.');
         await writeFile(join(destination, 'package.json'), packageText, { mode: 0o600, flag: 'wx' });
       }
+      if (solutionItem) await writeFile(join(destination, solutionItem.path.slice(1)), '', { mode: 0o600, flag: 'wx' });
     }
     const { config } = await this.loadRepositoryConfig(target, destination);
     const paths = items.filter((item) => !item.isFolder).map((item) => item.path.slice(1)).filter((path) => path && !path.startsWith('/') && !path.split('/').includes('..') && !path.includes('\\'));

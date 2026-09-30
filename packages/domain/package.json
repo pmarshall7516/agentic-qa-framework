@@ -7,7 +7,8 @@
     "./work-item": "./src/work-item.ts",
     "./queue": "./src/queue.ts",
     "./qa-contract": "./src/qa-contract.ts",
-    "./run": "./src/run.ts"
+    "./run": "./src/run.ts",
+    "./agent": "./src/agent.ts"
   },
   "dependencies": { "zod": "^4.6.5" }
 }

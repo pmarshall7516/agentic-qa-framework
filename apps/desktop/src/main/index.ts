@@ -9,6 +9,7 @@ import { openQaStore } from '@agentic-qa/storage/database';
 import { AzureCliAdoAuthService } from '@agentic-qa/ado/azure-cli-auth';
 import { DesktopController } from './controller.js';
 import { registerIpcHandlers } from './ipc.js';
+import { REPO_WORKER_IMAGE } from '@agentic-qa/repo-worker/runner';
 
 const devServerUrl = !app.isPackaged && process.env.VITE_DEV_SERVER_URL === 'http://127.0.0.1:5173'
   ? process.env.VITE_DEV_SERVER_URL
@@ -125,10 +126,13 @@ async function createWindow(): Promise<void> {
       const answer = await dialog.showMessageBox(window, { type: 'warning', buttons: ['Cancel', 'Keep local QA data', 'Delete local QA data'], defaultId: 1, cancelId: 0, title: 'Sign out of Azure DevOps', message: `Choose what to do with the local QA data on this device before signing out as ${username}.`, detail: 'Deleting removes all local QA Queue entries, saved work item snapshots, run history, reports, encrypted evidence, and saved Azure DevOps selections. This applies to every account on this device. Your app registration and OpenAI provider settings are kept.' });
       return answer.response === 1 ? 'keep' : answer.response === 2 ? 'delete' : 'cancel';
     },
-    repoWorkerImageProbe: async () => (await dockerCommand(['image', 'inspect', 'node:22-bookworm-slim'])).code === 0,
+    repoWorkerImageProbe: async () => (await dockerCommand(['image', 'inspect', REPO_WORKER_IMAGE])).code === 0,
     installRepoWorkerImage: async () => {
-      const result = await dockerCommand(['pull', 'node:22-bookworm-slim'], 10 * 60_000);
-      if (result.code !== 0) throw new Error(`Unable to prepare the repository worker image. Start Docker Desktop and check its network access. ${result.errorText}`);
+      const context = app.isPackaged
+        ? join(process.resourcesPath, 'repo-worker')
+        : join(app.getAppPath(), '..', '..', 'packages', 'repo-worker', 'image');
+      const result = await dockerCommand(['build', '--pull', '--tag', REPO_WORKER_IMAGE, context], 15 * 60_000);
+      if (result.code !== 0) throw new Error(`Unable to prepare the pinned Node 22 and .NET 10 repository worker image. Start Docker Desktop and check access to the official Node and Microsoft .NET registries. ${result.errorText}`);
     },
     evidenceRoot: join(userDataPath, 'evidence'),
     scratchRoot,

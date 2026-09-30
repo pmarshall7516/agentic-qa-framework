@@ -169,6 +169,8 @@ export function createUiReviewFixture(scenarioName: string): { api: DesktopApi; 
         modelMaxOutputTokens: 1200,
       };
   let approved = scenarioName === 'report';
+  let providerConnected = scenarioName === 'report';
+  let executed = scenarioName === 'report';
   const runDetail: RunDetail = {
     manifest,
     contract: { ...contract, scenarios: contract.scenarios.map((item) => ({ ...item, approved: true })) },
@@ -178,12 +180,12 @@ export function createUiReviewFixture(scenarioName: string): { api: DesktopApi; 
     ...(scenarioName === 'report' ? { report } : {}),
   };
 
-  const currentState = (): DesktopState => ({ ...state, queue: [...state.queue] });
+  const currentState = (): DesktopState => ({ ...state, queue: [...state.queue], modelProviderConfigured: providerConnected });
   const withState = (updates: Partial<DesktopState>): DesktopState => {
     state = { ...state, ...updates };
     return currentState();
   };
-  const runs = () => approved ? [{ manifest, report: scenarioName === 'report' ? report : undefined }] : [];
+  const runs = () => approved ? [{ manifest, report: executed ? report : undefined }] : [];
   const api: DesktopApi = {
     getState: async () => currentState(),
     signIn: async () => withState({ accounts: [account], selectedAccountId: account.homeAccountId }),
@@ -239,6 +241,9 @@ export function createUiReviewFixture(scenarioName: string): { api: DesktopApi; 
     getRepositoryConfigDraft: async () => JSON.stringify({ schemaVersion: 1, project: { name: 'Portal' }, repository: { include: ['**/*'], exclude: [] }, setup: [], tests: [{ id: 'project-tests', label: 'Project tests', executable: 'npm', arguments: ['test'], workingDirectory: '.', timeoutSeconds: 600, network: 'none', resultFormat: 'none', resultPaths: [], scenarioMappings: [] }], limits: { browserActions: 100, runSeconds: 1800, artifactMiB: 500 } }, null, 2),
     saveRepositoryConfigDraft: async () => undefined,
     createDraftPlan: async () => plan,
+    importProviderKey: async () => { providerConnected = true; return true; },
+    listProviderModels: async (providerId) => [{ providerId, modelId: 'gpt-5.6-terra', displayName: 'GPT-5.6 Terra', capabilities: { structuredOutput: true, toolUse: true, inputUsdPerMillionTokens: 0.25, outputUsdPerMillionTokens: 2 } }],
+    saveAgentModelSettings: async ({ providerId, modelId: selectedModel }) => { withState({ modelProvider: providerId, modelId: selectedModel, modelProviderConfigured: true }); },
     importModelKey: async () => false,
     clearModelKey: async () => undefined,
     saveModelSettings: async () => undefined,
@@ -246,7 +251,7 @@ export function createUiReviewFixture(scenarioName: string): { api: DesktopApi; 
     generateModelSuggestions: async () => plan,
     approvePlan: async () => { approved = true; },
     listRuns: async () => runs(),
-    getRun: async () => runDetail,
+    getRun: async () => executed ? { ...runDetail, report } : runDetail,
     getArtifactPreview: async () => 'data:image/png;base64,',
     getRunProgress: async () => [],
     exportReport: async () => true,
@@ -257,7 +262,7 @@ export function createUiReviewFixture(scenarioName: string): { api: DesktopApi; 
     installBrowser: async () => undefined,
     isRepoWorkerImageInstalled: async () => true,
     installRepoWorkerImage: async () => undefined,
-    startRun: async () => report,
+    startRun: async () => { executed = true; return report; },
     cancelRun: async () => true,
   };
 

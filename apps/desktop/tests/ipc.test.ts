@@ -33,7 +33,7 @@ describe('validated desktop IPC', () => {
     const { handlers, api, ipc } = fixture();
     await expect(handlers.get('qa:get-state')!({ senderFrame: { url: 'http://127.0.0.1:5173/' } }, 'extra')).rejects.toThrow();
     expect(api.getState).not.toHaveBeenCalled();
-    expect(ipc.handle).toHaveBeenCalledTimes(54);
+    expect(ipc.handle).toHaveBeenCalledTimes(57);
     expect([...handlers.keys()]).toContain('qa:generate-model-suggestions');
     expect([...handlers.keys()]).toContain('qa:list-git-repositories');
     expect([...handlers.keys()]).toContain('qa:save-work-item-type-mapping');

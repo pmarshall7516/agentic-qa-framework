@@ -1,6 +1,6 @@
 # ADR-0002: Optional, approval-gated OpenAI scenario suggestions
 
-**Status:** Accepted as the first optional v1 provider · **Date:** 2026-09-27
+**Status:** Superseded by [ADR-0004](ADR-0004-mandatory-agentic-provider-adapters.md) · **Date:** 2026-09-27
 
 ## Context
 

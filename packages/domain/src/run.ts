@@ -33,7 +33,7 @@ export const RunManifestSchema = z.object({
   localGitState: z.enum(['clean', 'dirty', 'not-a-git-repository', 'unavailable']).optional(),
   sourceSnapshotHash: z.string().regex(/^[a-f0-9]{64}$/i).optional(), siteBaseUrl: z.url().optional(),
   contractId: z.string().uuid(), contractRevision: z.number().int().positive(), configHash: z.string().regex(/^[a-f0-9]{64}$/i),
-  toolVersions: z.record(z.string(), z.string()), modelId: z.string().max(200).optional(),
+  toolVersions: z.record(z.string(), z.string()), providerId: z.enum(['openai', 'anthropic', 'openrouter']).optional(), modelId: z.string().max(200).optional(),
   limits: z.record(z.string(), z.number().nonnegative()), previousRunId: z.string().uuid().optional(),
 }).strict();
 export const QAReportSchema = z.object({

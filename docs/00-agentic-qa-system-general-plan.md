@@ -12,19 +12,19 @@ The product cannot prove that **all** possible behavior is correct. Its promise 
 
 - **Local-first desktop app** for Windows and macOS. Account tokens, run history, and evidence stay on the user's machine by default. No hosted account or shared backend is required.
 - **Azure DevOps Services only** for the first release. Azure DevOps Server and other trackers are later integrations.
-- **Manual run initiation.** The user reviews selected work items, target, test plan, AI disclosure preview, cost and action limits before execution.
+- **Manual run initiation, mandatory agentic execution.** Every QA run requires a configured provider/model. The user approves selected work items, repository/site context, tools, command set, cost and action limits once; the Orchestrator and selected specialist agents then plan and perform QA inside that approved envelope.
 - **Read-only ADO integration.** The first release never edits work items, PRs, or builds.
 - **Three targets:** repository-only, site-only, or repository plus site. The report identifies which layers were actually exercised.
 - **Evidence-first decision:** `PASS`, `FAIL`, `NEEDS_REVIEW`, or `BLOCKED`, with an explicit reason and source snapshot.
 
 ## Delivery sequence
 
-1. **Foundation:** desktop shell; signed-in ADO organization/project selection; requirement/task search and queue; local persistence; exportable run manifest.
-2. **Useful QA slice:** source snapshots; criterion extraction and human-editable test contract; existing-test execution in an isolated worker; site smoke and criterion-driven Playwright checks; evidence and report.
-3. **Depth:** code impact analysis, generated tests in a disposable copy, bounded exploratory browser QA, accessibility scans, rerun and comparison, robust failure triage.
-4. **Team automation:** optional sharing/sync, ADO writeback, CI triggers and hosted workers after local results and security controls are proven.
+1. **Foundation:** desktop shell; signed-in ADO organization/project selection; requirement/task search and queue; local persistence; exportable run manifest; M0 identity, storage and worker gates.
+2. **Agentic QA slice:** required provider/model configuration and discovery; source snapshots and context envelope; Orchestrator Agent that maps Requirements, Tasks and acceptance criteria to backend/repository and/or frontend/browser specialists; generated and executed tests in constrained workers; delegation diagram; evidence and report.
+3. **Depth:** bounded exploratory browser QA, accessibility scans, rerun and comparison, additional repository/test adapters, robust failure triage and measured cost optimization.
+4. **Team automation:** optional sharing/sync, ADO writeback, CI triggers and hosted workers after local agentic results and security controls are proven.
 
-The first useful release includes phases 1 and 2. Phase 3 is a quality expansion; phase 4 is a distinct hosted product decision.
+The first useful release includes phases 1 and 2. An AI provider is mandatory for every QA run; a deterministic local plan is not a supported fallback. The application still owns fixed worker capabilities, data collection, evidence validation and verdict policy. Phase 3 is a quality expansion; phase 4 is a distinct hosted product decision.
 
 ## Reading order
 
@@ -39,4 +39,4 @@ The first useful release includes phases 1 and 2. Phase 3 is a quality expansion
 
 ## Pilot decisions
 
-The first release is local-first and allows a configured AI provider after a disclosure preview. Organization-specific field mapping, supported repository languages, and distribution channel are pilot decisions with explicit discovery gates in the delivery plan.
+The first release is local-first and requires a configured, supported AI provider after a run-level disclosure/permission envelope is approved. Provider adapters, searchable capability-filtered model selection and bounded per-run cost/work budgets are part of the first useful release. Organization-specific field mapping, supported repository languages, and distribution channel are pilot decisions with explicit discovery gates in the delivery plan.

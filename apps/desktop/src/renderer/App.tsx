@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { AdoGitRef, AdoGitRepository, AdoProject, AdoTeam } from '@agentic-qa/ado/client';
 import type { WorkItemSnapshot } from '@agentic-qa/domain/work-item';
+import type { ProviderModel } from '@agentic-qa/domain/agent';
 import type { Scenario } from '@agentic-qa/domain/qa-contract';
-import type { AppScreen, DesktopApi, DesktopState, DraftPlan, ModelPayloadPreview, QueueItemView, TargetConfig } from '../shared/ipc.js';
+import type { AppScreen, DesktopApi, DesktopState, DraftPlan, QueueItemView, TargetConfig } from '../shared/ipc.js';
 import { errorMessage } from './error-message.js';
 import { SprintWorkPicker } from './SprintWorkPicker.js';
 
@@ -10,7 +11,6 @@ const navigation: Array<{ id: AppScreen; label: string }> = [
   { id: 'work-items', label: 'Work items' },
   { id: 'queue', label: 'QA Queue' },
   { id: 'history', label: 'Runs' },
-  { id: 'settings', label: 'Settings' },
 ];
 const BUILT_IN_WORK_ITEM_TYPES = new Set(['user story', 'product backlog item', 'issue', 'requirement', 'task']);
 
@@ -19,7 +19,8 @@ const EMPTY_STATE: DesktopState = {
   accounts: [],
   queue: [],
   modelProviderConfigured: false,
-  modelId: 'gpt-5.6-terra',
+  modelProvider: 'openai',
+  modelId: '',
   modelMaxOutputTokens: 1200,
 };
 
@@ -176,7 +177,7 @@ function OrchestratorPlan({ draftPlan }: { draftPlan?: DraftPlan }) {
   const repository = draftPlan.contract.scenarios.filter(({ layer }) => layer === 'repo');
   const browser = draftPlan.contract.scenarios.filter(({ layer }) => layer === 'browser');
   const both = repository.length > 0 && browser.length > 0;
-  return <div className="panel orchestrator-plan"><div className="panel-title-row"><div><h2>Orchestrator plan</h2><p>Deterministic local coordination. Each lane gets only its approved scenarios, target, command manifest and shared run limits.</p></div><span className="verdict-badge">{both ? '2 worker lanes' : '1 worker lane'}</span></div><ol>
+  return <div className="panel orchestrator-plan"><div className="panel-title-row"><div><h2>Orchestrator plan</h2><p>The agent selects a justified testing layer for each criterion. The app enforces approved scenarios, targets, commands and run limits.</p></div><span className="verdict-badge">{both ? '2 worker lanes' : '1 worker lane'}</span></div><ol>
     <li><strong>Freeze and validate sources</strong><span>ADO revisions, target origin, repository snapshot/config hash and reviewed QA Contract.</span></li>
     {repository.length ? <li><strong>Delegate to Repository worker · {repository.length} Scenario{repository.length === 1 ? '' : 's'}</strong><span>{draftPlan.repositoryCommands?.length ?? 0} reviewed command{draftPlan.repositoryCommands?.length === 1 ? '' : 's'} in the isolated container; only mapped JUnit assertions can verify a criterion.</span></li> : null}
     {browser.length ? <li><strong>Delegate to Playwright worker · {browser.length} Scenario{browser.length === 1 ? '' : 's'}</strong><span>Approved-origin browser actions only; capture an encrypted screenshot after each completed step.</span></li> : null}
@@ -220,8 +221,10 @@ export function App({
   const [selectedGitRepository, setSelectedGitRepository] = useState<AdoGitRepository | undefined>(initialState?.target?.adoRepository ? { id: initialState.target.adoRepository.id, name: initialState.target.adoRepository.name } : undefined);
   const [selectedGitRef, setSelectedGitRef] = useState<AdoGitRef | undefined>(initialState?.target?.adoRepository ? { name: initialState.target.adoRepository.refName, objectId: initialState.target.adoRepository.commit } : undefined);
   const [draftPlan, setDraftPlan] = useState<DraftPlan>();
-  const [modelPreview, setModelPreview] = useState<ModelPayloadPreview>();
-  const [modelId, setModelId] = useState(initialState?.modelId ?? 'gpt-5.6-terra');
+  const [modelId, setModelId] = useState(initialState?.modelId ?? '');
+  const [modelProvider, setModelProvider] = useState<'openai' | 'anthropic' | 'openrouter'>(initialState?.modelProvider ?? 'openai');
+  const [providerModels, setProviderModels] = useState<ProviderModel[]>([]);
+  const [modelSearch, setModelSearch] = useState('');
   const [modelMaxOutputTokens, setModelMaxOutputTokens] = useState(initialState?.modelMaxOutputTokens ?? 1200);
   const [profileId, setProfileId] = useState('');
   const [profileName, setProfileName] = useState('');
@@ -231,7 +234,6 @@ export function App({
   const [profileTeam, setProfileTeam] = useState('');
   const [profileColumn, setProfileColumn] = useState('');
   const [profileStoryIds, setProfileStoryIds] = useState('');
-  const [modelIncludedCriteria, setModelIncludedCriteria] = useState<string[]>([]);
   const [runs, setRuns] = useState<Array<{ manifest: DraftPlan['manifest']; report?: import('@agentic-qa/domain/run').QAReport }>>([]);
   const [selectedRunId, setSelectedRunId] = useState('');
   const [selectedRun, setSelectedRun] = useState<NonNullable<Awaited<ReturnType<DesktopApi['getRun']>>>>();
@@ -266,7 +268,8 @@ export function App({
       setRepositorySource(next.target?.repositorySource ?? (next.target?.adoRepository ? 'ado-git' : 'local'));
       setSelectedGitRepository(next.target?.adoRepository ? { id: next.target.adoRepository.id, name: next.target.adoRepository.name } : undefined);
       setSelectedGitRef(next.target?.adoRepository ? { name: next.target.adoRepository.refName, objectId: next.target.adoRepository.commit } : undefined);
-      setModelId(next.modelId ?? 'gpt-5.6-terra');
+      setModelProvider(next.modelProvider ?? 'openai');
+      setModelId(next.modelId ?? '');
       setModelMaxOutputTokens(next.modelMaxOutputTokens ?? 1200);
       if (next.selectedProject) setWorkItemTypes(await api.listWorkItemTypes());
     }).catch((cause) => setError(errorMessage(cause)));
@@ -329,7 +332,8 @@ export function App({
       setSelectedGitRepository(next.target.adoRepository ? { id: next.target.adoRepository.id, name: next.target.adoRepository.name } : undefined);
       setSelectedGitRef(next.target.adoRepository ? { name: next.target.adoRepository.refName, objectId: next.target.adoRepository.commit } : undefined);
     }
-    setModelId(next.modelId ?? 'gpt-5.6-terra');
+      setModelProvider(next.modelProvider ?? 'openai');
+    setModelId(next.modelId ?? '');
     setModelMaxOutputTokens(next.modelMaxOutputTokens ?? 1200);
   }
 
@@ -421,7 +425,6 @@ export function App({
       if (target.targetKind !== 'site' && repositoryConfigDraft.trim()) await api.saveRepositoryConfigDraft({ target, content: repositoryConfigDraft });
       const plan = await api.createDraftPlan();
       setDraftPlan(plan);
-      setModelIncludedCriteria(plan.contract.criteria.filter(({ requiredLayers }) => requiredLayers.includes('browser')).map(({ id }) => id));
       setScreen('plan');
     });
   }
@@ -481,7 +484,6 @@ export function App({
 
   function updateCriterion(criterionId: string, expectedBehavior: string) {
     if (!draftPlan) return;
-    setModelPreview(undefined);
     setDraftPlan({ ...draftPlan, contract: {
       ...draftPlan.contract,
       criteria: draftPlan.contract.criteria.map((criterion) => criterion.id === criterionId ? { ...criterion, expectedBehavior } : criterion),
@@ -505,7 +507,6 @@ export function App({
       steps: layer === 'browser' ? [{ action: 'expectText' as const, text }] : [],
       expectedObservations: [text], risk: 'medium' as const, approved: false,
     }];
-    setModelPreview(undefined);
     setDraftPlan({ ...draftPlan, contract: {
       ...draftPlan.contract, criteria, scenarios,
       taskCandidates: draftPlan.contract.taskCandidates.map((item) => item.id === candidateId ? { ...item, disposition: 'ACCEPTED', criterionId } : item),
@@ -517,31 +518,8 @@ export function App({
     setDraftPlan({ ...draftPlan, contract: { ...draftPlan.contract, taskCandidates: draftPlan.contract.taskCandidates.map((item) => item.id === candidateId ? { ...item, disposition: 'REJECTED', criterionId: undefined } : item) } });
   }
 
-  function toggleLayer(criterionId: string, layer: 'repo' | 'browser') {
-    if (!draftPlan) return;
-    setModelPreview(undefined);
-    const criterion = draftPlan.contract.criteria.find(({ id }) => id === criterionId);
-    if (!criterion) return;
-    const remove = criterion.requiredLayers.includes(layer);
-    const scenarioId = `${criterionId}-${layer}`;
-    const criteria = draftPlan.contract.criteria.map((item) => item.id !== criterionId ? item : {
-      ...item,
-      requiredLayers: remove ? item.requiredLayers.filter((required) => required !== layer) : [...item.requiredLayers, layer],
-      scenarioIds: remove ? item.scenarioIds.filter((id) => id !== scenarioId) : [...item.scenarioIds, scenarioId],
-    });
-    const scenarios = remove
-      ? draftPlan.contract.scenarios.filter(({ id }) => id !== scenarioId)
-      : [...draftPlan.contract.scenarios, {
-          id: scenarioId, criterionIds: [criterionId], layer, preconditions: [],
-          steps: layer === 'browser' ? [{ action: 'expectText' as const, text: criterion.expectedBehavior }] : [],
-          expectedObservations: [criterion.expectedBehavior], risk: 'medium' as const, approved: false,
-        }];
-    setDraftPlan({ ...draftPlan, contract: { ...draftPlan.contract, criteria, scenarios } });
-  }
-
   function updateScenarioStep(scenarioId: string, index: number, step: Scenario['steps'][number]) {
     if (!draftPlan) return;
-    setModelPreview(undefined);
     setDraftPlan({ ...draftPlan, contract: {
       ...draftPlan.contract,
       scenarios: draftPlan.contract.scenarios.map((scenario) => scenario.id !== scenarioId ? scenario : {
@@ -553,13 +531,11 @@ export function App({
 
   function addScenarioStep(scenarioId: string) {
     if (!draftPlan) return;
-    setModelPreview(undefined);
     setDraftPlan({ ...draftPlan, contract: { ...draftPlan.contract, scenarios: draftPlan.contract.scenarios.map((scenario) => scenario.id === scenarioId && scenario.steps.length < 100 ? { ...scenario, steps: [...scenario.steps, blankStep('expectText')] } : scenario) } });
   }
 
   function removeScenarioStep(scenarioId: string, index: number) {
     if (!draftPlan) return;
-    setModelPreview(undefined);
     setDraftPlan({ ...draftPlan, contract: { ...draftPlan.contract, scenarios: draftPlan.contract.scenarios.map((scenario) => scenario.id === scenarioId ? { ...scenario, steps: scenario.steps.filter((_, candidateIndex) => candidateIndex !== index) } : scenario) } });
   }
 
@@ -589,11 +565,32 @@ export function App({
     });
   }
 
+  async function connectProvider() {
+    await run(async () => {
+      const imported = await api.importProviderKey(modelProvider);
+      if (!imported) { setNotice('Provider key import canceled.'); return; }
+      const models = await api.listProviderModels(modelProvider);
+      setProviderModels(models);
+      const priorModel = modelProvider === state.modelProvider ? state.modelId ?? '' : '';
+      updateState(await api.getState());
+      setModelId(models.some(({ modelId: id }) => id === priorModel) ? priorModel : '');
+      setNotice(`${modelProvider === 'openai' ? 'OpenAI' : modelProvider === 'anthropic' ? 'Anthropic' : 'OpenRouter'} connected. ${models.length} supported models discovered.`);
+    });
+  }
+
+  async function discoverProviderModels() {
+    await run(async () => {
+      const models = await api.listProviderModels(modelProvider);
+      setProviderModels(models);
+      setNotice(`${models.length} supported models discovered.`);
+    });
+  }
+
   async function saveModelSettings() {
     await run(async () => {
-      await api.saveModelSettings({ model: modelId.trim(), maxOutputTokens: modelMaxOutputTokens });
+      await api.saveAgentModelSettings({ providerId: modelProvider, modelId: modelId.trim(), maxOutputTokens: modelMaxOutputTokens });
       updateState(await api.getState());
-      setNotice('Provider model and output-token limit saved locally.');
+      setNotice('Required agent provider, model and output-token limit saved locally.');
     });
   }
 
@@ -635,45 +632,10 @@ export function App({
     setProfileStoryIds(profile.storyIds.join(', '));
   }
 
-  async function previewModelRequest() {
-    if (!draftPlan) return;
-    await run(async () => {
-      setModelPreview(await api.previewModelRequest(draftPlan.manifest.runId, modelIncludedCriteria));
-      setNotice('Review the exact payload below. No provider request has been sent.');
-    });
-  }
-
-  async function sendApprovedModelRequest() {
-    if (!draftPlan || !modelPreview) return;
-    await run(async () => {
-      const suggested = await api.generateModelSuggestions(modelPreview.previewId);
-      const added = suggested.contract.scenarios.filter(({ id }) => id.startsWith('ai-'));
-      setDraftPlan((current) => {
-        if (!current) return suggested;
-        const byCriterion = new Map(added.flatMap((scenario) => scenario.criterionIds.map((criterionId) => [criterionId, scenario.id] as const)));
-        return {
-          ...current,
-          manifest: suggested.manifest,
-          notes: [...current.notes, ...suggested.notes.filter((note) => !current.notes.includes(note))],
-          contract: {
-            ...current.contract,
-            criteria: current.contract.criteria.map((criterion) => ({ ...criterion, scenarioIds: [...criterion.scenarioIds, ...(byCriterion.has(criterion.id) ? [byCriterion.get(criterion.id)!] : [])] })),
-            scenarios: [...current.contract.scenarios, ...added],
-          },
-        };
-      });
-      setModelPreview(undefined);
-      updateState(await api.getState());
-      setNotice(`${added.length} untrusted scenario suggestion${added.length === 1 ? '' : 's'} added for review. The model did not execute checks or set a verdict.`);
-    });
-  }
-
   async function refreshPlan() {
     await run(async () => {
       const plan = await api.createDraftPlan();
       setDraftPlan(plan);
-      setModelIncludedCriteria(plan.contract.criteria.filter(({ requiredLayers }) => requiredLayers.includes('browser')).map(({ id }) => id));
-      setModelPreview(undefined);
     });
   }
 
@@ -681,8 +643,6 @@ export function App({
     await run(async () => {
       const plan = await api.createDraftPlan(runId);
       setDraftPlan(plan);
-      setModelIncludedCriteria(plan.contract.criteria.filter(({ requiredLayers }) => requiredLayers.includes('browser')).map(({ id }) => id));
-      setModelPreview(undefined);
       setSelectedRunId('');
       setSelectedRun(undefined);
       setScreen('plan');
@@ -802,7 +762,7 @@ export function App({
     });
   }
 
-  const screenTitle = navigation.find(({ id }) => id === screen)?.label ?? (screen === 'connections' ? 'Sign in' : screen === 'project' ? 'Organization' : screen === 'run-setup' ? 'New run' : screen === 'plan' ? 'Plan review' : 'Workspace');
+  const screenTitle = navigation.find(({ id }) => id === screen)?.label ?? (screen === 'settings' ? 'Settings' : screen === 'connections' ? 'Sign in' : screen === 'project' ? 'Organization' : screen === 'run-setup' ? 'New run' : screen === 'plan' ? 'Plan review' : 'Workspace');
   const activeNavigation = screen === 'run-setup' || screen === 'plan' ? 'history' : screen === 'project' ? 'work-items' : screen;
 
   return (
@@ -813,7 +773,7 @@ export function App({
           <div className="brand-name"><strong>Agentic QA</strong><span>LOCAL QA WORKSPACE</span></div>
         </div>
         <div className="nav-caption">WORKSPACE</div>
-        <nav aria-label="Main navigation">
+        <nav aria-label="Workspace navigation">
           {navigation.map((item) => (
             <button
               type="button"
@@ -830,6 +790,14 @@ export function App({
           ))}
         </nav>
         <div className="sidebar-bottom">
+          <button
+            type="button"
+            className={`nav-item sidebar-settings ${activeNavigation === 'settings' ? 'selected' : ''}`}
+            aria-current={activeNavigation === 'settings' ? 'page' : undefined}
+            onClick={() => setScreen('settings')}
+          >
+            <span>Settings</span>
+          </button>
           <div className="privacy-mark"><span>●</span> Stored on this device</div>
           <div className="version-mark">Version 1.0 · Local</div>
         </div>
@@ -929,8 +897,8 @@ export function App({
                 {targetKind !== 'site' ? <details className="target-block"><summary>Advanced repository command settings</summary><p className="field-help">Most repositories need no manual setup. Agentic QA detects a root npm test script automatically. Use custom JSON only when you need to select another command or exact JUnit mappings.</p><div className="panel-title-row"><div><strong>Custom repository configuration</strong><p className="field-help">Stored encrypted with this app; it does not change repository files.</p></div><button className="button outline" type="button" disabled={busy || (repositorySource === 'local' ? !repositoryPath : !selectedGitRepository || !selectedGitRef)} onClick={() => void loadRepositoryConfigDraft()}>{repositoryConfigDraft ? 'Reload configuration' : 'Load configuration starter'}</button></div>{repositoryConfigDraft ? <><textarea className="contract-textarea payload-preview" aria-label="Repository configuration JSON" value={repositoryConfigDraft} onChange={(event) => setRepositoryConfigDraft(event.target.value)} /><div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void saveRepositoryConfigOnly()}>Save local configuration</button></div></> : null}</details> : null}
                 {targetKind !== 'repository' ? <div className="target-block"><label className="field-label" htmlFor="site-url">Development or staging URL</label><input id="site-url" className="text-input" value={siteBaseUrl} onChange={(event) => setSiteBaseUrl(event.target.value)} placeholder="https://staging.example.test" /><p className="field-help">Only the origin in this URL will be approved for the browser worker. Production URLs are not recommended.</p></div> : null}
                 {targetKind !== 'repository' ? <div className="target-block"><div className="queue-toolbar"><div><strong>Local Chromium browser</strong><span>{browserInstalled ? 'Installed and ready' : 'Required for site checks; downloads to this device (about 300 MB).'}</span></div><button className="button outline" type="button" disabled={busy || browserInstalled} onClick={() => void installBrowser()}>{busy ? 'Installing…' : browserInstalled ? 'Installed' : 'Install browser'}</button></div></div> : null}
-                {targetKind !== 'site' ? <div className="target-block"><div className="queue-toolbar"><div><strong>Docker repository worker</strong><span>{repoWorkerInstalled ? 'Worker image installed' : 'Docker Desktop required; prepares the local Node 22 worker image.'}</span></div><button className="button outline" type="button" disabled={busy || repoWorkerInstalled} onClick={() => void installRepoWorker()}>{busy ? 'Preparing…' : repoWorkerInstalled ? 'Installed' : 'Prepare worker'}</button></div></div> : null}
-                <div className="button-row"><button className="button primary" type="button" disabled={busy || !state.queue.length || (targetKind !== 'repository' && !siteBaseUrl.trim()) || (targetKind !== 'site' && (repositorySource === 'local' ? !repositoryPath : !selectedGitRepository || !selectedGitRef))} onClick={() => void saveRunTarget()}>{busy ? 'Preparing…' : 'Review local plan'}</button></div>
+                {targetKind !== 'site' ? <div className="target-block"><div className="queue-toolbar"><div><strong>Docker repository worker</strong><span>{repoWorkerInstalled ? 'Worker image installed' : 'Docker Desktop required; prepares the pinned Node 22 and .NET 10 worker image.'}</span></div><button className="button outline" type="button" disabled={busy || repoWorkerInstalled} onClick={() => void installRepoWorker()}>{busy ? 'Preparing…' : repoWorkerInstalled ? 'Installed' : 'Prepare worker'}</button></div></div> : null}
+                <div className="button-row"><button className="button primary" type="button" disabled={busy || !state.queue.length || !state.modelProviderConfigured || !state.modelId || (targetKind !== 'repository' && !siteBaseUrl.trim()) || (targetKind !== 'site' && (repositorySource === 'local' ? !repositoryPath : !selectedGitRepository || !selectedGitRef))} onClick={() => void saveRunTarget()}>{busy ? 'Preparing…' : 'Prepare agentic QA plan'}</button>{!state.modelProviderConfigured || !state.modelId ? <span className="field-help">Configure a provider and supported model in Settings first.</span> : null}</div>
               </div>
             </section>
           ) : null}
@@ -946,14 +914,13 @@ export function App({
               {draftPlan?.contract.taskCandidates?.length ? <div className="panel command-preview"><div className="panel-title-row"><div><h2>Task descriptions · scope context</h2><p>Each description is tied to its ADO revision. Promote a Task into a candidate check only after reviewing it; a Task does not establish its parent Requirement’s Acceptance Criteria.</p></div></div>{draftPlan.contract.taskCandidates.map((candidate) => <div className="command-preview-row" key={candidate.id}><strong>ADO Task #{candidate.source.workItemId} · {candidate.disposition.toLocaleLowerCase('en-US')}</strong><p>{candidate.text}</p><small>{candidate.source.field} · revision {candidate.source.revision}</small>{candidate.disposition === 'PROPOSED' ? <div className="button-row"><button className="button outline" type="button" onClick={() => promoteTaskCandidate(candidate.id)}>Add as candidate criterion</button><button className="text-button" type="button" onClick={() => rejectTaskCandidate(candidate.id)}>Ignore this Task</button></div> : candidate.disposition === 'ACCEPTED' ? <small>Linked to candidate criterion {candidate.criterionId}. Review its checks below.</small> : null}</div>)}</div> : null}
               {draftPlan?.repositoryCommands?.length ? <div className="panel command-preview"><div className="panel-title-row"><div><h2>Repository commands</h2><p>Exact argument arrays run inside the isolated worker, with networking disabled.</p></div><button className="button outline" type="button" disabled={busy} onClick={() => void refreshPlan()}>Refresh after config edits</button></div>{draftPlan.repositoryCommands.map((command) => <div className="command-preview-row" key={command.id}><strong>{command.label} · {command.timeoutSeconds}s</strong><code>{command.executable} {command.arguments.map((argument) => JSON.stringify(argument)).join(' ')}</code><small>Directory: {command.workingDirectory} · Results: {command.resultFormat ?? 'none'}{command.scenarioMappings.length ? ` · Scenarios: ${command.scenarioMappings.map(({ scenarioId, testCaseIds }) => `${scenarioId} ← ${testCaseIds.join(', ')}`).join('; ')}` : ' · diagnostic only'}</small></div>)}</div> : null}
               {draftPlan?.manifest.targetKind !== 'site' ? <div className="panel command-preview"><div className="panel-title-row"><div><h2>Local repository configuration</h2><p>Use the plan’s Repository Scenario IDs in each JUnit command’s scenarioMappings. A command without a mapping is diagnostic and cannot prove acceptance criteria.</p></div><button className="button outline" type="button" disabled={busy} onClick={() => void loadRepositoryConfigDraft()}>Load saved JSON</button></div>{repositoryConfigDraft ? <><textarea className="contract-textarea payload-preview" aria-label="Repository configuration JSON for mapping scenarios" value={repositoryConfigDraft} onChange={(event) => setRepositoryConfigDraft(event.target.value)} /><div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void saveRepositoryConfigAndRefreshPlan()}>Save and refresh plan</button></div></> : <p className="field-help">Load the saved configuration to map exact JUnit testcase IDs to the reviewed scenarios.</p>}</div> : null}
-              <div className="disclosure-card"><div className="disclosure-icon">✓</div><div><strong>{state.modelProviderConfigured ? 'Provider is optional and approval-gated' : 'Disclosure preview: no transmission'}</strong><p>{state.modelProviderConfigured ? 'The local draft makes no provider request. You choose criteria, inspect the exact payload, then approve a separate request. Raw Task descriptions, repository files and artifacts stay local; a promoted Task-derived criterion can include the text you explicitly accepted.' : 'Source: local encrypted ADO queue snapshots. Files included: none. Provider key is not configured. No model request is sent.'}</p></div></div>
-              {state.modelProviderConfigured ? <div className="target-block"><strong>Choose criteria to disclose</strong><p className="field-help">Only checked browser criterion text is sent. A promoted Task-derived candidate is labeled here; preview the exact request before approving it.</p><div className="model-criteria-list">{draftPlan?.contract.criteria.filter(({ requiredLayers }) => requiredLayers.includes('browser')).map((criterion) => <label key={criterion.id}><input type="checkbox" disabled={Boolean(modelPreview)} checked={modelIncludedCriteria.includes(criterion.id)} onChange={(event) => { setModelPreview(undefined); setModelIncludedCriteria((current) => event.target.checked ? [...current, criterion.id] : current.filter((id) => id !== criterion.id)); }} />{'userAdded' in criterion.source && criterion.source.derivedFrom ? `Task #${criterion.source.derivedFrom.workItemId} candidate: ` : ''}{criterion.expectedBehavior}</label>)}</div><div className="button-row"><button className="button outline" type="button" disabled={busy || !modelIncludedCriteria.length} onClick={() => void previewModelRequest()}>Preview AI request</button></div></div> : null}
-              {modelPreview ? <div className="panel command-preview"><div className="panel-title-row"><div><h2>Exact provider payload · no request sent yet</h2><p>OpenAI · {modelPreview.model} · estimated input ≤ {modelPreview.estimatedInputTokens.toLocaleString()} tokens · maximum output {modelPreview.maxOutputTokens.toLocaleString()} tokens. Review acceptance-criteria text and prompt before approving.</p></div><button className="text-button" type="button" onClick={() => setModelPreview(undefined)}>Discard preview</button></div><textarea className="contract-textarea payload-preview" aria-label="Exact provider payload" readOnly value={JSON.stringify(modelPreview.requestBody, null, 2)} /><div className="button-row"><button className="button primary" type="button" disabled={busy} onClick={() => void sendApprovedModelRequest()}>Approve this payload and send to OpenAI</button></div></div> : null}
+              <div className="disclosure-card"><div className="disclosure-icon">✓</div><div><strong>One approval covers this agentic run envelope</strong><p>After approval, the configured provider receives the selected Story and Task content, Acceptance Criteria, task links, selected file-scope patterns, approved site origin, and command IDs. If the Orchestrator selects repository coverage, a bounded, secret-filtered sample of approved text source files is also sent to the backend specialist to write tests. Environment files, credential files and known secret-shaped values are excluded or redacted. No provider request occurs before approval.</p></div></div>
+              {draftPlan?.envelopePreview ? <div className="panel command-preview"><div className="panel-title-row"><div><h2>Approved context and limits</h2><p>{draftPlan.envelopePreview.providerId} / {draftPlan.envelopePreview.modelId} · estimated cost ceiling ${draftPlan.envelopePreview.budget.maxCostUsd.toFixed(2)} · {draftPlan.envelopePreview.budget.maxProviderCalls} provider calls · {draftPlan.envelopePreview.budget.maxAgents} agents · {draftPlan.envelopePreview.budget.maxRunSeconds}s</p></div></div><p className="field-help">Sources and revisions: {Object.entries(draftPlan.envelopePreview.sourceRevisions).map(([key, revision]) => `${key} r${revision}`).join(' · ')}</p><p className="field-help">Repository scope: {draftPlan.envelopePreview.repositoryPaths.join(', ') || 'not selected'} · Commands: {draftPlan.envelopePreview.commandIds.join(', ') || 'none'} · Approved origins: {draftPlan.envelopePreview.allowedOrigins.join(', ') || 'none'}</p></div> : null}
               <div className="criteria-list">{draftPlan?.contract.criteria.map((criterion) => <article className="criterion-card" key={criterion.id}>
                 <div className="criterion-source"><span>ADO #{criterion.source && 'workItemId' in criterion.source ? criterion.source.workItemId : 'Local'}</span><span>revision {criterion.source && 'revision' in criterion.source ? criterion.source.revision : '—'}</span><span>{criterion.source && 'field' in criterion.source ? criterion.source.field : 'User-added'}</span></div>
                 <label className="field-label" htmlFor={`criterion-${criterion.id}`}>Expected behavior</label>
                 <textarea id={`criterion-${criterion.id}`} className="contract-textarea" value={criterion.expectedBehavior} onChange={(event) => updateCriterion(criterion.id, event.target.value)} />
-                <div className="required-layers"><span className="field-label">Required evidence layers</span>{(['repo', 'browser'] as const).map((layer) => <label key={layer}><input type="checkbox" checked={criterion.requiredLayers.includes(layer)} disabled={criterion.requiredLayers.length === 1 && criterion.requiredLayers.includes(layer)} onChange={() => toggleLayer(criterion.id, layer)} />{layer === 'repo' ? 'Repository' : 'Browser'}</label>)}</div>
+                <div className="required-layers"><span className="field-label">Evidence plan</span><span>The Orchestrator will select repository, browser or both coverage from the Acceptance Criterion, linked Tasks, and approved target.</span></div>
                 {criterion.scenarioIds.map((scenarioId) => {
                   const scenario = draftPlan.contract.scenarios.find(({ id }) => id === scenarioId);
                   if (!scenario) return null;
@@ -961,14 +928,14 @@ export function App({
                 })}
               </article>)}{draftPlan && !draftPlan.contract.criteria.length ? <div className="empty-card"><strong>No source acceptance criteria were found</strong><p>This plan cannot be approved as a passing run. Add or clarify a Requirement with acceptance criteria first.</p></div> : null}</div>
               {draftPlan?.manifest.targetKind !== 'site' ? <details className="panel command-preview"><summary>Advanced: custom repository configuration</summary><p>Only edit this when automatic test discovery selected the wrong command or you need exact JUnit mappings. A command without exact mappings is diagnostic and cannot verify an Acceptance Criterion.</p><div className="panel-title-row"><div><h2>Local repository configuration</h2><p>Saved encrypted in this app; the repository is not modified.</p></div><button className="button outline" type="button" disabled={busy} onClick={() => void loadRepositoryConfigDraft()}>Load saved JSON</button></div>{repositoryConfigDraft ? <><textarea className="contract-textarea payload-preview" aria-label="Repository configuration JSON for advanced repository settings" value={repositoryConfigDraft} onChange={(event) => setRepositoryConfigDraft(event.target.value)} /><div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void saveRepositoryConfigAndRefreshPlan()}>Save and refresh plan</button></div></> : <p className="field-help">Custom JSON is optional. Normal npm projects are detected without it.</p>}</details> : null}
-              <div className="queue-toolbar"><div><strong>Run manifest preview</strong><span>{draftPlan?.manifest.targetKind} · {draftPlan?.manifest.sources.length} source snapshots · {draftPlan?.manifest.siteBaseUrl ?? 'No site URL'}{draftPlan?.manifest.repositorySource?.kind === 'ado-git' ? ` · ${draftPlan.manifest.repositorySource.refName} @ ${draftPlan.manifest.sourceCommit?.slice(0, 12)}` : draftPlan?.manifest.repositorySource?.kind === 'local' ? ` · local tree ${draftPlan.manifest.localGitState ?? 'state unavailable'}` : ''}</span></div><button className="button primary" type="button" disabled={busy || !draftPlan?.contract.criteria.length || draftPlan?.contract.criteria.some((criterion) => !criterion.expectedBehavior.trim())} onClick={() => void approvePlan()}>{busy ? 'Saving…' : 'Approve contract and save run'}</button></div>
+              <div className="queue-toolbar"><div><strong>Run context and evidence scope</strong><span>{draftPlan?.manifest.targetKind} · {draftPlan?.manifest.sources.length} source snapshots · {draftPlan?.manifest.siteBaseUrl ?? 'No site URL'} · {state.modelProvider} / {state.modelId}{draftPlan?.manifest.repositorySource?.kind === 'ado-git' ? ` · ${draftPlan.manifest.repositorySource.refName} @ ${draftPlan.manifest.sourceCommit?.slice(0, 12)}` : draftPlan?.manifest.repositorySource?.kind === 'local' ? ` · local tree ${draftPlan.manifest.localGitState ?? 'state unavailable'}` : ''}</span></div><button className="button primary" type="button" disabled={busy || !draftPlan?.contract.criteria.length || draftPlan?.contract.criteria.some((criterion) => !criterion.expectedBehavior.trim())} onClick={() => void approvePlan()}>{busy ? 'Saving…' : 'Approve reviewed QA scope'}</button></div>
             </section>
           ) : null}
 
           {screen === 'settings' ? (
             <section className="page-section">
               <div className="page-heading"><div><p className="eyebrow">PREFERENCES</p><h1>Settings</h1></div></div>
-              <p className="page-description">Manage your Azure DevOps account, saved organizations, and optional local planning assistance.</p>
+              <p className="page-description">Manage your Azure DevOps account and required agent provider. QA runs cannot start until a supported provider and model are configured.</p>
               <div className="panel selection-panel">
                 <div className="panel-title-row"><div><h2>Azure DevOps account</h2><p>Authentication runs through Azure CLI in your system browser. Access is read-only.</p></div><span className="security-tag">{state.selectedAccountId ? 'CONNECTED' : 'NOT CONNECTED'}</span></div>
                 {state.accounts.map((account) => <div className="account-row" key={account.homeAccountId}><span className="account-avatar">{(account.displayName ?? account.username).slice(0, 1).toUpperCase()}</span><div><strong>{account.displayName ?? account.username}{state.selectedAccountId === account.homeAccountId ? ' · Active' : ''}</strong><span>{account.username}</span></div>{state.selectedAccountId === account.homeAccountId ? <button className="button quiet" type="button" disabled={busy} onClick={() => void run(() => api.signOut(account.homeAccountId), updateState)}>Disconnect</button> : <button className="button quiet" type="button" disabled={busy} onClick={() => void run(() => api.selectAccount(account.homeAccountId), updateState)}>Use account</button>}</div>)}
@@ -992,10 +959,12 @@ export function App({
                 {state.savedOrganizations?.length ? <div className="saved-organizations">{state.savedOrganizations.map((name) => <span className="context-pill" key={name}>{name}</span>)}</div> : <p className="field-help">No organizations saved yet.</p>}
               </div>
               <div className="panel selection-panel model-settings">
-                <div className="panel-title-row"><div><h2>Optional AI scenario suggestions</h2><p>{state.modelProviderConfigured ? 'OpenAI is configured. Requests require a separate payload review and approval.' : 'Local deterministic planning works without an API key.'}</p></div></div>
-                <div className="filters-row settings-fields"><label>OpenAI model<input className="text-input" value={modelId} maxLength={80} onChange={(event) => setModelId(event.target.value)} placeholder="gpt-5.6-terra" /></label><label>Max output tokens<input className="text-input" type="number" min={256} max={4096} step={128} value={modelMaxOutputTokens} onChange={(event) => setModelMaxOutputTokens(Number(event.target.value))} /></label></div>
-                <div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void saveModelSettings()}>Save provider settings</button>{state.modelProviderConfigured ? <button className="button outline" type="button" disabled={busy} onClick={() => void run(async () => { await api.clearModelKey(); updateState(await api.getState()); setNotice('OpenAI key removed from encrypted local storage.'); })}>Remove API key</button> : <button className="button outline" type="button" disabled={busy} onClick={() => void importModelKey()}>Import API key file…</button>}</div>
-                <small>Import a private plain-text file containing one API key. The main process stores it encrypted; the key is never returned to the renderer or sent to workers. ADO text is sent only after preview and approval.</small>
+                <div className="panel-title-row"><div><h2>Required AI agent provider</h2><p>{state.modelProviderConfigured ? `${modelProvider === 'openai' ? 'OpenAI' : modelProvider === 'anthropic' ? 'Anthropic' : 'OpenRouter'} API key is stored locally. The key is never returned to the renderer or sent to workers.` : 'Connect a provider before planning or running QA. No deterministic plan fallback is available.'}</p></div><span className="security-tag">{state.modelProviderConfigured ? 'CONNECTED' : 'REQUIRED'}</span></div>
+                <div className="filters-row settings-fields"><label>Provider<select className="text-input" value={modelProvider} onChange={(event) => { const next = event.target.value as 'openai' | 'anthropic' | 'openrouter'; setModelProvider(next); setProviderModels([]); setModelId(''); }}><option value="openai">OpenAI API</option><option value="anthropic">Anthropic API key</option><option value="openrouter">OpenRouter API key · multi-model catalog</option></select></label><button className="button outline" type="button" disabled={busy} onClick={() => void connectProvider()}>Import key and discover models…</button></div>
+                <div className="filters-row settings-fields"><label>Search models<input className="text-input" type="search" value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} placeholder="Search discovered models" /></label><label>Supported model<select className="text-input" value={modelId} onChange={(event) => setModelId(event.target.value)}><option value="">Choose a supported model</option>{providerModels.filter(({ displayName, modelId: id }) => `${displayName} ${id}`.toLocaleLowerCase().includes(modelSearch.toLocaleLowerCase())).map(({ modelId: id, displayName, capabilities }) => <option key={id} value={id}>{displayName} · {id} · ${capabilities.inputUsdPerMillionTokens ?? '?'} / ${capabilities.outputUsdPerMillionTokens ?? '?'} per 1M tokens</option>)}</select></label><label>Max output tokens<input className="text-input" type="number" min={256} max={32000} step={256} value={modelMaxOutputTokens} onChange={(event) => setModelMaxOutputTokens(Number(event.target.value))} /></label></div>
+                <div className="button-row"><button className="button outline" type="button" disabled={busy || !state.modelProviderConfigured} onClick={() => void discoverProviderModels()}>Refresh model list</button><button className="button primary" type="button" disabled={busy || !state.modelProviderConfigured || !modelId} onClick={() => void saveModelSettings()}>Save required agent model</button></div>
+                {state.modelProviderConfigured ? <button className="button quiet" type="button" disabled={busy} onClick={() => void run(async () => { await api.clearModelKey(); setProviderModels([]); setModelId(''); updateState(await api.getState()); setNotice('Provider key and selected agent model removed from encrypted local storage.'); })}>Remove provider connection</button> : null}
+                <small>Choose a private one-line key file in the native picker. The main process reads it, stores it in encrypted local settings, and never sends it to the renderer. Model discovery lists models that report structured output, tool use and pricing. OpenRouter provides a broad catalog behind one key. This release accepts Anthropic API keys; a Claude Pro/Max subscription requires a separate Claude Code CLI adapter and is not connected here.</small>
               </div>
             </section>
           ) : null}
@@ -1004,10 +973,24 @@ export function App({
             <section className="page-section">
               <div className="page-heading"><div><p className="eyebrow">LOCAL RECORDS</p><h1>Run history</h1></div><button className="button outline" type="button" disabled={busy} onClick={() => void openHistory()}>Refresh</button></div>
               <p className="page-description">Approved run manifests and source evidence remain immutable. Reviewer decisions are appended and shown as the current verdict.</p>
-              <div className="queue-list">{runs.map(({ manifest, report }) => <button type="button" className="history-row" key={manifest.runId} onClick={() => void openRun(manifest.runId)}><span className="queue-index">{manifest.startedAt.slice(0, 10)}</span><span className="project-name"><strong>{manifest.targetKind} · {manifest.sources.length} source snapshots</strong><small>Run {manifest.runId}</small></span><span className="verdict-badge">{report ? `${report.executionState} · ${report.verdict}` : selectedRunId === manifest.runId ? 'Manifest saved' : 'Not started'}</span></button>)}{!runs.length ? <div className="empty-card"><span className="empty-icon">◷</span><strong>No saved runs yet</strong><p>Approve a reviewed local plan to create the first immutable manifest.</p><button className="button outline" type="button" onClick={() => setScreen('run-setup')}>Set up a run</button></div> : null}</div>
+              <div className="queue-list">{runs.map(({ manifest, report }) => <button type="button" className="history-row" key={manifest.runId} onClick={() => void openRun(manifest.runId)}><span className="queue-index">{manifest.startedAt.slice(0, 10)}</span><span className="project-name"><strong>{manifest.targetKind} · {manifest.sources.length} source snapshots</strong><small>Run {manifest.runId}</small></span><span className="verdict-badge">{report ? `${report.executionState} · ${report.verdict}` : selectedRunId === manifest.runId ? 'Manifest saved' : 'Not started'}</span></button>)}{!runs.length ? <div className="empty-card"><span className="empty-icon">◷</span><strong>No saved runs yet</strong><p>Approve an Orchestrator plan to create the first immutable manifest.</p><button className="button outline" type="button" onClick={() => setScreen('run-setup')}>Set up a run</button></div> : null}</div>
               {selectedRun ? <div className="panel report-preview">
                 {(() => { const report = selectedRun.reviewedReport ?? selectedRun.report; return <>
                 <div className="panel-title-row"><div><h2>{report ? 'Local report preview' : 'Approved run manifest'}</h2><p>{report ? `${report.executionState} · ${report.verdict}${selectedRun.reviewedReport ? ' · reviewed' : ''}` : 'Ready to execute'}</p></div></div>
+                {selectedRun.delegationDiagram && selectedRun.delegationPlan ? <div className="delegation-diagram" aria-label="Generated agent delegation diagram">
+                  <div className="delegation-orchestrator"><span>Orchestrator</span></div>
+                  <div className="delegation-branches">{selectedRun.delegationPlan.assignments.map((assignment) => {
+                    const node = selectedRun.delegationDiagram!.nodes.find(({ id }) => id === `agent:${assignment.id}`);
+                    const result = selectedRun.delegationDiagram!.nodes.find(({ id }) => id === `result:${assignment.id}`);
+                    const delegated = selectedRun.delegationDiagram!.edges.some(({ from, to }) => from === 'orchestrator' && to === `agent:${assignment.id}`);
+                    return delegated ? <div className="delegation-branch" key={assignment.id}><span className="delegation-arrow" aria-hidden="true">↓</span><div className={`delegation-agent status-${assignment.status}`}><strong>{node?.label ?? assignment.label}</strong><small>{assignment.layer} · {assignment.status}</small></div><span className="delegation-arrow" aria-hidden="true">↓</span><div className="delegation-result"><strong>{result?.label ?? assignment.resultTypes.join(' · ')}</strong><small>{assignment.evidenceIds.length} evidence reference(s)</small></div></div> : null;
+                  })}</div>
+                  {selectedRun.delegationDiagram.nodes.some(({ id }) => id === 'agent:reviewer') ? <><span className="delegation-arrow" aria-hidden="true">↓</span><div className={`delegation-agent status-${selectedRun.delegationDiagram.nodes.find(({ id }) => id === 'agent:reviewer')?.status ?? 'queued'}`}><strong>Evidence Reviewer</strong><small>{selectedRun.delegationDiagram.nodes.find(({ id }) => id === 'agent:reviewer')?.status ?? 'queued'}</small></div></> : null}
+                  <span className="delegation-arrow" aria-hidden="true">↓</span><div className="delegation-summary"><strong>{selectedRun.delegationDiagram.nodes.find(({ id }) => id === 'summary')?.label ?? 'Findings, proof and summary'}</strong></div>
+                  <p className="field-help">Provider plan: {selectedRun.delegationPlan.summary}{selectedRun.agentUsage ? ` · ${selectedRun.agentUsage.providerCalls} calls · ${selectedRun.agentUsage.inputTokens + selectedRun.agentUsage.outputTokens} tokens · estimated $${selectedRun.agentUsage.costUsd.toFixed(4)}` : ''}</p>
+                  {selectedRun.agentSummary ? <pre className="agent-summary">{selectedRun.agentSummary}</pre> : null}
+                  {selectedRun.reviewerReport?.codeReview.length ? <section aria-label="AI generated test code review"><h3>Generated test code review</h3>{selectedRun.reviewerReport.codeReview.map((item, index) => <div className="review-message" key={`${item.path}:${item.line}:${index}`}><strong>{item.severity.toLocaleUpperCase('en-US')} · {item.path}:{item.line}</strong><p>{item.comment}</p><small>Recommendation: {item.recommendation}</small></div>)}</section> : null}
+                </div> : null}
                 {runProgress.length ? <div className="run-progress" aria-label="Orchestrator and worker progress"><h3>Orchestrator and worker activity</h3><ol>{runProgress.map((event, index) => <li key={`${event.runId}:${index}`} className={`progress-${event.state.toLowerCase()}`}><span>{event.worker} · {event.stage}</span><strong>{event.state}</strong><p>{event.message}</p><time>{new Date(event.at).toLocaleTimeString()}</time></li>)}</ol></div> : null}
                 {report ? <>
                   <p className="report-explanation">{report.explanation}</p>
@@ -1037,8 +1020,10 @@ export function App({
                   {selectedRun.findings.some((finding) => !finding.humanOverride) ? <div className="review-panel"><h3>Reviewer classification</h3><p className="field-help">Reviewer decisions are appended; original observations and the first report remain preserved.</p><label className="field-label" htmlFor="review-finding">Finding</label><select id="review-finding" className="text-input" value={reviewFindingId} onChange={(event) => setReviewFindingId(event.target.value)}>{selectedRun.findings.filter((finding) => !finding.humanOverride).map((finding) => <option key={finding.id} value={finding.id}>{finding.kind} · {finding.rationale.slice(0, 100)}</option>)}</select><div className="filters-row"><label>Classification<select aria-label="Reviewer classification" value={reviewKind} onChange={(event) => setReviewKind(event.target.value as typeof reviewKind)}><option value="PRODUCT_FAILURE">Product failure</option><option value="TEST_FAILURE">Test failure</option><option value="ENVIRONMENT_FAILURE">Environment failure</option><option value="FLAKY_TEST">Flaky test</option><option value="AMBIGUOUS_REQUIREMENT">Ambiguous requirement</option></select></label><label>Reviewer<input className="text-input" value={reviewAuthor} maxLength={200} onChange={(event) => setReviewAuthor(event.target.value)} /></label></div><label className="field-label" htmlFor="review-reason">Reason</label><textarea id="review-reason" className="contract-textarea" value={reviewReason} maxLength={4000} onChange={(event) => setReviewReason(event.target.value)} /><div className="button-row"><button className="button primary" type="button" disabled={busy || !reviewFindingId || !reviewAuthor.trim() || !reviewReason.trim()} onClick={() => void classifySelectedFinding()}>Save reviewer classification</button></div></div> : null}
                   {selectedRun.findings.filter((finding) => finding.humanOverride).map((finding) => <div className="review-message" key={finding.id}>Reviewed by {finding.humanOverride!.author}: {finding.kind} — {finding.humanOverride!.reason}</div>)}
                 </> : <>
-                  <p className="field-help">The manifest and reviewed contract are immutable. Start the run to execute its approved checks and collect evidence.</p>
-                  <div className="button-row"><button className="button primary" type="button" disabled={busy || Boolean(activeRunId)} onClick={() => void startSelectedRun()}>{activeRunId ? 'Run in progress…' : 'Start approved run'}</button>{activeRunId ? <button className="button outline" type="button" onClick={() => void cancelSelectedRun()}>Cancel run</button> : null}</div>
+                  <p className="field-help">Review the generated Playwright scenarios and backend test source before authorizing execution. Repository tests are written only into the disposable worker snapshot and run through the approved JUnit command.</p>
+                  {selectedRun.repositoryTests?.length ? <div className="agent-generated-scenarios"><h3>Backend generated unit tests</h3>{selectedRun.repositoryTests.map((test, index) => <details className="command-preview" key={`${test.path}:${index}`}><summary>{test.path} · {test.scenarioIds.length} linked scenario(s)</summary><p className="field-help">JUnit command: {test.commandId} · expected test cases: {test.testCaseIds.join(', ')}</p><pre className="generated-test-source"><code>{test.content}</code></pre></details>)}</div> : null}
+                  {selectedRun.contract.scenarios.filter(({ layer }) => layer === 'browser').length ? <div className="agent-generated-scenarios">{selectedRun.contract.scenarios.filter(({ layer }) => layer === 'browser').map((scenario) => <details className="command-preview" key={scenario.id}><summary>{scenario.summary ?? scenario.id} · {scenario.risk} risk · {scenario.steps.length} Playwright steps</summary><p className="field-help">Acceptance criteria: {scenario.criterionIds.join(', ')}</p><ol>{scenario.steps.map((step, index) => <li key={`${scenario.id}-${index}`}><code>{JSON.stringify(step)}</code></li>)}</ol><p className="field-help">Expected evidence: {scenario.expectedObservations.join(' · ')}</p></details>)}</div> : null}
+                  <div className="button-row"><button className="button primary" type="button" disabled={busy || Boolean(activeRunId)} onClick={() => void startSelectedRun()}>{activeRunId ? 'Run in progress…' : 'Approve generated checks and start'}</button>{activeRunId ? <button className="button outline" type="button" onClick={() => void cancelSelectedRun()}>Cancel run</button> : null}</div>
                 </>}
                 </>; })()}
               </div> : null}

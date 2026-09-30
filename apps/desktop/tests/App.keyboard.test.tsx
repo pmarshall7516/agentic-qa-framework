@@ -85,6 +85,9 @@ describe('desktop keyboard navigation', () => {
       azureCliAvailable: true,
       accounts: [account],
       selectedAccountId: account.homeAccountId,
+      modelProvider: 'openai',
+      modelProviderConfigured: true,
+      modelId: 'gpt-6-luna',
       queue: [],
     };
     const snapshot = {
@@ -206,7 +209,7 @@ describe('desktop keyboard navigation', () => {
     const siteUrl = screen.getByRole('textbox', { name: 'Development or staging URL' });
     await tabTo(siteUrl);
     await user.keyboard('https://staging.example.test');
-    const reviewPlan = screen.getByRole('button', { name: 'Review local plan' });
+    const reviewPlan = screen.getByRole('button', { name: 'Prepare agentic QA plan' });
     await tabTo(reviewPlan);
     await user.keyboard('{Enter}');
     expect(await screen.findByRole('heading', { name: 'Review the QA plan' })).toBeTruthy();
@@ -217,10 +220,10 @@ describe('desktop keyboard navigation', () => {
     expect(screen.getByText('contoso / Portal')).toBeTruthy();
     expect(screen.getByText(/Tasks provide context; they do not verify their Story's acceptance criteria/)).toBeTruthy();
     expect(createDraftPlan).toHaveBeenCalledOnce();
-    const approve = screen.getByRole('button', { name: 'Approve contract and save run' });
+    const approve = screen.getByRole('button', { name: 'Approve reviewed QA scope' });
     await tabTo(approve);
     await user.keyboard('{Enter}');
-    const start = await screen.findByRole('button', { name: 'Start approved run' });
+    const start = await screen.findByRole('button', { name: 'Approve generated checks and start' });
     await tabTo(start);
     await user.keyboard('{Enter}');
     expect(await screen.findByText('VERIFIED · Search results remain visible after filtering.')).toBeTruthy();

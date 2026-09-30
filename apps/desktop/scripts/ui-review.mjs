@@ -52,6 +52,16 @@ try {
   await page.getByRole('button', { name: /Contoso/ }).click();
   await page.getByRole('button', { name: /Portal Experience/ }).click();
   await page.getByRole('heading', { name: 'Find work to verify' }).waitFor();
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('heading', { name: 'Settings' }).waitFor();
+  await page.getByRole('button', { name: 'Import key and discover models…' }).click();
+  await page.getByText('1 supported models discovered.').waitFor();
+  await page.getByLabel('Search models').fill('terra');
+  await page.getByLabel('Supported model').selectOption('gpt-5.6-terra');
+  await page.getByRole('button', { name: 'Save required agent model' }).click();
+  await page.getByText('Required agent provider, model and output-token limit saved locally.').waitFor();
+  await page.getByRole('button', { name: 'Work items' }).click();
+  await page.getByRole('heading', { name: 'Find work to verify' }).waitFor();
   await capture(page, '03-work-items');
   await capture(page, '03-work-items', 800);
   await page.getByLabel('Work item ID or title').fill('4821');
@@ -70,14 +80,16 @@ try {
   await page.getByRole('heading', { name: 'Set up a QA run' }).waitFor();
   await page.getByLabel('Development or staging URL').fill('https://staging.example.test');
   await capture(page, '05-run-setup');
-  await page.getByRole('button', { name: 'Review local plan' }).click();
+  await page.getByRole('button', { name: 'Prepare agentic QA plan' }).click();
   await page.getByRole('heading', { name: 'Review the QA plan' }).waitFor();
   await page.getByRole('heading', { name: 'Orchestrator plan' }).waitFor();
   await capture(page, '06-plan-review');
   await capture(page, '06-plan-review', 800);
-  await page.getByRole('button', { name: 'Approve contract and save run' }).click();
+  await page.getByRole('button', { name: 'Approve reviewed QA scope' }).click();
   await page.getByRole('heading', { name: 'Run history' }).waitFor();
-  await page.getByRole('button', { name: 'Start approved run' }).waitFor();
+  await page.getByRole('button', { name: 'Approve generated checks and start' }).click();
+  await page.getByText('Local report preview').waitFor();
+  await page.locator('.report-preview .panel-title-row p').filter({ hasText: 'COMPLETED' }).waitFor();
 
   const history = await openScenario('report');
   await history.getByRole('button', { name: 'Runs' }).click();
@@ -95,7 +107,7 @@ try {
 
   assert.deepEqual(consoleErrors, [], `Browser console errors: ${consoleErrors.join(' | ')}`);
   console.log(`Playwright UI review passed. Screenshots: ${screenshots}`);
-  console.log('Checked onboarding, organization/project selection, work search and child Tasks, Queue, run setup, plan approval, run history/report, Settings, 800px overflow, and browser errors.');
+  console.log('Checked onboarding, required provider/model discovery and search, organization/project selection, work search and child Tasks, Queue, run setup, agentic plan approval, execution/report, Settings, 800px overflow, and browser errors.');
 } finally {
   await browser?.close();
   await server.close();

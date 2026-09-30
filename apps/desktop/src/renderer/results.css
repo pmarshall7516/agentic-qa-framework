@@ -1,4 +1,17 @@
 .report-preview { margin-top: 16px; padding: 20px; }
+.delegation-diagram { margin: 1rem 0 1.5rem; padding: 1rem; border: 1px solid var(--line); border-radius: 14px; background: color-mix(in srgb, var(--surface) 86%, var(--accent) 14%); text-align: center; }
+.delegation-orchestrator { display: grid; width: 90px; height: 90px; margin: 0 auto; place-items: center; border: 2px solid var(--accent); border-radius: 50%; background: var(--surface); font-size: .8rem; font-weight: 700; }
+.delegation-branches { display: flex; flex-wrap: wrap; justify-content: center; gap: .75rem; }
+.delegation-branch { display: grid; min-width: 130px; max-width: 220px; justify-items: center; }
+.delegation-arrow { color: var(--accent); font-size: 1.1rem; line-height: 1.4; }
+.delegation-agent, .delegation-result, .delegation-summary { display: grid; gap: .25rem; width: 100%; padding: .55rem .7rem; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); text-align: left; }
+.delegation-agent strong, .delegation-result strong, .delegation-summary strong { font-size: .78rem; }
+.delegation-agent small, .delegation-result small { color: var(--muted); font-size: .68rem; }
+.delegation-agent.status-blocked { border-color: var(--red); }
+.delegation-agent.status-completed { border-color: var(--green); }
+.delegation-summary { display: inline-grid; width: auto; margin: 0 auto; background: var(--surface-raised); text-align: center; }
+.agent-summary { max-height: 180px; overflow: auto; margin: .75rem 0 0; padding: .7rem; border-radius: 8px; background: var(--surface); color: var(--muted); font: inherit; font-size: .78rem; text-align: left; white-space: pre-wrap; }
+.generated-test-source { max-height: 420px; overflow: auto; margin: .65rem 0 0; padding: .8rem; border: 1px solid var(--line); border-radius: 8px; background: #101216; color: var(--text); font: .72rem/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
 .report-preview .panel-title-row { margin-bottom: 12px; }
 .report-explanation { padding: 10px 12px; border-left: 3px solid #6399d5; background: #1c2530; color: #b6c3d2; font-size: 12px; line-height: 1.65; }
 .report-criteria { display: grid; gap: 9px; margin: 14px 0; }

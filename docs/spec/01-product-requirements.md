@@ -16,7 +16,7 @@ The app must establish **which promised behaviors have evidence**, which failed,
 
 ## First-release scope
 
-**In scope:** Azure DevOps Services sign-in; organization/project selection; requirement and child-task search; queue; local or ADO Git repository selection; staging/dev URL selection; source snapshot; human-reviewed QA contract; existing repo test execution in a constrained worker; Playwright browser checks; evidence; local history; export; rerun; cancellation; provider configuration; privacy preview.
+**In scope:** Azure DevOps Services sign-in; organization/project selection; requirement and child-task search; queue; local or ADO Git repository selection; staging/dev URL selection; source snapshot; mandatory provider-backed agentic planning and delegation; agent-generated repository and Playwright tests executed in constrained workers; run-level context/permission approval; evidence; local history; export; rerun; cancellation; provider/model configuration and cost limits.
 
 **Out of scope:** Azure DevOps Server; Jira/GitHub issue ingestion; unattended triggers; CI/PR status publishing; ADO bug creation/comments; deployment or environment provisioning; production-target testing by default; automatic code fixes or PR edits; multi-user sync; claims of complete security or accessibility certification; native mobile app automation.
 
@@ -33,19 +33,22 @@ Each requirement ID is stable for planning and verification. `M` is required for
 | FR-13 | M | Save, edit, validate and switch among account-scoped Azure DevOps run profiles | Settings supports multiple org/project/team/taskboard-column/Story-ID profiles; selecting one loads configured Stories and current-sprint Tasks from the chosen board column; metadata remains encrypted locally |
 | FR-05 | M | Choose repository, site URL, or both per run | Preflight requires at least one reachable/configured target; report states what was and was not exercised |
 | FR-06 | M | Select local repository folder or ADO Git repository/ref and freeze source identity | Run records commit SHA or immutable copied snapshot hash; dirty local tree is identified; original working tree is not modified |
-| FR-07 | M | Extract acceptance criteria and task context into a reviewable QA contract | Each criterion has stable ID, source reference, expected behavior, scenarios and evidence requirements; user can edit before run |
-| FR-08 | M | Show provider disclosure preview and enforce configured model budget | User sees fields/files/snippets to be sent, can exclude them, and can stop before transmission; over-budget preflight blocks or asks for new user-set limit |
+| FR-07 | M | Agent maps source acceptance criteria and Task context into a reviewable coverage and delegation plan | Each criterion retains its source ID/field/revision and maps to proposed repo, browser or combined checks; Tasks inform scope but do not prove parent criteria; ambiguities remain visible |
+| FR-08 | M | Show a run-level provider/context/permission disclosure and enforce shared cost and model budgets | Before agent calls, user sees provider/models, ADO fields/revisions, repository paths, site origin, tools, commands, limits and conservative cost estimate; can exclude context; scope expansion pauses; unknown pricing or over-budget requests are blocked |
 | FR-09 | M | Run configured existing repository tests in constrained disposable workspace | Only allowlisted commands from reviewed config execute; exit, stdout/stderr excerpts and test result files are captured; timeout/cancel kill descendants |
 | FR-10 | M | Execute criterion-linked browser checks using Playwright | Browser worker performs repeatable steps and assertions against allowlisted origin; failed checks keep trace/screenshot and assertion output |
 | FR-11 | M | Map observations to criteria and distinguish failure causes | Each criterion shows its direct observations and allows restricted encrypted artifacts to be saved through a warning and native file picker; `VERIFIED`, `FAILED`, `UNVERIFIED`, or `BLOCKED` is explicit; product/test/environment/ambiguous classifications are explicit |
 | FR-12 | M | Compute auditable run verdict and export report | `PASS`, `FAIL`, `NEEDS_REVIEW`, `BLOCKED` policy matches [engine spec](03-qa-engine.md); HTML/Markdown/JSON export excludes secrets |
 | FR-13 | M | Cancel/retry runs and inspect history | Cancellation leaves a partial report; retry creates a new manifest linked to prior run; user can delete run and artifacts |
-| FR-14 | L | Generate new tests and bounded exploratory flows | Generated tests stay in disposable workspace until user explicitly exports; no healer silently changes assertions |
+| FR-14 | M | Delegate, generate and run criterion-linked repository tests and bounded Playwright flows | Agent-created tests execute only in a disposable snapshot using reviewed command IDs; Playwright stays within approved origin/action bounds; generated files never change the user's source tree and require a separate export action to retain |
 | FR-15 | L | Run automated accessibility checks | axe findings identify scanned pages and rule IDs; report does not call automated scan a full accessibility audit |
 | FR-16 | L | Publish report/bugs/status to ADO | Separate write scope and confirmation; idempotent publishing; exact destination preview |
 | FR-17 | M | Refresh queued ADO sources before planning and preserve Requirement criteria and Task descriptions with field/revision provenance | ADO access failure stops planning with the actual actionable category; Task candidates remain separate; missing Requirement criteria creates an explicit coverage gap and can never produce `PASS` |
 | FR-18 | M | Configure repository checks from a validated app-local editor when the repository has no config file | Config is encrypted locally, command argument arrays and JUnit mappings are reviewed, config hash is frozen in the manifest, and the source tree is not modified |
 | FR-19 | M | Show durable Orchestrator/worker/Scenario/Browser-step progress and criterion-linked results | Progress survives app restart, cancellation and partial runs are retained; successful Playwright steps have ordered encrypted screenshots previewable in the local report |
+| FR-20 | M | Require a configured agent and dynamically orchestrate QA work | A run cannot start without a supported provider/model; the Orchestrator uses criteria, Tasks, targets and evidence needs to delegate to selected backend/repository and/or frontend/browser specialists; a small diagram shows the Orchestrator, selected agents, result types and summaries |
+| FR-21 | M | Discover compatible provider models and constrain run cost/work | Settings supports provider-specific credential import, searchable model discovery filtered by required structured-output/tool capabilities, optional role overrides, and shared per-run cost/token/call/fan-out/time/action ceilings |
+| FR-22 | M | Review generated code and executed evidence with a configured Reviewer Agent | After workers complete, the Reviewer checks bounded approved repository source, generated tests and direct observations; every criterion assessment links to known observation IDs, code notes cite supplied paths/lines and criteria, and medium/high test-coverage concerns create unresolved `INSUFFICIENT_EVIDENCE` findings that can only downgrade the deterministic verdict |
 
 ## Nonfunctional requirements and release gates
 
@@ -61,17 +64,20 @@ Each requirement ID is stable for planning and verification. `M` is required for
 | NFR-08 | Accessibility and responsive desktop workflow | Keyboard-only completion of sign-in, organization/project selection, search, queue, run and report; labeled controls and visible focus reviewed; first-run and work-selection screens fit an 800px-wide window without horizontal scrolling |
 | NFR-09 | Useful performance on ordinary developer hardware | Pilot target: search results within 3 seconds after ADO response; app UI stays responsive during 30-minute run; exact hardware and measurements published with release |
 | NFR-10 | Confidential local work-item and evidence storage | Database and retained artifacts are encrypted at rest with OS-protected keys; file permissions are private; temporary plaintext lifetime is bounded and disclosed |
+| NFR-11 | Agent actions remain auditable and bounded | Every provider call/action is associated with the approved run envelope, validated tool call, agent result and evidence; injected instructions cannot expand permissions; cancellation, errors and budget exhaustion retain partial results and cannot manufacture `PASS` |
 
 ## Critical scenarios
 
 1. **Both targets:** a story with five criteria and two tasks is queued; a repository test and site test each verify relevant behavior; report names the source commit, site URL and proof for each criterion.
 2. **Site only:** no repository is configured; UI checks run, code-level coverage is explicitly absent, and the verdict may pass only if the contract required no code-level evidence.
 3. **Repo only:** no site is configured; existing tests run, UI promises remain unverified if the contract requires browser evidence.
-4. **Missing criterion:** ADO item has vague or absent acceptance criteria; planner suggests candidates, but no invented criterion is represented as source truth; run is `NEEDS_REVIEW` until user resolves it.
+4. **Missing criterion:** ADO item has vague or absent acceptance criteria; agent flags the gap and may propose a user-added candidate, but it is never represented as source truth; the run is `NEEDS_REVIEW` until the user resolves it.
 5. **Disputed failure:** a generated UI locator breaks while the product works; classify test failure, preserve trace and prior assertion, and avoid a product-failure claim.
 6. **Unsafe target:** URL redirects to a new origin or the selected repo config contains an unapproved command; worker stops and reports `BLOCKED` with the reason.
 7. **Stale source:** ADO item revision or repository ref changes between selection and run; app warns and freezes the latest user-approved snapshot.
 8. **First-run onboarding and queue:** user signs in with the ADO-branded action, chooses a discovered organization or adds a validated one, selects a project, expands a Story's child Tasks and adds the Story, selected Tasks or both to the local queue. The parent acceptance criteria remain distinct from Task context.
+9. **UI and API story:** Orchestrator links UI-component Tasks and API-wiring Tasks to source criteria, selects repository/browser agents, generates and runs approved unit/API and Playwright checks, and reports direct evidence from both layers with a delegation diagram.
+10. **Mandatory agent configuration:** without a valid supported provider/model or available configured budget, the app blocks run approval/start and provides a direct settings action; no deterministic no-AI run path is offered.
 
 ## Success measures for pilot
 

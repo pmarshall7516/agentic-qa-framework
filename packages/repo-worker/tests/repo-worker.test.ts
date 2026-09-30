@@ -4,8 +4,8 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { RepositoryConfigSchema } from '../src/config.js';
-import { createRepositorySnapshot } from '../src/snapshot.js';
-import { mapJUnitAssertions, parseJUnit, runRepositoryChecks } from '../src/runner.js';
+import { createRepositorySnapshot, readRepositoryContext } from '../src/snapshot.js';
+import { installGeneratedTests, mapJUnitAssertions, parseJUnit, parseTrx, runRepositoryChecks } from '../src/runner.js';
 
 const validConfig = {
   schemaVersion: 1,
@@ -17,12 +17,29 @@ const validConfig = {
 };
 
 describe('repository worker config boundary', () => {
+  it('accepts fixed .NET test commands with parsed TRX results', () => {
+    const config = RepositoryConfigSchema.parse({
+      ...validConfig,
+      tests: [{ ...validConfig.tests[0], executable: 'dotnet', arguments: ['test', 'tests/Inventory.Tests.csproj', '--no-restore'], resultFormat: 'trx', resultPaths: ['TestResults/qa.trx'], scenarioMappings: [{ scenarioId: 'ac-availability', testCaseIds: ['InventoryTests.Availability_is_checked'] }] }],
+    });
+    expect(config.tests[0]).toMatchObject({ executable: 'dotnet', resultFormat: 'trx' });
+  });
+
   it('parses JUnit testcase failures as direct, named assertion results', async () => {
     const cases = await parseJUnit('<testsuites><testsuite tests="2"><testcase classname="Search" name="title appears"/><testcase classname="Search" name="filters stay"><failure message="expected selected">assertion failed</failure></testcase></testsuite></testsuites>');
     expect(cases).toEqual([
       { name: 'Search.title appears', passed: true, message: 'Test passed' },
       { name: 'Search.filters stay', passed: false, message: 'assertion failed' },
     ]);
+  });
+
+  it('parses bounded .NET TRX results as named direct assertions', async () => {
+    const cases = await parseTrx('<TestRun xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010"><Results><UnitTestResult testName="InventoryTests.Availability_is_checked" outcome="Passed" /><UnitTestResult testName="InventoryTests.Sold_conflict_is_reported" outcome="Failed"><Output><ErrorInfo><Message>Expected Reserved</Message></ErrorInfo></Output></UnitTestResult></Results></TestRun>');
+    expect(cases).toEqual([
+      { name: 'InventoryTests.Availability_is_checked', passed: true, message: 'Test passed' },
+      { name: 'InventoryTests.Sold_conflict_is_reported', passed: false, message: 'Expected Reserved' },
+    ]);
+    await expect(parseTrx('<!DOCTYPE TestRun [<!ENTITY x "unsafe">]><TestRun/>')).rejects.toThrow(/DTD/i);
   });
 
   it('requires exact JUnit testcase identities for each mapped Scenario', () => {
@@ -47,16 +64,73 @@ describe('repository worker config boundary', () => {
     await writeFile(join(sourcePath, 'package.json'), '{"name":"fixture"}');
     await writeFile(join(sourcePath, '.env'), 'SECRET=canary');
     await writeFile(join(sourcePath, 'id_rsa'), 'private key');
+    await writeFile(join(sourcePath, 'nuget.config'), '<configuration><packageSourceCredentials>private</packageSourceCredentials></configuration>');
+    await mkdir(join(sourcePath, 'obj'), { recursive: true });
+    await writeFile(join(sourcePath, 'obj', 'project.assets.json'), '{"private":"restore metadata"}');
     await writeFile(join(sourcePath, 'ignored.txt'), 'not selected');
     await symlink(join(sourcePath, '.env'), join(sourcePath, 'link.env'));
     const config = RepositoryConfigSchema.parse({ ...validConfig, repository: { include: ['**/*'], exclude: [] } });
     try {
       const result = await createRepositorySnapshot({ sourcePath, destinationPath: targetPath, config });
       expect(result.copiedFiles).toBe(2);
-      expect(result.excludedPaths).toEqual(expect.arrayContaining(['.env', 'id_rsa']));
+      expect(result.excludedPaths).toEqual(expect.arrayContaining(['.env', 'id_rsa', 'nuget.config', 'obj/project.assets.json']));
       expect(await readFile(join(targetPath, 'package.json'), 'utf8')).toContain('fixture');
       await expect(readFile(join(targetPath, '.env'), 'utf8')).rejects.toThrow();
       await expect(readFile(join(targetPath, 'link.env'), 'utf8')).rejects.toThrow();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it('reads only approved text source files and redacts secret-shaped values before provider context', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'qa-repo-context-'));
+    await mkdir(join(root, 'src'));
+    await writeFile(join(root, 'src', 'form.ts'), 'const apiKey = "sk-abcdefghijklmnopqrstuvwxyz123456";\nexport function submit() {}');
+    await writeFile(join(root, 'src', 'token.ts'), 'export const token = "never send";');
+    await writeFile(join(root, '.env'), 'KEY=never send');
+    const config = RepositoryConfigSchema.parse({ ...validConfig, repository: { include: ['**/*'], exclude: [] } });
+    try {
+      const context = await readRepositoryContext({ sourcePath: root, config });
+      expect(context.map(({ path }) => path)).toContain('src/form.ts');
+      expect(context.map(({ path }) => path)).not.toContain('src/token.ts');
+      expect(JSON.stringify(context)).not.toMatch(/sk-abcdefghijklmnopqrstuvwxyz123456|never send/);
+      expect(context[0]?.content).toContain('[REDACTED]');
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it('includes C# and .NET project sources in bounded repository context', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'qa-dotnet-context-'));
+    await mkdir(join(root, 'src', 'Inventory'), { recursive: true });
+    await writeFile(join(root, 'src', 'Inventory', 'Availability.cs'), 'namespace Inventory; public sealed class AvailabilityService { public bool IsAvailable() => true; }');
+    await writeFile(join(root, 'src', 'Inventory', 'Inventory.csproj'), '<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>');
+    await writeFile(join(root, 'DerseVista.slnx'), '<Solution><Project Path="src/Inventory/Inventory.csproj" /></Solution>');
+    await writeFile(join(root, 'nuget.config'), '<configuration><packageSourceCredentials>private</packageSourceCredentials></configuration>');
+    await mkdir(join(root, 'src', 'Inventory', 'obj'), { recursive: true });
+    await writeFile(join(root, 'src', 'Inventory', 'obj', 'project.assets.json'), '{"restore":"metadata"}');
+    const config = RepositoryConfigSchema.parse({ ...validConfig, repository: { include: ['**/*'], exclude: [] } });
+    try {
+      const context = await readRepositoryContext({ sourcePath: root, config });
+      expect(context.map(({ path }) => path)).toEqual(expect.arrayContaining(['src/Inventory/Availability.cs', 'src/Inventory/Inventory.csproj', 'DerseVista.slnx']));
+      expect(context.find(({ path }) => path.endsWith('.cs'))?.content).toContain('AvailabilityService');
+      expect(context.map(({ path }) => path)).not.toContain('nuget.config');
+      expect(context.map(({ path }) => path).some((path) => path.includes('/obj/'))).toBe(false);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it('writes generated tests only inside the disposable snapshot test directories', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'qa-generated-test-'));
+    try {
+      await installGeneratedTests(root, [{ path: 'tests/agent.test.ts', content: 'it("generated", () => {})' }]);
+      expect(await readFile(join(root, 'tests', 'agent.test.ts'), 'utf8')).toContain('generated');
+      await expect(installGeneratedTests(root, [{ path: '../outside.test.ts', content: 'bad' }])).rejects.toThrow(/test-file policy/i);
+      await expect(installGeneratedTests(root, [{ path: 'tests/agent.test.ts', content: 'overwrite' }])).rejects.toThrow(/safely add/i);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it('writes generated C# test files only inside an existing tests subtree', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'qa-generated-csharp-test-'));
+    try {
+      await installGeneratedTests(root, [{ path: 'tests/Inventory.Tests/AgentGeneratedAvailabilityTests.cs', content: 'public sealed class AgentGeneratedAvailabilityTests {}' }]);
+      expect(await readFile(join(root, 'tests', 'Inventory.Tests', 'AgentGeneratedAvailabilityTests.cs'), 'utf8')).toContain('AvailabilityTests');
+      await expect(installGeneratedTests(root, [{ path: 'src/AgentGeneratedAvailabilityTests.cs', content: 'unsafe' }])).rejects.toThrow(/test-file policy/i);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 

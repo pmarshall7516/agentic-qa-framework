@@ -7,12 +7,12 @@ import { z } from 'zod';
 const CommandSchema = z.object({
   id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/),
   label: z.string().min(1).max(160),
-  executable: z.enum(['node', 'npm', 'npx']),
+  executable: z.enum(['node', 'npm', 'npx', 'dotnet']),
   arguments: z.array(z.string().max(500)).max(100),
   workingDirectory: z.string().max(500).default('.'),
   timeoutSeconds: z.number().int().positive().max(1800).default(600),
   network: z.enum(['none', 'approved-registries']).default('none'),
-  resultFormat: z.enum(['junit', 'none']).optional(),
+  resultFormat: z.enum(['junit', 'trx', 'none']).optional(),
   resultPaths: z.array(z.string().max(500)).max(30).default([]),
   scenarioMappings: z.array(z.object({ scenarioId: z.string().min(1).max(120), testCaseIds: z.array(z.string().min(1).max(400)).min(1).max(100) }).strict()).max(100).default([]),
 }).strict().superRefine((command, ctx) => {
@@ -23,8 +23,8 @@ const CommandSchema = z.object({
   for (const [pathName, path] of [['workingDirectory', command.workingDirectory] as const, ...command.resultPaths.map((path) => ['resultPaths', path] as const)]) {
     if (path.startsWith('/') || path.includes('\\') || path.split('/').includes('..') || /\0/.test(path)) ctx.addIssue({ code: 'custom', path: [pathName], message: 'Command paths must stay inside the disposable snapshot.' });
   }
-  if ((command.resultFormat ?? 'none') === 'junit' && !command.resultPaths.length) ctx.addIssue({ code: 'custom', path: ['resultPaths'], message: 'JUnit commands must declare at least one result path.' });
-  if (command.scenarioMappings.length && command.resultFormat !== 'junit') ctx.addIssue({ code: 'custom', path: ['scenarioMappings'], message: 'A repository scenario can be verified only by parsed JUnit assertions.' });
+  if (['junit', 'trx'].includes(command.resultFormat ?? 'none') && !command.resultPaths.length) ctx.addIssue({ code: 'custom', path: ['resultPaths'], message: 'Structured test-result commands must declare at least one result path.' });
+  if (command.scenarioMappings.length && !['junit', 'trx'].includes(command.resultFormat ?? 'none')) ctx.addIssue({ code: 'custom', path: ['scenarioMappings'], message: 'A repository scenario can be verified only by parsed JUnit or TRX assertions.' });
   const scenarioIds = command.scenarioMappings.map(({ scenarioId }) => scenarioId);
   const caseIds = command.scenarioMappings.flatMap(({ testCaseIds }) => testCaseIds);
   if (new Set(scenarioIds).size !== scenarioIds.length) ctx.addIssue({ code: 'custom', path: ['scenarioMappings'], message: 'Scenario mappings must be unique.' });

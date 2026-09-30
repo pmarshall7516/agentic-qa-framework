@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { AgentCompletionRequestSchema, type AgentCompletionRequest, type ModelProviderAdapter, modelResponseSchema, normalizedModel, providerJson, validateApiKey } from './provider.js';
 
 const BrowserStepSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('goto'), path: z.string().startsWith('/').max(1000) }).strict(),
@@ -77,3 +78,55 @@ export async function requestScenarioSuggestions(apiKey: string, preview: ModelP
   if (redactModelText(serializedSuggestions) !== serializedSuggestions) throw new Error('The provider returned secret-like content. No suggestions were added.');
   return { suggestions, ...(parsedResponse.usage ? { usage: { inputTokens: parsedResponse.usage.input_tokens, outputTokens: parsedResponse.usage.output_tokens } } : {}) };
 }
+
+const OPENAI_AGENT_MODELS = new Map([
+  ['gpt-6-luna', { displayName: 'GPT-6 Luna', input: 0.1, output: 0.5 }],
+  ['gpt-6-sol', { displayName: 'GPT-6 Sol', input: 2, output: 10 }],
+  ['gpt-6-astra', { displayName: 'GPT-6 Astra', input: 10, output: 50 }],
+]);
+
+const OpenAIModelListSchema = modelResponseSchema(z.object({ id: z.string().min(1).max(200), object: z.string().optional() }).passthrough());
+
+export const openAiAdapter: ModelProviderAdapter = {
+  providerId: 'openai',
+  async listModels(apiKey, fetcher = fetch) {
+    validateApiKey(apiKey);
+    const response = await fetcher('https://api.openai.com/v1/models', {
+      headers: { authorization: `Bearer ${apiKey}` }, redirect: 'error', referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(20_000),
+    });
+    const parsed = OpenAIModelListSchema.parse(await providerJson(response, 'OpenAI'));
+    return parsed.data.flatMap(({ id }) => {
+      const known = OPENAI_AGENT_MODELS.get(id);
+      if (!known) return [];
+      return [normalizedModel({
+        providerId: 'openai', modelId: id, displayName: known.displayName,
+        capabilities: { structuredOutput: true, toolUse: true, contextTokens: 1_000_000, inputUsdPerMillionTokens: known.input, outputUsdPerMillionTokens: known.output },
+      })];
+    }).sort((a, b) => a.displayName.localeCompare(b.displayName));
+  },
+  async complete<T>(apiKey: string, input: AgentCompletionRequest, fetcher: typeof fetch = fetch) {
+    validateApiKey(apiKey);
+    const request = AgentCompletionRequestSchema.parse({ modelId: input.modelId, system: input.system, input: input.input, maxOutputTokens: input.maxOutputTokens }) as AgentCompletionRequest;
+    const schema = z.toJSONSchema(input.schema);
+    const response = await fetcher('https://api.openai.com/v1/responses', {
+      method: 'POST', headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: request.modelId, store: false, max_output_tokens: request.maxOutputTokens,
+        input: [{ role: 'developer', content: request.system }, { role: 'user', content: request.input }],
+        text: { format: { type: 'json_schema', name: 'agent_result', strict: true, schema } },
+      }),
+      redirect: 'error', referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(60_000),
+    });
+    const parsed = z.object({
+      output_text: z.string().max(1_000_000).optional(),
+      output: z.array(z.object({ content: z.array(z.object({ type: z.string(), text: z.string().optional() }).passthrough()).optional() }).passthrough()).optional(),
+      usage: z.object({ input_tokens: z.number().int().nonnegative(), output_tokens: z.number().int().nonnegative() }).optional(),
+    }).passthrough().parse(await providerJson(response, 'OpenAI'));
+    const text = parsed.output_text ?? parsed.output?.flatMap(({ content }) => content ?? []).filter(({ type }) => type === 'output_text').map(({ text }) => text ?? '').join('');
+    if (!text) throw new Error('OpenAI returned no structured agent result.');
+    let decoded: unknown;
+    try { decoded = JSON.parse(text); } catch { throw new Error('OpenAI returned invalid JSON for the agent result.'); }
+    const usage = parsed.usage ?? { input_tokens: 0, output_tokens: 0 };
+    return { value: input.schema.parse(decoded) as T, inputTokens: usage.input_tokens, outputTokens: usage.output_tokens };
+  },
+};
