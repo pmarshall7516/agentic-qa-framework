@@ -73,7 +73,7 @@ const scenario = {
   approved: false,
 };
 const contract: QAContract = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   id: contractId,
   revision: 1,
   criteria: [criterion],
@@ -81,6 +81,8 @@ const contract: QAContract = {
   sourceContext: [requirement, task].map(({ id, ...snapshot }) => ({ ...snapshot, workItemId: id })),
   taskCandidates: [],
   coverageGaps: [],
+  taskPlans: [],
+  proposals: [],
 };
 const manifest: RunManifest = {
   schemaVersion: 1,
@@ -180,8 +182,10 @@ export function createUiReviewFixture(scenarioName: string): { api: DesktopApi; 
         queue: scenarioName === 'queue' || scenarioName === 'report' || scenarioName === 'blocked-report' ? [{ entry: queueEntry, snapshot: requirement }] : [],
         target: { targetKind: 'site', siteBaseUrl: 'https://staging.example.test', allowedOrigins: ['https://staging.example.test'] },
         modelProviderConfigured: false,
+        modelProvider: 'openai',
         modelId: 'gpt-5.6-terra',
         modelMaxOutputTokens: 1200,
+        savedModels: [{ id: '77777777-7777-4777-8777-777777777777', providerId: 'openai', modelId: 'gpt-5.6-terra', displayName: 'GPT-5.6 Terra', capabilities: { structuredOutput: true, toolUse: true }, maxOutputTokens: 1200, testStatus: 'reachable', testedAt: '2026-09-29T12:00:00.000Z' }],
       };
   let approved = scenarioName === 'report' || scenarioName === 'blocked-report';
   let providerConnected = approved;
@@ -275,7 +279,11 @@ export function createUiReviewFixture(scenarioName: string): { api: DesktopApi; 
     listProviderModels: async (providerId) => providerId === 'claude-code'
       ? ['sonnet', 'opus', 'haiku'].map((modelId) => ({ providerId, modelId, displayName: `Claude ${modelId[0]!.toUpperCase()}${modelId.slice(1)} (subscription)`, capabilities: { structuredOutput: true, toolUse: true, inputUsdPerMillionTokens: 2, outputUsdPerMillionTokens: 10 } }))
       : [{ providerId, modelId: 'gpt-5.6-terra', displayName: 'GPT-5.6 Terra', capabilities: { structuredOutput: true, toolUse: true, inputUsdPerMillionTokens: 0.25, outputUsdPerMillionTokens: 2 } }],
-    saveAgentModelSettings: async ({ providerId, modelId: selectedModel }) => { withState({ modelProvider: providerId, modelId: selectedModel, modelProviderConfigured: true }); },
+    saveAgentModelSettings: async ({ providerId, modelId: selectedModel, maxOutputTokens }) => { const model = { id: '77777777-7777-4777-8777-777777777777', providerId, modelId: selectedModel, displayName: selectedModel, capabilities: { structuredOutput: true, toolUse: true }, maxOutputTokens, testStatus: 'untested' as const }; withState({ modelProvider: providerId, modelId: selectedModel, modelMaxOutputTokens: maxOutputTokens, modelProviderConfigured: true, savedModels: [model] }); return [model]; },
+    selectSavedModel: async (id) => { const model = state.savedModels?.find(({ id: modelId }) => id === modelId); return withState({ modelProvider: model?.providerId ?? 'openai', modelId: model?.modelId ?? '', modelMaxOutputTokens: model?.maxOutputTokens ?? 1200, modelProviderConfigured: true }); },
+    getSavedModels: async () => state.savedModels ?? [],
+    testSavedModel: async () => ({ reachable: true, testStatus: 'reachable', message: 'Model is reachable and returned the required structured response.' }),
+    removeSavedModel: async (id) => { const savedModels = state.savedModels?.filter(({ id: modelId }) => modelId !== id) ?? []; withState({ savedModels }); return savedModels; },
     importModelKey: async () => false,
     clearModelKey: async () => undefined,
     saveModelSettings: async () => undefined,

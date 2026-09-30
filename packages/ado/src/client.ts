@@ -361,6 +361,28 @@ export class AdoClient {
       .filter((name): name is string => typeof name === 'string');
   }
 
+  async getWorkItemTypeCategoryMappings(accessToken: string, organizationInput: string, projectId: string): Promise<WorkItemTypeMappings> {
+    const organization = resolveOrganization(organizationInput);
+    const url = new URL(`https://dev.azure.com/${encodeURIComponent(organization)}/${encodeURIComponent(projectId)}/_apis/wit/workitemtypecategories`);
+    url.searchParams.set('api-version', ADO_API_VERSION);
+    const data = await this.requestJson(url.toString(), accessToken);
+    if (!Array.isArray(data.value)) return {};
+    const mappings: WorkItemTypeMappings = {};
+    for (const entry of data.value) {
+      if (!entry || typeof entry !== 'object') continue;
+      const category = entry as Record<string, unknown>;
+      const kind = category.referenceName === 'Microsoft.RequirementCategory' ? 'REQUIREMENT'
+        : category.referenceName === 'Microsoft.TaskCategory' ? 'TASK' : undefined;
+      if (!kind || !Array.isArray(category.workItemTypes)) continue;
+      for (const workItemType of category.workItemTypes) {
+        if (workItemType && typeof workItemType === 'object' && typeof (workItemType as Record<string, unknown>).name === 'string') {
+          mappings[(workItemType as Record<string, string>).name] = kind;
+        }
+      }
+    }
+    return mappings;
+  }
+
   async listGitRepositories(accessToken: string, organizationInput: string, projectId: string): Promise<AdoGitRepository[]> {
     const organization = resolveOrganization(organizationInput);
     const url = new URL(`https://dev.azure.com/${encodeURIComponent(organization)}/${encodeURIComponent(projectId)}/_apis/git/repositories`);

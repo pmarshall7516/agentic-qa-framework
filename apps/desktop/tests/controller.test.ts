@@ -15,6 +15,17 @@ const execFile = promisify(execFileCallback);
 const providerFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
   if (String(input).endsWith('/models')) return new Response(JSON.stringify({ data: [{ id: 'gpt-6-luna' }] }), { status: 200 });
   const request = JSON.parse(String(init?.body)) as { input: Array<{ content: string }> };
+  if ((request.input[0]?.content ?? '').includes('You are a QA planning Orchestrator')) {
+    const items = JSON.parse(request.input.at(-1)?.content ?? '{}') as { selectedWorkItems: Array<{ id: number; kind: string }> };
+    const ids = items.selectedWorkItems.map(({ id }) => id);
+    const proposalId = 'feature-criterion-1';
+    const sourceWorkItemIds = ids.length ? ids : [1];
+    return new Response(JSON.stringify({ output_text: JSON.stringify({
+      featureSummary: 'The feature meets the selected work-item behavior.',
+      proposals: [{ id: proposalId, text: 'The selected feature behavior is available.', sourceWorkItemIds, ambiguityNotes: [] }],
+      taskPlans: items.selectedWorkItems.filter(({ kind }) => kind === 'TASK').map(({ id }) => ({ taskId: id, summary: `Task ${id} contributes to the feature.`, criterionProposalIds: [proposalId], verificationIntent: ['Verify the relevant feature behavior directly.'], unresolvedQuestions: [] })),
+    }), usage: { input_tokens: 100, output_tokens: 100 } }), { status: 200 });
+  }
   if ((request.input[0]?.content ?? '').includes('You are the QA Reviewer Agent')) {
     const approved = JSON.parse(request.input.at(-1)?.content?.match(/JSON data only\):\n([\s\S]*?)\n\nReturn one concise/)?.[1] ?? '{}') as { criteria: Array<{ id: string; scenarioIds: string[] }>; deterministicCriterionResults: Array<{ criterionId: string; state: string; observationIds: string[] }> };
     const criteria = approved.criteria.map((criterion) => {
@@ -59,9 +70,12 @@ const providerFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit)
 
 function fixture(browserStatus: 'PASSED' | 'FAILED' = 'PASSED', chooseModelKeyFile?: () => Promise<string | undefined>, signOutChoice: () => Promise<'keep' | 'delete' | 'cancel'> = async () => 'keep', evidenceRoot?: string, saveAdoProfilesConfig?: (contents: string) => Promise<boolean>, claudeAuth: { connected: boolean; login?: () => Promise<void> } = { connected: false }) {
   const settings = new Map<string, unknown>();
+  const generation = randomUUID();
   settings.set('model.provider', 'openai');
   settings.set('model.apiKey.openai', 'test-provider-key-with-enough-entropy');
   settings.set('model.settings', { providerId: 'openai', modelId: 'gpt-6-luna', maxOutputTokens: 1200 });
+  settings.set('model.credentialGeneration.openai', generation);
+  settings.set('model.catalog', [{ providerId: 'openai', modelId: 'gpt-6-luna', displayName: 'GPT-6 Luna', capabilities: { structuredOutput: true, toolUse: true }, id: randomUUID(), maxOutputTokens: 1200, credentialGeneration: generation, testStatus: 'reachable', testedAt: new Date().toISOString(), testedCredentialGeneration: generation }]);
   const queue: any[] = [];
   const snapshots = new Map<string, any>();
   const runRecords = new Map<string, any>();
@@ -133,6 +147,64 @@ function fixture(browserStatus: 'PASSED' | 'FAILED' = 'PASSED', chooseModelKeyFi
 }
 
 describe('desktop controller', () => {
+  it('saves models into a safe catalog and tests reachability with a fixed minimal prompt', async () => {
+    const { store, settings } = fixture();
+    settings.delete('model.catalog');
+    const adapter = {
+      providerId: 'openai' as const,
+      listModels: vi.fn(async () => [{ providerId: 'openai' as const, modelId: 'gpt-6-luna', displayName: 'GPT-6 Luna', capabilities: { structuredOutput: true, toolUse: true } }]),
+      probe: vi.fn(async (_key: string, _modelId: string) => undefined),
+      complete: vi.fn(async (_key: string, request: any) => ({ value: request.schema.parse({ reachable: true }), inputTokens: 2, outputTokens: 1 })),
+    };
+    const controller = new DesktopController({ store, providerFetch: providerFetch as typeof fetch, providerAdapterFactory: () => adapter });
+    await controller.saveAgentModelSettings({ providerId: 'openai', modelId: 'gpt-6-luna', maxOutputTokens: 1200 });
+    await controller.saveAgentModelSettings({ providerId: 'openai', modelId: 'gpt-6-luna', maxOutputTokens: 2400 });
+    const saved = await controller.getSavedModels();
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).toMatchObject({ providerId: 'openai', modelId: 'gpt-6-luna', testStatus: 'untested', maxOutputTokens: 2400 });
+    expect(JSON.stringify(saved)).not.toContain('test-provider-key-with-enough-entropy');
+    const result = await controller.testSavedModel(saved[0]!.id);
+    expect(result).toMatchObject({ reachable: true, testStatus: 'reachable' });
+    expect(adapter.probe).toHaveBeenCalledTimes(1);
+    expect(adapter.probe.mock.calls[0]![1]).toBe('gpt-6-luna');
+    expect((await controller.getSavedModels())[0]).toMatchObject({ testStatus: 'reachable' });
+  });
+
+  it('marks saved model checks stale after the provider credential generation changes', async () => {
+    const { store, settings } = fixture();
+    const adapter = {
+      providerId: 'openai' as const,
+      listModels: vi.fn(async () => [{ providerId: 'openai' as const, modelId: 'gpt-6-luna', displayName: 'GPT-6 Luna', capabilities: { structuredOutput: true, toolUse: true } }]),
+      probe: vi.fn(async (_key: string, _modelId: string) => undefined),
+      complete: vi.fn(async (_key: string, request: any) => ({ value: request.schema.parse({ reachable: true }), inputTokens: 2, outputTokens: 1 })),
+    };
+    const controller = new DesktopController({ store, providerAdapterFactory: () => adapter });
+    await controller.saveAgentModelSettings({ providerId: 'openai', modelId: 'gpt-6-luna', maxOutputTokens: 1200 });
+    const model = (await controller.getSavedModels())[0]!;
+    await controller.testSavedModel(model.id);
+    settings.set('model.credentialGeneration.openai', randomUUID());
+    expect((await controller.getSavedModels())[0]).toMatchObject({ testStatus: 'stale' });
+  });
+
+  it('reports failed model reachability without forwarding provider error details', async () => {
+    const { store, settings } = fixture();
+    settings.delete('model.catalog');
+    const adapter = {
+      providerId: 'openai' as const,
+      listModels: vi.fn(async () => [{ providerId: 'openai' as const, modelId: 'gpt-6-luna', displayName: 'GPT-6 Luna', capabilities: { structuredOutput: true, toolUse: true } }]),
+      probe: vi.fn(async (_key: string, _modelId: string) => { throw new Error('provider raw secret-key-canary payload'); }),
+      complete: vi.fn(),
+    };
+    const controller = new DesktopController({ store, providerAdapterFactory: () => adapter });
+    await controller.saveAgentModelSettings({ providerId: 'openai', modelId: 'gpt-6-luna', maxOutputTokens: 1200 });
+    const model = (await controller.getSavedModels())[0]!;
+    const result = await controller.testSavedModel(model.id);
+    expect(result).toMatchObject({ reachable: false, testStatus: 'unreachable' });
+    expect(JSON.stringify(result)).not.toContain('secret-key-canary');
+    expect((await controller.getSavedModels())[0]).toMatchObject({ testStatus: 'unreachable' });
+    await expect(controller.selectSavedModel(model.id)).rejects.toThrow(/test this saved model/i);
+  });
+
   it('stores named browser account secrets encrypted and returns metadata only', async () => {
     const { controller, settings } = fixture();
     const saved = await controller.saveBrowserTestAccount({ label: 'QA editor', origin: 'https://staging.example.test', username: 'qa-user-canary@example.test', password: 'qa-password-canary' });
@@ -233,9 +305,23 @@ describe('desktop controller', () => {
     await expect(controller.createDraftPlan()).rejects.toThrow('Connect an AI provider account and select a supported model');
   });
 
+  it('blocks plan preparation until the active saved model passed its latest reachability test', async () => {
+    const { controller, settings } = fixture();
+    settings.set('model.catalog', [{ providerId: 'openai', modelId: 'gpt-6-luna', displayName: 'GPT-6 Luna', capabilities: { structuredOutput: true, toolUse: true }, id: randomUUID(), maxOutputTokens: 1200, credentialGeneration: settings.get('model.credentialGeneration.openai'), testStatus: 'untested' }]);
+    await expect(controller.createDraftPlan()).rejects.toThrow(/saved model that passed its reachability test/i);
+  });
+
   it('connects a Claude plan account, discovers curated models and configures the required agent without storing a key', async () => {
     const login = vi.fn(async () => undefined);
-    const { controller, settings } = fixture('PASSED', undefined, undefined, undefined, undefined, { connected: false, login });
+    const { store, settings } = fixture('PASSED', undefined, undefined, undefined, undefined, { connected: false, login });
+    const claudeModels = ['sonnet', 'opus', 'haiku'].map((modelId) => ({ providerId: 'claude-code' as const, modelId, displayName: `Claude ${modelId}`, capabilities: { structuredOutput: true, toolUse: true } }));
+    const controller = new DesktopController({ store, isClaudeAccountConnected: async () => true, startClaudeLogin: login, providerAdapterFactory: () => ({
+      providerId: 'claude-code',
+      async listModels() { return claudeModels; },
+      async discoverModels() { return claudeModels; },
+      async probe() {},
+      async complete<T>(_key: string, request: any) { return { value: request.schema.parse({}), inputTokens: 0, outputTokens: 0 } as { value: T; inputTokens: number; outputTokens: number }; },
+    }) });
     settings.set('model.provider', 'claude-code');
     expect((await controller.getState()).modelProviderConfigured).toBe(false);
     await expect(controller.connectClaudeAccount()).resolves.toBe(true);
@@ -569,7 +655,10 @@ describe('desktop controller', () => {
     expect(draft.contract.criteria.map(({ expectedBehavior }) => expectedBehavior)).toEqual(['Results show the title', 'Filters remain selected']);
     expect(draft.contract.criteria).toHaveLength(2);
     expect(draft.contract.sourceContext.find(({ workItemId }) => workItemId === 18)?.description).toBe('Add a filter-state API check.');
-    expect(draft.contract.taskCandidates).toMatchObject([{ source: { workItemId: 18, field: 'System.Description' }, text: 'Add a filter-state API check.', disposition: 'PROPOSED' }]);
+    expect(draft.contract.taskCandidates).toEqual([]);
+    expect(draft.contract.featureSummary).toContain('feature');
+    expect(draft.contract.taskPlans).toMatchObject([{ taskId: 18, taskSource: { field: 'System.Description', workItemId: 18 }, verificationIntent: [expect.any(String)] }]);
+    expect(draft.contract.proposals[0]).toMatchObject({ decision: 'PROPOSED', sourceRefs: expect.arrayContaining([expect.objectContaining({ workItemId: 18 })]) });
     expect(draft.notes[0]).toContain('does not prove parent acceptance criteria');
     expect(draft.manifest.sources).toHaveLength(2);
     const approved = { ...draft, contract: { ...draft.contract, scenarios: draft.contract.scenarios.map((scenario) => ({ ...scenario, approved: true })) } };
@@ -598,7 +687,7 @@ describe('desktop controller', () => {
     await expect(controller.approvePlan(approved)).rejects.toThrow('no longer current');
   });
 
-  it('approves a Task-derived candidate only when it retains its queued description provenance', async () => {
+  it('accepts a source-linked feature criterion proposal while preserving its source provenance', async () => {
     const { controller, settings, queue, snapshots, store } = fixture();
     const requirement = { organization: 'org', projectId: 'project-1', projectName: 'Project One', id: 71, revision: 2, type: 'User Story', kind: 'REQUIREMENT', title: 'Save sheet', state: 'Active', acceptanceCriteria: 'The sheet appears after save.', url: 'https://dev.azure.com/org/project-1/_workitems/edit/71', retrievedAt: '2026-09-27T12:00:00.000Z' };
     const task = { ...requirement, id: 72, revision: 4, type: 'Task', kind: 'TASK', title: 'Persist sheet', acceptanceCriteria: undefined, description: 'Persist selected sheet values through the API.' };
@@ -610,16 +699,15 @@ describe('desktop controller', () => {
     }
     settings.set('run.target', { targetKind: 'site', siteBaseUrl: 'https://site.example.test', allowedOrigins: ['https://site.example.test'] });
     const draft = await controller.createDraftPlan();
-    const candidate = draft.contract.taskCandidates[0]!;
-    const criterionId = `${candidate.id}-criterion`;
-    const scenarioId = `${candidate.id}-browser`;
+    const proposal = draft.contract.proposals[0]!;
+    const criterionId = `accepted-${proposal.id}`;
+    const scenarioId = `${criterionId}-browser`;
     const contract = {
       ...draft.contract,
-      criteria: [...draft.contract.criteria, { id: criterionId, source: { userAdded: true as const, author: 'Reviewer', derivedFrom: candidate.source }, expectedBehavior: candidate.text, requiredLayers: ['browser' as const], scenarioIds: [scenarioId], ambiguityNotes: [] }],
-      scenarios: [...draft.contract.scenarios.map((scenario) => ({ ...scenario, approved: true })), { id: scenarioId, criterionIds: [criterionId], layer: 'browser' as const, preconditions: [], steps: [{ action: 'expectText' as const, text: candidate.text }], expectedObservations: [candidate.text], risk: 'medium' as const, approved: true }],
-      taskCandidates: [{ ...candidate, disposition: 'ACCEPTED' as const, criterionId }],
+      criteria: [...draft.contract.criteria, { id: criterionId, source: { agentProposed: true as const, proposalId: proposal.id, sourceRefs: proposal.sourceRefs, decision: 'ACCEPTED' as const }, expectedBehavior: proposal.text, requiredLayers: ['browser' as const], scenarioIds: [scenarioId], ambiguityNotes: proposal.ambiguityNotes }],
+      scenarios: [...draft.contract.scenarios.map((scenario) => ({ ...scenario, approved: true })), { id: scenarioId, criterionIds: [criterionId], layer: 'browser' as const, preconditions: [], steps: [{ action: 'expectText' as const, text: proposal.text }], expectedObservations: [proposal.text], risk: 'medium' as const, approved: true }],
+      proposals: draft.contract.proposals.map((item) => item.id === proposal.id ? { ...item, decision: 'ACCEPTED' as const, criterionId } : item),
     };
-    await expect(controller.approvePlan({ ...draft, contract: { ...contract, coverageGaps: [] } })).rejects.toThrow('source context and coverage gaps are frozen');
     await controller.approvePlan({ ...draft, contract });
     expect(store.createRun).toHaveBeenCalledOnce();
     await expect(controller.getRunProgress(draft.manifest.runId)).resolves.toEqual([]);

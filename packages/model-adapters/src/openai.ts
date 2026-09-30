@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AgentCompletionRequestSchema, type AgentCompletionRequest, type ModelProviderAdapter, modelResponseSchema, normalizedModel, providerJson, validateApiKey } from './provider.js';
+import { AgentCompletionRequestSchema, type AgentCompletionRequest, type ModelProviderAdapter, modelResponseSchema, normalizedModel, providerJson, validateApiKey, validateModelId } from './provider.js';
 
 const BrowserStepSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('goto'), path: z.string().startsWith('/').max(1000) }).strict(),
@@ -103,6 +103,23 @@ export const openAiAdapter: ModelProviderAdapter = {
         capabilities: { structuredOutput: true, toolUse: true, contextTokens: 1_000_000, inputUsdPerMillionTokens: known.input, outputUsdPerMillionTokens: known.output },
       })];
     }).sort((a, b) => a.displayName.localeCompare(b.displayName));
+  },
+  async probe(apiKey, modelId, fetcher = fetch) {
+    validateApiKey(apiKey);
+    const response = await fetcher('https://api.openai.com/v1/responses', {
+      method: 'POST', headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: validateModelId(modelId), store: false, max_output_tokens: 16,
+        input: [{ role: 'user', content: 'Reply with OK.' }],
+      }),
+      redirect: 'error', referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(30_000),
+    });
+    const parsed = z.object({
+      output_text: z.string().max(100_000).optional(),
+      output: z.array(z.object({ content: z.array(z.object({ type: z.string(), text: z.string().optional() }).passthrough()).optional() }).passthrough()).optional(),
+    }).passthrough().parse(await providerJson(response, 'OpenAI'));
+    const text = parsed.output_text ?? parsed.output?.flatMap(({ content }) => content ?? []).filter(({ type }) => type === 'output_text').map(({ text }) => text ?? '').join('');
+    if (!text?.trim()) throw new Error('OpenAI returned no text for the reachability prompt.');
   },
   async complete<T>(apiKey: string, input: AgentCompletionRequest, fetcher: typeof fetch = fetch) {
     validateApiKey(apiKey);

@@ -207,6 +207,19 @@ select option { background: #1b1e25; color: #e4e7ee; }
 .plan-summary-note { color: #aab3c0; }
 .plan-summary-warning { padding: 10px 12px; border: 1px solid #665238; border-radius: 6px; background: #30271b; color: #e0bd83; }
 .model-settings > small { display: block; margin-top: 10px; color: #8f98a6; font-size: 11px; line-height: 1.6; }
+.connected-account { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; padding: 9px 11px; border: 1px solid #315944; border-radius: 5px; background: #1b2d23; color: #a8d9ba; font-size: 12px; }
+.connected-account strong { color: #e0f3e7; font-weight: 650; }
+.connected-indicator { width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: #57c682; box-shadow: 0 0 0 3px #57c68222; }
+.model-combobox { position: relative; min-width: 0; }
+.model-combobox > .text-input { padding-right: 36px; text-overflow: ellipsis; }
+.model-combobox-toggle { position: absolute; top: 1px; right: 1px; display: grid; width: 34px; height: 36px; place-items: center; border-left: 1px solid #383e49; border-radius: 0 4px 4px 0; background: #171a20; color: #9ca7b6; pointer-events: none; }
+.model-combobox-options { position: absolute; z-index: 30; top: calc(100% + 4px); right: 0; left: 0; max-height: 280px; overflow-y: auto; border: 1px solid #485365; border-radius: 6px; background: #171a20; box-shadow: 0 12px 28px #0009; }
+.model-combobox-option { display: grid; width: 100%; gap: 3px; padding: 10px 12px; border: 0; border-bottom: 1px solid #2b303a; background: transparent; color: #dce1e9; text-align: left; cursor: pointer; }
+.model-combobox-option:last-child { border-bottom: 0; }
+.model-combobox-option:hover, .model-combobox-option.active { background: #242c37; }
+.model-combobox-option strong { font-size: 12px; font-weight: 620; }
+.model-combobox-option span, .model-combobox-option small { color: #9ba5b3; font-size: 10px; }
+.model-combobox-empty { padding: 12px; color: #9ba5b3; font-size: 11px; }
 .settings-fields label > .field-help { margin: 0; font-size: 10px; font-weight: 400; }
 @media (max-width: 1050px) {
   .settings-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }

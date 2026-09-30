@@ -13,7 +13,13 @@ export interface AgentCompletion<T = unknown> { value: T; inputTokens: number; o
 export interface ModelProviderAdapter {
   readonly providerId: ProviderModel['providerId'];
   listModels(apiKey: string, fetcher?: typeof fetch): Promise<ProviderModel[]>;
+  discoverModels?: () => Promise<ProviderModel[]>;
+  probe: (apiKey: string, modelId: string, fetcher?: typeof fetch) => Promise<void>;
   complete: <T>(apiKey: string, request: AgentCompletionRequest, fetcher?: typeof fetch) => Promise<AgentCompletion<T>>;
+}
+
+export function validateModelId(modelId: string): string {
+  return z.string().min(1).max(200).parse(modelId);
 }
 
 export function validateApiKey(apiKey: string): void {

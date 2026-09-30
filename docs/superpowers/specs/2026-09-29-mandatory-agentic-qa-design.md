@@ -3,6 +3,8 @@
 **Status:** Product design approved in conversation; implementation not authorized by this document alone.  
 **Date:** 2026-09-29
 
+**Planning and model-selection refinement:** The 2026-09-30 [Agentic work-item planning and tested model selection design](2026-09-30-agentic-work-item-planning-and-tested-models-design.md) refines this document's model and disclosure flow: saved models require per-entry reachability tests; a single selected tested model is used across roles; selected Story/Task context is synthesized into reviewable feature criteria; and plan-preparation consent is separate from final worker approval.
+
 ## Problem and goal
 
 The product should require a configured AI agent for every QA run. The agentic workflow ingests selected Azure DevOps Stories/Requirements, their Tasks, acceptance criteria, the selected repository snapshot and/or site, plans the QA work, delegates to appropriate specialist agents, creates and runs tests, reviews the resulting evidence, and produces a proof-linked summary.
@@ -34,9 +36,9 @@ The app remains responsible for enforcing capability boundaries, validating agen
 ## User workflow
 
 1. The user selects ADO Requirements/Stories and associated Tasks, repository and/or site, and test profile.
-2. The configured Orchestrator reads the versioned source snapshots and available target/configuration metadata. It drafts a structured coverage and delegation plan, preserving criterion/Task provenance and flagging ambiguous or missing acceptance criteria.
-3. The app presents the run envelope: provider/model, ADO fields and revisions, repository file scope, site origin, agent/tool permissions, command profile, resource limits and estimated cost. The user can remove context or stop.
-4. The user approves the envelope once. Within it, the Orchestrator may invoke specialist agents and approved tools without per-action confirmation. Going beyond the approved context, site origin, command permissions or budget pauses the run.
+2. The app presents the tested provider/model and exact selected ADO fields/revisions to be sent for plan synthesis. The user may exclude context or stop; the explicit plan-preparation action approves that bounded provider request.
+3. The configured Orchestrator reads the versioned selected Story/Task snapshots together. It treats the Story as feature context, proposes source-linked feature criteria and per-Task verification, and flags ambiguity/conflicts. The user reviews, edits, accepts or rejects proposals in Plan Review.
+4. The app presents the final run envelope: selected tested model, ADO fields/revisions, repository file scope, site origin, agent/tool permissions, command profile, resource limits and estimated cost. The user approves before any worker or post-plan execution action begins. Going beyond the approved context, site origin, command permissions or budget pauses the run.
 5. Agents inspect and perform their assigned work. Repository changes and generated tests exist only in a disposable snapshot. Browser checks run only against the approved site and action budget.
 6. A Reviewer Agent associates results with criteria, identifies gaps and recommends failure classifications. The report preserves raw observations and artifacts, summarizes conclusions with proof links, and computes the verdict from the configured evidence policy.
 7. The user reviews the run report and may separately choose whether to export generated tests or summaries. No automatic source control or ADO write occurs.
@@ -69,8 +71,8 @@ flowchart TD
 ## Provider and model configuration
 
 - AI configuration is required for every user who starts a run. Remove the deterministic local planning path as an alternative QA run mode.
-- A user configures a provider connection and one default model. The searchable model picker shows models discovered from that provider where available, or the provider's supported catalog when discovery is unavailable. It filters models by required structured-output and tool-orchestration capabilities and shows provider/model identity.
-- Optional per-role model overrides allow specialists to use different models. The default model is used by all roles when no override exists.
+- A user configures a provider connection, saves compatible provider/model pairs, and tests each saved model with a small structured request. A saved model is selectable only when its latest test succeeded with the current provider credentials.
+- The user selects one tested model for plan preparation and the full QA run. The app uses that model for the Orchestrator, all selected specialists and Reviewer; new runs do not use role-specific overrides.
 - Provider APIs require protocol-specific adapters; an arbitrary API key by itself is insufficient. A custom compatible endpoint may be supported only with an explicit adapter/protocol and approved destination origin. Provider credentials remain in protected local main-process storage and never enter renderer state, prompts, reports or workers.
 - Claude subscription/plan-based sign-in is a separate connection type from an Anthropic API key. Support it only through an officially supported integration for third-party use; never reuse browser cookies or scrape a CLI credential cache as a substitute.
 - Run manifests record provider, model, adapter version, configuration identity, reported usage and limits, without recording credentials.
@@ -81,7 +83,7 @@ The user sets a shared per-run cost ceiling and token/resource limits. The coord
 
 ## Context, trust and execution boundaries
 
-- Before approval, show which ADO fields/revisions, repository paths or file scope, site origin and configuration are available to each agent, and identify the provider that will receive them. Users can exclude context. Provider requests are restricted to the approved context envelope; expanding that envelope pauses the run.
+- Before plan synthesis, show the selected provider/model and exact work-item IDs/revisions/fields to be transmitted; explicit plan preparation authorizes only that bounded request. Before workers start, show the full permission/cost envelope and require final run approval. Provider requests are restricted to the approved context envelope; expanding that envelope pauses the run.
 - Treat ADO text, repository contents, webpages, test output and model output as untrusted data. Instructions embedded in these sources never grant permissions.
 - Agents use an app-owned, typed tool catalog. A constrained tool broker checks every request against the approved run envelope. Models cannot add tools or directly access shell, filesystem, tokens or network.
 - Repository inspection uses an immutable selected snapshot. Generated code/tests are written only into a disposable copy. Execution uses the reviewed project command profile and isolated worker; no model-generated shell string or executable/argument array is accepted as new authority.

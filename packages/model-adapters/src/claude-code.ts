@@ -1,12 +1,9 @@
-import { spawn } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { z } from 'zod';
 import type { ProviderModel } from '@agentic-qa/domain/agent';
+import { runClaudeCliCommand } from './claude-cli.js';
 import { AgentCompletionRequestSchema, type AgentCompletionRequest, type ModelProviderAdapter } from './provider.js';
 
-type CliRunner = (args: string[], input: string) => Promise<string>;
+type CliRunner = (args: string[], input: string, timeoutMs?: number) => Promise<string>;
 const CATALOG: ProviderModel[] = [
   { providerId: 'claude-code', modelId: 'sonnet', displayName: 'Claude Sonnet (subscription)', capabilities: { structuredOutput: true, toolUse: true, inputUsdPerMillionTokens: 2, outputUsdPerMillionTokens: 10 } },
   { providerId: 'claude-code', modelId: 'opus', displayName: 'Claude Opus (subscription)', capabilities: { structuredOutput: true, toolUse: true, inputUsdPerMillionTokens: 4, outputUsdPerMillionTokens: 20 } },
@@ -14,25 +11,10 @@ const CATALOG: ProviderModel[] = [
 ];
 const CliResponseSchema = z.object({ result: z.string().max(1_000_000), usage: z.object({ input_tokens: z.number().int().nonnegative().optional(), output_tokens: z.number().int().nonnegative().optional() }).passthrough().optional() }).passthrough();
 
-async function runClaudeCli(args: string[], input: string): Promise<string> {
-  const cwd = await mkdtemp(join(tmpdir(), 'agentic-qa-claude-'));
-  try {
-    const env = Object.fromEntries(['PATH', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'SYSTEMROOT', 'TEMP', 'TMP'].flatMap((key) => process.env[key] ? [[key, process.env[key]!] as const] : []));
-    return await new Promise<string>((resolve, reject) => {
-      const child = spawn('claude', args, { cwd, env, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
-      let stdout = '';
-      let settled = false;
-      const finish = (error?: Error) => { if (settled) return; settled = true; clearTimeout(timer); error ? reject(error) : resolve(stdout); };
-      const timer = setTimeout(() => { child.kill('SIGTERM'); setTimeout(() => child.kill('SIGKILL'), 1000).unref(); finish(new Error('Claude Code did not complete within the 120 second limit.')); }, 120_000);
-      child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString('utf8'); if (Buffer.byteLength(stdout) > 5_000_000) { child.kill('SIGTERM'); finish(new Error('Claude Code response exceeded the 5 MB limit.')); } });
-      child.on('error', () => finish(new Error('Claude Code CLI is unavailable. Install Claude Code and connect a Claude plan account.')));
-      child.on('close', (code) => code === 0 ? finish() : finish(new Error(`Claude Code request failed (exit ${code ?? 'unknown'}). Check the signed-in account, selected model access and plan limits.`)));
-      child.stdin.on('error', () => undefined);
-      child.stdin.end(input);
-    });
-  } finally {
-    await rm(cwd, { recursive: true, force: true }).catch(() => undefined);
-  }
+async function runClaudeCli(args: string[], input: string, timeoutMs = 120_000): Promise<string> {
+  const result = await runClaudeCliCommand(args, input, { timeoutMs, maxOutputBytes: 5_000_000 });
+  if (result.code !== 0) throw new Error(`Claude Code request failed (exit ${result.code}). Check the signed-in account, selected model access and plan limits.`);
+  return result.output;
 }
 
 function requestInput(request: AgentCompletionRequest): string {
@@ -55,7 +37,7 @@ async function complete<T>(runner: CliRunner, request: AgentCompletionRequest): 
     '--permission-mode', 'dontAsk', '--model', model.modelId, '--json-schema', outputSchema,
   ];
   let raw: string;
-  try { raw = await runner(args, input); } catch (error) { throw error instanceof Error ? error : new Error('Claude Code request failed.'); }
+  try { raw = await runner(args, input, parsedRequest.maxOutputTokens === 8 ? 45_000 : undefined); } catch (error) { throw error instanceof Error ? error : new Error('Claude Code request failed.'); }
   let response: z.infer<typeof CliResponseSchema>;
   try { response = CliResponseSchema.parse(JSON.parse(raw)); }
   catch { throw new Error('Claude Code returned an invalid structured result.'); }
@@ -70,10 +52,39 @@ async function complete<T>(runner: CliRunner, request: AgentCompletionRequest): 
   return { value: validated.data as T, inputTokens, outputTokens };
 }
 
+async function probe(runner: CliRunner, modelId: string): Promise<void> {
+  const model = CATALOG.find(({ modelId: supportedId }) => supportedId === modelId);
+  if (!model) throw new Error('The selected model is not in the Claude Code model catalog.');
+  const raw = await runner([
+    '--print', '--output-format', 'json', '--no-session-persistence', '--disable-slash-commands',
+    '--strict-mcp-config', '--mcp-config', '{}', '--setting-sources', '', '--tools', '',
+    '--permission-mode', 'dontAsk', '--model', model.modelId,
+  ], 'Reply with OK.', 45_000);
+  let decoded: unknown;
+  try { decoded = JSON.parse(raw); }
+  catch { throw new Error('Claude Code returned an invalid reachability response.'); }
+  const response = CliResponseSchema.safeParse(decoded);
+  if (!response.success || !response.data.result.trim()) throw new Error('Claude Code returned no text for the reachability prompt.');
+}
+
 function createAdapter(runner: CliRunner) {
   return {
     providerId: 'claude-code' as const,
     async listModels(_apiKey: string): Promise<ProviderModel[]> { return CATALOG.map((model) => structuredClone(model)); },
+    async probe(_apiKey: string, modelId: string): Promise<void> { await probe(runner, modelId); },
+    async discoverModels(): Promise<ProviderModel[]> {
+      const available: ProviderModel[] = [];
+      for (const model of CATALOG) {
+        try {
+          await probe(runner, model.modelId);
+          available.push(structuredClone(model));
+        } catch {
+          // A model is shown only when the connected Claude Code account can use it.
+        }
+      }
+      if (!available.length) throw new Error('No supported Claude models could be verified for this account. Check Claude Code sign-in and plan access, then try again.');
+      return available;
+    },
     complete<T>(_apiKey: string, request: AgentCompletionRequest) { return complete<T>(runner, request); },
   } satisfies ModelProviderAdapter;
 }
