@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ProviderModel } from '@agentic-qa/domain/agent';
 import type { QAContract } from '@agentic-qa/domain/qa-contract';
 import type { AgentCompletionRequest, ModelProviderAdapter } from '@agentic-qa/model-adapters/provider';
+import { StructuredOutputValidationError } from '@agentic-qa/model-adapters/provider';
 import { planQaRun, runAgenticQa, synthesizeWorkItemPlan } from '../src/index.js';
 import { ORCHESTRATOR_SYSTEM_PROMPT } from '../src/prompts.js';
 
@@ -58,11 +59,18 @@ describe('agent orchestration', () => {
   it('synthesizes a feature summary and one verification plan per selected Task', async () => {
     const provider = fakeProvider({
       featureSummary: 'The Story describes a filtered result experience across the selected implementation tasks.',
+      ambiguityNotes: [],
       proposals: [{ id: 'filtering', text: 'Changing a filter updates the visible results.', sourceWorkItemIds: [101, 102], ambiguityNotes: [] }],
       taskPlans: [{ taskId: 102, summary: 'Connect filter state to the results API.', criterionProposalIds: ['filtering'], verificationIntent: ['Check the API response reflects the selected filter.'], unresolvedQuestions: [] }],
     });
+    const complete = provider.complete.bind(provider);
+    const completion = vi.spyOn(provider, 'complete').mockImplementation(async (key, request, fetcher) => {
+      expect(request.maxOutputTokens).toBe(48_000);
+      expect(request.timeoutMs).toBe(600_000);
+      return complete(key, request, fetcher);
+    });
     const result = await synthesizeWorkItemPlan({
-      provider, apiKey: 'test-key', modelId: 'gpt-6-sol', items: [
+      provider, apiKey: 'test-key', modelId: 'gpt-6-sol', maxOutputTokens: 48_000, items: [
         { id: 101, kind: 'REQUIREMENT', type: 'User Story', title: 'Keep filters selected', description: 'Preserve selected filters while browsing.', acceptanceCriteria: 'Selections remain visible.' },
         { id: 102, kind: 'TASK', type: 'Task', title: 'Connect filters to results', parentId: 101, description: 'Send filter state to the results API.' },
       ],
@@ -71,14 +79,80 @@ describe('agent orchestration', () => {
     expect(result.taskPlans).toHaveLength(1);
     expect(result.taskPlans[0]?.taskId).toBe(102);
     expect(result.proposals[0]?.sourceWorkItemIds).toEqual([101, 102]);
+    expect(completion).toHaveBeenCalledOnce();
+  });
+
+  it('normalizes the alternate Plan-agent field names shown in streamed Claude output', async () => {
+    const returned = {
+      featureSummary: 'The Pull Sheet screen coordinates reservation inventory.',
+      proposedAcceptanceCriteria: [
+        { id: 'AC_001', title: 'Client Leaving Derse bulk action', description: 'Marks eligible items as not returning.', sourceIds: ['19959', '22375'] },
+        { id: 'AC_002', title: 'Container display', description: 'Containers appear in Add Existing and the Pull Sheet.', sourceIds: ['19959'] },
+      ],
+      taskPlans: [{ taskId: 22375, taskTitle: 'Client Leaving Derse Button', verificationIntent: 'Verify eligible items are marked in bulk.', relatedCriteriaIds: ['AC_001', 'AC_002'], supportingSourceIds: ['19959'] }],
+      ambiguityNotes: 'Confirm whether full quantity must remain in the warehouse.',
+      unresolvedQuestions: [{ question: 'Does bulk selection cover all warehouses?', impact: 'Changes the action scope.', sources: ['22375'] }],
+    };
+    const base = fakeProvider();
+    const provider: ModelProviderAdapter = {
+      ...base,
+      async complete<T>() {
+        throw new StructuredOutputValidationError(returned, [{ path: 'proposedAcceptanceCriteria', message: 'Unrecognized key.' }]);
+      },
+    };
+
+    const result = await synthesizeWorkItemPlan({ provider, apiKey: 'test-key', modelId: 'gpt-6-sol', items: [
+      { id: 19959, kind: 'REQUIREMENT', type: 'User Story', title: 'Manage Pull Sheets' },
+      { id: 22375, parentId: 19959, kind: 'TASK', type: 'Task', title: 'Client Leaving Derse Button' },
+    ] });
+
+    expect(result.proposals[0]).toMatchObject({ id: 'AC_001', text: 'Client Leaving Derse bulk action: Marks eligible items as not returning.', sourceWorkItemIds: [19959, 22375] });
+    expect(result.taskPlans[0]).toMatchObject({ taskId: 22375, summary: 'Client Leaving Derse Button', criterionProposalIds: ['AC_001'], verificationIntent: ['Verify eligible items are marked in bulk.'] });
+    expect(result.taskPlans[0]?.unresolvedQuestions).toContain('Does bulk selection cover all warehouses? Impact: Changes the action scope. Sources: 22375.');
+    expect(result.ambiguityNotes).toEqual(['Confirm whether full quantity must remain in the warehouse.']);
+  });
+
+  it('retries one invalid synthesis with explicit schema correction instructions', async () => {
+    const invalid = { featureSummary: 'A feature summary.', proposedAcceptanceCriteria: [] };
+    const valid = {
+      featureSummary: 'A feature summary.', ambiguityNotes: [],
+      proposals: [{ id: 'criterion-1', text: 'The feature saves the record.', sourceWorkItemIds: [101, 102], ambiguityNotes: [] }],
+      taskPlans: [{ taskId: 102, summary: 'Submit the form.', criterionProposalIds: ['criterion-1'], verificationIntent: ['Submit and inspect the saved record.'], unresolvedQuestions: [] }],
+    };
+    const base = fakeProvider();
+    let calls = 0;
+    const provider: ModelProviderAdapter = {
+      ...base,
+      async complete<T>(_key: string, request: AgentCompletionRequest) {
+        calls += 1;
+        if (calls === 1) throw new StructuredOutputValidationError(invalid, [{ path: 'proposedAcceptanceCriteria', message: 'Use proposals.' }]);
+        expect(request.system).toContain('Do not use aliases such as proposedAcceptanceCriteria');
+        expect(JSON.parse(request.input)).toMatchObject({ repairRequest: expect.any(String), validationIssues: expect.arrayContaining([expect.stringContaining('Use proposals.')]) });
+        return { value: request.schema.parse(valid) as T, inputTokens: 500, outputTokens: 200 };
+      },
+    };
+
+    await expect(synthesizeWorkItemPlan({ provider, apiKey: 'test-key', modelId: 'gpt-6-sol', items: [
+      { id: 101, kind: 'REQUIREMENT', type: 'User Story', title: 'Create record' },
+      { id: 102, parentId: 101, kind: 'TASK', type: 'Task', title: 'Submit form' },
+    ] })).resolves.toMatchObject({ proposals: [{ id: 'criterion-1' }], taskPlans: [{ taskId: 102 }] });
+    expect(calls).toBe(2);
   });
 
   it('rejects synthesis output that links criteria or Task plans outside selected work items', async () => {
-    const provider = fakeProvider({
+    const invalid = {
       featureSummary: 'A feature summary.',
+      ambiguityNotes: [],
       proposals: [{ id: 'unknown', text: 'An unsupported behavior.', sourceWorkItemIds: [999], ambiguityNotes: [] }],
       taskPlans: [{ taskId: 102, summary: 'Task plan.', criterionProposalIds: ['unknown'], verificationIntent: ['Verify behavior.'], unresolvedQuestions: [] }],
-    });
+    };
+    const base = fakeProvider();
+    const provider: ModelProviderAdapter = {
+      ...base,
+      async complete<T>() {
+        throw new StructuredOutputValidationError(invalid, [{ path: 'proposals.0.sourceWorkItemIds', message: 'The response violates a semantic source-reference constraint.' }]);
+      },
+    };
     await expect(synthesizeWorkItemPlan({ provider, apiKey: 'test-key', modelId: 'gpt-6-sol', items: [{ id: 101, kind: 'REQUIREMENT', type: 'User Story', title: 'Story' }, { id: 102, kind: 'TASK', type: 'Task', title: 'Task' }] })).rejects.toThrow(/outside the selected source snapshots/i);
   });
 

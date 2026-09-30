@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { userEvent } from '@testing-library/user-event';
@@ -90,6 +90,32 @@ describe('desktop M1 screens', () => {
     const successBadge = await screen.findByText('Test Success');
     expect(successBadge.className).toContain('test-status-success');
     expect(await screen.findByText('Test Success. The model returned a response.')).toBeTruthy();
+  });
+
+  it('shows the output-token ceiling and warns before an out-of-range model setting can be saved', async () => {
+    const user = userEvent.setup();
+    const initialState: DesktopState = {
+      ...state,
+      azureCliAvailable: true,
+      accounts: [{ homeAccountId: 'account-1', tenantId: 'tenant-1', username: 'qa@example.com' }],
+      selectedAccountId: 'account-1',
+      selectedOrganization: 'contoso',
+      selectedProject: { id: 'project-1', name: 'Portal' },
+      modelProvider: 'claude-code',
+      modelProviderConfigured: true,
+      modelId: 'sonnet',
+      modelProviderAccountEmail: 'qa@example.com',
+    };
+    const testApi = { ...api, listBrowserTestAccounts: async () => [], isBrowserInstalled: async () => false, isRepoWorkerImageInstalled: async () => false } as unknown as DesktopApi;
+    render(<App api={testApi} initialState={initialState} />);
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+
+    const tokenInput = screen.getByRole('spinbutton', { name: 'Max output tokens' }) as HTMLInputElement;
+    expect(tokenInput.max).toBe('64000');
+    expect(screen.getByText(/approved run-wide token, time, and cost budgets still apply/i)).toBeTruthy();
+    fireEvent.change(tokenInput, { target: { value: '64001' } });
+    expect((await screen.findByRole('alert')).textContent).toMatch(/256 to 64,000 tokens/i);
+    expect((screen.getByRole('button', { name: 'Save and test model' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('shows only the connected Claude account models after discovery', async () => {

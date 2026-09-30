@@ -39,6 +39,8 @@ const api: DesktopApi = Object.freeze({
   getRepositoryConfigDraft: (target: TargetConfig) => ipcRenderer.invoke('qa:get-repository-config-draft', target),
   saveRepositoryConfigDraft: (input: Parameters<DesktopApi['saveRepositoryConfigDraft']>[0]) => ipcRenderer.invoke('qa:save-repository-config-draft', input),
   createDraftPlan: (previousRunId?: string, streamId?: string) => ipcRenderer.invoke('qa:create-draft-plan', previousRunId, streamId),
+  openPlanProgressWindow: (streamId: string) => ipcRenderer.invoke('qa:open-plan-progress-window', streamId),
+  readyPlanProgressWindow: (streamId: string) => ipcRenderer.invoke('qa:ready-plan-progress-window', streamId),
   onModelStream: (listener: (event: ModelStreamEvent) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, payload: ModelStreamEvent) => listener(payload);
     ipcRenderer.on('qa:model-stream', handler);

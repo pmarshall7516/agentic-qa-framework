@@ -36,7 +36,7 @@ describe('validated desktop IPC', () => {
     const { handlers, api, ipc } = fixture();
     await expect(handlers.get('qa:get-state')!({ senderFrame: { url: 'http://127.0.0.1:5173/' } }, 'extra')).rejects.toThrow();
     expect(api.getState).not.toHaveBeenCalled();
-    expect(ipc.handle).toHaveBeenCalledTimes(65);
+    expect(ipc.handle).toHaveBeenCalledTimes(67);
     expect([...handlers.keys()]).toContain('qa:connect-claude-account');
     expect([...handlers.keys()]).toContain('qa:generate-model-suggestions');
     expect([...handlers.keys()]).toContain('qa:list-git-repositories');
@@ -51,6 +51,8 @@ describe('validated desktop IPC', () => {
     expect([...handlers.keys()]).toContain('qa:get-repository-config-draft');
     expect([...handlers.keys()]).toContain('qa:list-browser-test-accounts');
     expect([...handlers.keys()]).toContain('qa:save-browser-test-account');
+    expect([...handlers.keys()]).toContain('qa:open-plan-progress-window');
+    expect([...handlers.keys()]).toContain('qa:ready-plan-progress-window');
     expect([...handlers.keys()]).toContain('qa:list-organizations');
     expect([...handlers.keys()]).toContain('qa:list-sprint-taskboard');
     expect([...handlers.keys()]).not.toContain('qa:save-client-id');
@@ -66,6 +68,34 @@ describe('validated desktop IPC', () => {
     const modelId = '77777777-7777-4777-8777-777777777777';
     await expect(handlers.get('qa:test-saved-model')!(sender, modelId)).resolves.toMatchObject({ reachable: true });
     expect(api.testSavedModel).toHaveBeenCalledWith(modelId);
+  });
+
+  it('accepts the expanded saved-model output limit but rejects values beyond it', async () => {
+    const { handlers, api } = fixture();
+    api.saveAgentModelSettings = vi.fn(async (input: unknown) => input);
+    const sender = { senderFrame: { url: 'http://127.0.0.1:5173/' } };
+    const settings = { providerId: 'claude-code', modelId: 'sonnet', maxOutputTokens: 64_000 };
+
+    await expect(handlers.get('qa:save-agent-model-settings')!(sender, settings)).resolves.toEqual(settings);
+    await expect(handlers.get('qa:save-agent-model-settings')!(sender, { ...settings, maxOutputTokens: 64_001 })).rejects.toThrow();
+    expect(api.saveAgentModelSettings).toHaveBeenCalledOnce();
+  });
+
+  it('validates plan progress window IDs before opening or releasing queued events', async () => {
+    const { handlers, api } = fixture();
+    api.openPlanProgressWindow = vi.fn(async () => undefined);
+    api.readyPlanProgressWindow = vi.fn(async () => undefined);
+    const sender = { senderFrame: { url: 'http://127.0.0.1:5173/' } };
+
+    await expect(handlers.get('qa:open-plan-progress-window')!(sender, '../invalid')).rejects.toThrow();
+    await expect(handlers.get('qa:ready-plan-progress-window')!(sender, '../invalid')).rejects.toThrow();
+    expect(api.openPlanProgressWindow).not.toHaveBeenCalled();
+    expect(api.readyPlanProgressWindow).not.toHaveBeenCalled();
+    const streamId = '77777777-7777-4777-8777-777777777777';
+    await expect(handlers.get('qa:open-plan-progress-window')!(sender, streamId)).resolves.toBeUndefined();
+    await expect(handlers.get('qa:ready-plan-progress-window')!(sender, streamId)).resolves.toBeUndefined();
+    expect(api.openPlanProgressWindow).toHaveBeenCalledWith(streamId);
+    expect(api.readyPlanProgressWindow).toHaveBeenCalledWith(streamId);
   });
 
   it('discovers organizations only from a trusted renderer', async () => {

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { ProviderModel } from '@agentic-qa/domain/agent';
 import { runClaudeCliCommand } from './claude-cli.js';
-import { AgentCompletionRequestSchema, type AgentCompletionRequest, type ModelProviderAdapter } from './provider.js';
+import { AgentCompletionRequestSchema, type AgentCompletionRequest, type ModelProviderAdapter, StructuredOutputValidationError } from './provider.js';
 
 type CliRunner = (args: string[], input: string, timeoutMs?: number, onStdout?: (chunk: string) => void) => Promise<string>;
 const CATALOG: ProviderModel[] = [
@@ -25,7 +25,7 @@ function cliResponseError(raw: string): string | undefined {
   }
 }
 
-async function runClaudeCli(args: string[], input: string, timeoutMs = 120_000, onStdout?: (chunk: string) => void): Promise<string> {
+async function runClaudeCli(args: string[], input: string, timeoutMs = 600_000, onStdout?: (chunk: string) => void): Promise<string> {
   const result = await runClaudeCliCommand(args, input, { timeoutMs, maxOutputBytes: 5_000_000, ...(onStdout ? { onStdout } : {}) });
   if (result.code !== 0) throw new Error(cliResponseError(result.output) ?? `Claude Code request failed (exit ${result.code}). Check the signed-in account, selected model access and plan limits.`);
   return result.output;
@@ -36,7 +36,7 @@ function requestInput(request: AgentCompletionRequest): string {
 }
 
 async function complete<T>(runner: CliRunner, request: AgentCompletionRequest): Promise<{ value: T; inputTokens: number; outputTokens: number }> {
-  const parsedRequest = AgentCompletionRequestSchema.parse({ modelId: request.modelId, system: request.system, input: request.input, maxOutputTokens: request.maxOutputTokens });
+  const parsedRequest = AgentCompletionRequestSchema.parse({ modelId: request.modelId, system: request.system, input: request.input, maxOutputTokens: request.maxOutputTokens, ...(request.timeoutMs ? { timeoutMs: request.timeoutMs } : {}) });
   const onText = request.onText;
   const model = CATALOG.find(({ modelId }) => modelId === parsedRequest.modelId);
   if (!model) throw new Error('The selected model is not in the Claude Code model catalog.');
@@ -53,13 +53,17 @@ async function complete<T>(runner: CliRunner, request: AgentCompletionRequest): 
   ];
   let raw: string;
   let streamBuffer = '';
+  let structuredOutputBuffer = '';
   const onStdout = onText ? (chunk: string) => {
     streamBuffer += chunk;
     const lines = streamBuffer.split(/\r?\n/);
     streamBuffer = lines.pop() ?? '';
-    for (const line of lines) emitTextDelta(line, onText);
+    for (const line of lines) {
+      const delta = emitTextDelta(line, onText);
+      if (delta.partialJson) structuredOutputBuffer += delta.partialJson;
+    }
   } : undefined;
-  try { raw = await runner(args, input, parsedRequest.maxOutputTokens === 8 ? 45_000 : undefined, onStdout); } catch (error) { throw error instanceof Error ? error : new Error('Claude Code request failed.'); }
+  try { raw = await runner(args, input, parsedRequest.maxOutputTokens === 8 ? 45_000 : parsedRequest.timeoutMs, onStdout); } catch (error) { throw error instanceof Error ? error : new Error('Claude Code request failed.'); }
   let response: z.infer<typeof CliResponseSchema>;
   try {
     let decoded: unknown;
@@ -75,29 +79,89 @@ async function complete<T>(runner: CliRunner, request: AgentCompletionRequest): 
     response = CliResponseSchema.parse(decoded);
   }
   catch { throw new Error('Claude Code returned an invalid structured result.'); }
-  if (onText && streamBuffer.trim()) emitTextDelta(streamBuffer, onText);
-  if (response.is_error) throw new Error(cliResponseError(raw) ?? 'Claude Code returned an error instead of a structured result.');
-  let value: unknown = response.structured_output;
-  if (value === undefined && response.result !== undefined) {
-    try { value = JSON.parse(response.result); }
-    catch { throw new Error('Claude Code returned an invalid structured result.'); }
+  if (onText && streamBuffer.trim()) {
+    const delta = emitTextDelta(streamBuffer, onText);
+    if (delta.partialJson) structuredOutputBuffer += delta.partialJson;
   }
-  if (value === undefined) throw new Error('Claude Code returned an invalid structured result.');
-  const validated = request.schema.safeParse(value);
-  if (!validated.success) throw new Error('Claude Code returned a structured result that did not match the requested schema.');
+  if (response.is_error) throw new Error(cliResponseError(raw) ?? 'Claude Code returned an error instead of a structured result.');
+  const candidates = [
+    ...(typeof response.structured_output === 'string'
+      ? jsonCandidates(response.structured_output)
+      : response.structured_output === undefined || response.structured_output === null ? [] : [response.structured_output]),
+    ...jsonCandidates(response.result ?? ''),
+    ...jsonCandidates(structuredOutputBuffer),
+  ];
+  const attempts = candidates.map((candidate) => ({ candidate, result: request.schema.safeParse(candidate) }));
+  const validated = attempts.find(({ result }) => result.success)?.result;
+  if (!validated?.success) {
+    if (attempts.length) {
+      const best = attempts.map(({ candidate, result }) => ({ candidate, issues: result.success ? [] : result.error.issues }))
+        .sort((left, right) => left.issues.length - right.issues.length)[0]!;
+      throw new StructuredOutputValidationError(best.candidate, best.issues.map((issue) => ({ path: issue.path.map(String).join('.'), message: issue.message })));
+    }
+    throw new Error('Claude Code did not return a schema-valid JSON result. Its text response could not be used as the requested plan.');
+  }
   const inputTokens = response.usage?.input_tokens ?? 0;
   const outputTokens = response.usage?.output_tokens ?? 0;
-  if (outputTokens > parsedRequest.maxOutputTokens) throw new Error('Claude Code response exceeded the requested output-token budget.');
+  if (outputTokens > parsedRequest.maxOutputTokens) {
+    throw new Error(`Claude Code returned ${outputTokens.toLocaleString()} output tokens, exceeding this request's ${parsedRequest.maxOutputTokens.toLocaleString()}-token budget. Increase the saved model limit up to 64,000 tokens or reduce the planning scope.`);
+  }
   return { value: validated.data as T, inputTokens, outputTokens };
 }
 
-function emitTextDelta(line: string, onText: (chunk: string) => void): void {
+function emitTextDelta(line: string, onText: (chunk: string) => void): { partialJson?: string } {
   try {
-    const message = JSON.parse(line) as { type?: unknown; event?: { type?: unknown; delta?: { type?: unknown; text?: unknown } } };
+    const message = JSON.parse(line) as { type?: unknown; event?: { type?: unknown; delta?: { type?: unknown; text?: unknown; partial_json?: unknown } } };
     const delta = message.type === 'stream_event' && message.event?.type === 'content_block_delta' && message.event.delta?.type === 'text_delta'
       ? message.event.delta.text : undefined;
+    const partialJson = message.type === 'stream_event' && message.event?.type === 'content_block_delta' && message.event.delta?.type === 'input_json_delta'
+      ? message.event.delta.partial_json : undefined;
     if (typeof delta === 'string' && delta) onText(delta);
-  } catch { /* Ignore non-JSON or partial stream lines; final structured output is validated below. */ }
+    else if (typeof partialJson === 'string' && partialJson) onText(partialJson);
+    return typeof partialJson === 'string' ? { partialJson } : {};
+  } catch { /* Ignore non-JSON or partial stream lines; final structured output is validated below. */ return {}; }
+}
+
+function jsonCandidates(text: string): unknown[] {
+  const values: unknown[] = [];
+  const seen = new Set<string>();
+  const parse = (candidate: string) => {
+    const normalized = candidate.trim();
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    try { values.push(JSON.parse(normalized) as unknown); }
+    catch { /* Keep scanning for a complete JSON value in the response text. */ }
+  };
+  parse(text);
+  for (const match of text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) parse(match[1] ?? '');
+  const stack: string[] = [];
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === '{' || char === '[') {
+      if (!stack.length) start = index;
+      stack.push(char);
+    } else if (char === '}' || char === ']') {
+      const open = stack.pop();
+      if ((char === '}' && open !== '{') || (char === ']' && open !== '[')) {
+        stack.length = 0;
+        start = -1;
+      } else if (!stack.length && start >= 0) {
+        parse(text.slice(start, index + 1));
+        start = -1;
+      }
+    }
+  }
+  return values;
 }
 
 async function probe(runner: CliRunner, modelId: string, timeoutMs = 30_000): Promise<void> {

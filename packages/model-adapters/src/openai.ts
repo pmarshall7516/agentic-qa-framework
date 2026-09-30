@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AgentCompletionRequestSchema, type AgentCompletionRequest, type ModelProviderAdapter, modelResponseSchema, normalizedModel, providerJson, validateApiKey, validateModelId } from './provider.js';
+import { AgentCompletionRequestSchema, type AgentCompletionRequest, type ModelProviderAdapter, modelResponseSchema, normalizedModel, providerJson, validateApiKey, validateModelId, validateStructuredOutput } from './provider.js';
 
 const BrowserStepSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('goto'), path: z.string().startsWith('/').max(1000) }).strict(),
@@ -123,7 +123,7 @@ export const openAiAdapter: ModelProviderAdapter = {
   },
   async complete<T>(apiKey: string, input: AgentCompletionRequest, fetcher: typeof fetch = fetch) {
     validateApiKey(apiKey);
-    const request = AgentCompletionRequestSchema.parse({ modelId: input.modelId, system: input.system, input: input.input, maxOutputTokens: input.maxOutputTokens }) as AgentCompletionRequest;
+    const request = AgentCompletionRequestSchema.parse({ modelId: input.modelId, system: input.system, input: input.input, maxOutputTokens: input.maxOutputTokens, ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}) }) as AgentCompletionRequest;
     const schema = z.toJSONSchema(input.schema);
     const response = await fetcher('https://api.openai.com/v1/responses', {
       method: 'POST', headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
@@ -132,7 +132,7 @@ export const openAiAdapter: ModelProviderAdapter = {
         input: [{ role: 'developer', content: request.system }, { role: 'user', content: request.input }],
         text: { format: { type: 'json_schema', name: 'agent_result', strict: true, schema } },
       }),
-      redirect: 'error', referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(60_000),
+      redirect: 'error', referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(request.timeoutMs ?? 60_000),
     });
     const parsed = z.object({
       output_text: z.string().max(1_000_000).optional(),
@@ -144,6 +144,6 @@ export const openAiAdapter: ModelProviderAdapter = {
     let decoded: unknown;
     try { decoded = JSON.parse(text); } catch { throw new Error('OpenAI returned invalid JSON for the agent result.'); }
     const usage = parsed.usage ?? { input_tokens: 0, output_tokens: 0 };
-    return { value: input.schema.parse(decoded) as T, inputTokens: usage.input_tokens, outputTokens: usage.output_tokens };
+    return { value: validateStructuredOutput<T>(input.schema, decoded), inputTokens: usage.input_tokens, outputTokens: usage.output_tokens };
   },
 };

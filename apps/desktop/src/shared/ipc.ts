@@ -49,13 +49,9 @@ export interface DraftPlan {
   envelopePreview?: { providerId: 'openai' | 'anthropic' | 'openrouter' | 'claude-code'; modelId: string; sourceIds: number[]; sourceRevisions: Record<string, number>; repositoryPaths: string[]; allowedOrigins: string[]; commandIds: string[]; excludedContext: string[]; budget: RunBudget; runInstructions?: string; testAccounts: BrowserTestAccountSummary[]; showBrowserWindow: boolean };
 }
 
-export interface ModelStreamEvent {
-  streamId: string;
-  scope: 'planning' | 'run';
-  phase: string;
-  chunk: string;
-  at: string;
-}
+export type ModelStreamEvent =
+  | { type: 'text'; streamId: string; scope: 'planning' | 'run'; phase: string; chunk: string; at: string }
+  | { type: 'status'; streamId: string; scope: 'planning' | 'run'; phase: string; status: 'RUNNING' | 'COMPLETED' | 'FAILED'; message: string; at: string };
 
 export interface QueueItemView {
   entry: QueueEntry;
@@ -160,6 +156,8 @@ export interface DesktopApi {
   getRepositoryConfigDraft(target: TargetConfig): Promise<string>;
   saveRepositoryConfigDraft(input: { target: TargetConfig; content: string }): Promise<void>;
   createDraftPlan(previousRunId?: string, streamId?: string): Promise<DraftPlan>;
+  openPlanProgressWindow(streamId: string): Promise<void>;
+  readyPlanProgressWindow(streamId: string): Promise<void>;
   onModelStream(listener: (event: ModelStreamEvent) => void): () => void;
   importProviderKey(providerId: 'openai' | 'anthropic' | 'openrouter'): Promise<boolean>;
   connectClaudeAccount(): Promise<boolean>;

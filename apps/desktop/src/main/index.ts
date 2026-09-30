@@ -11,6 +11,7 @@ import { AzureCliAdoAuthService } from '@agentic-qa/ado/azure-cli-auth';
 import { DesktopController } from './controller.js';
 import { registerIpcHandlers } from './ipc.js';
 import { REPO_WORKER_IMAGE } from '@agentic-qa/repo-worker/runner';
+import type { ModelStreamEvent } from '../shared/ipc.js';
 
 const devServerUrl = !app.isPackaged && process.env.VITE_DEV_SERVER_URL === 'http://127.0.0.1:5173'
   ? process.env.VITE_DEV_SERVER_URL
@@ -128,11 +129,74 @@ async function createWindow(): Promise<void> {
       allowRunningInsecureContent: false,
     },
   });
+  const progressWindows = new Map<string, BrowserWindow>();
+  const progressWindowsReady = new Set<string>();
+  const waitingModelEvents = new Map<string, ModelStreamEvent[]>();
+  const sendModelEvent = (event: ModelStreamEvent) => {
+    if (!window.isDestroyed()) window.webContents.send('qa:model-stream', event);
+    const progressWindow = progressWindows.get(event.streamId);
+    if (!progressWindow || progressWindow.isDestroyed()) return;
+    if (progressWindowsReady.has(event.streamId)) {
+      progressWindow.webContents.send('qa:model-stream', event);
+      return;
+    }
+    const queue = [...(waitingModelEvents.get(event.streamId) ?? []), event];
+    let queuedChars = queue.reduce((total, item) => total + (item.type === 'text' ? item.chunk.length : item.message.length), 0);
+    while (queue.length > 2000 || queuedChars > 100_000) {
+      const removed = queue.shift();
+      if (!removed) break;
+      queuedChars -= removed.type === 'text' ? removed.chunk.length : removed.message.length;
+    }
+    waitingModelEvents.set(event.streamId, queue);
+  };
+  const openPlanProgressWindow = async (streamId: string) => {
+    const existing = progressWindows.get(streamId);
+    if (existing && !existing.isDestroyed()) { existing.focus(); return; }
+    const progressWindow = new BrowserWindow({
+      width: 820, height: 680, minWidth: 600, minHeight: 440,
+      backgroundColor: '#111820', title: 'Plan agent progress', parent: window, autoHideMenuBar: true,
+      webPreferences: {
+        preload: join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false,
+        sandbox: true, webSecurity: true, webviewTag: false, allowRunningInsecureContent: false,
+      },
+    });
+    progressWindow.setMenuBarVisibility(false);
+    progressWindows.set(streamId, progressWindow);
+    progressWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    progressWindow.webContents.on('will-navigate', (event, url) => {
+      const trusted = devServerUrl ? new URL(url).origin === new URL(devServerUrl).origin : url === packagedUrl;
+      if (!trusted) event.preventDefault();
+    });
+    progressWindow.on('closed', () => {
+      progressWindows.delete(streamId);
+      progressWindowsReady.delete(streamId);
+      waitingModelEvents.delete(streamId);
+    });
+    try {
+      if (devServerUrl) {
+        const progressUrl = new URL(devServerUrl);
+        progressUrl.searchParams.set('planProgress', streamId);
+        await progressWindow.loadURL(progressUrl.toString());
+      } else {
+        await progressWindow.loadFile(join(app.getAppPath(), 'dist', 'index.html'), { query: { planProgress: streamId } });
+      }
+    } catch (error) {
+      if (!progressWindow.isDestroyed()) progressWindow.close();
+      throw error;
+    }
+  };
+  const readyPlanProgressWindow = (streamId: string) => {
+    const progressWindow = progressWindows.get(streamId);
+    if (!progressWindow || progressWindow.isDestroyed()) return;
+    progressWindowsReady.add(streamId);
+    for (const event of waitingModelEvents.get(streamId) ?? []) progressWindow.webContents.send('qa:model-stream', event);
+    waitingModelEvents.delete(streamId);
+  };
   const controller = new DesktopController({
     store,
-    emitModelStream: (event) => {
-      if (!window.isDestroyed()) window.webContents.send('qa:model-stream', event);
-    },
+    emitModelStream: sendModelEvent,
+    openPlanProgressWindow,
+    readyPlanProgressWindow,
     browserExecutablePath: () => chromium.executablePath(),
     installBrowser: () => new Promise<void>((resolveInstall, rejectInstall) => {
       const allowed = ['PATH', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP', 'HOME'];

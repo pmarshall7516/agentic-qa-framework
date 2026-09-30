@@ -5,11 +5,31 @@ export const AgentCompletionRequestSchema = z.object({
   modelId: z.string().min(1).max(200),
   system: z.string().min(1).max(20_000),
   input: z.string().min(1).max(1_000_000),
-  maxOutputTokens: z.number().int().positive().max(32_000),
+  maxOutputTokens: z.number().int().positive().max(64_000),
+  timeoutMs: z.number().int().min(1_000).max(600_000).optional(),
 }).strict();
 
 export interface AgentCompletionRequest extends z.infer<typeof AgentCompletionRequestSchema> { schema: z.ZodType; onText?: (chunk: string) => void }
 export interface AgentCompletion<T = unknown> { value: T; inputTokens: number; outputTokens: number }
+
+export class StructuredOutputValidationError extends Error {
+  readonly candidate: unknown;
+  readonly issues: Array<{ path: string; message: string }>;
+
+  constructor(candidate: unknown, issues: Array<{ path: string; message: string }>) {
+    super('The provider returned a structured result that did not match the requested schema.');
+    this.name = 'StructuredOutputValidationError';
+    this.candidate = candidate;
+    this.issues = issues.slice(0, 30).map(({ path, message }) => ({ path: path.slice(0, 300), message: message.slice(0, 500) }));
+  }
+}
+
+export function validateStructuredOutput<T>(schema: z.ZodType, candidate: unknown): T {
+  const parsed = schema.safeParse(candidate);
+  if (parsed.success) return parsed.data as T;
+  throw new StructuredOutputValidationError(candidate, parsed.error.issues.map((issue) => ({ path: issue.path.map(String).join('.'), message: issue.message })));
+}
+
 export interface ModelProviderAdapter {
   readonly providerId: ProviderModel['providerId'];
   listModels(apiKey: string, fetcher?: typeof fetch): Promise<ProviderModel[]>;

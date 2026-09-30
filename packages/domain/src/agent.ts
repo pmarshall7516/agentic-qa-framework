@@ -21,7 +21,7 @@ export const ProviderModelSchema = z.object({
 export const SavedModelTestStatusSchema = z.enum(['untested', 'reachable', 'unreachable']);
 export const SavedModelSchema = ProviderModelSchema.extend({
   id: z.string().uuid(),
-  maxOutputTokens: z.number().int().min(256).max(32_000),
+  maxOutputTokens: z.number().int().min(256).max(64_000),
   credentialGeneration: z.string().uuid(),
   testStatus: SavedModelTestStatusSchema,
   testedAt: z.iso.datetime().optional(),
@@ -42,7 +42,7 @@ export const SavedModelSchema = ProviderModelSchema.extend({
 
 export const SavedModelViewSchema = ProviderModelSchema.extend({
   id: z.string().uuid(),
-  maxOutputTokens: z.number().int().min(256).max(32_000),
+  maxOutputTokens: z.number().int().min(256).max(64_000),
   testStatus: z.enum(['untested', 'reachable', 'unreachable', 'stale']),
   testedAt: z.iso.datetime().optional(),
   testMessage: z.string().max(500).optional(),

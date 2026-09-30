@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AgentCompletionRequestSchema, type AgentCompletionRequest, type ModelProviderAdapter, modelResponseSchema, normalizedModel, providerJson, validateApiKey, validateModelId } from './provider.js';
+import { AgentCompletionRequestSchema, type AgentCompletionRequest, type ModelProviderAdapter, modelResponseSchema, normalizedModel, providerJson, validateApiKey, validateModelId, validateStructuredOutput } from './provider.js';
 import type { ProviderModel } from '@agentic-qa/domain/agent';
 
 const ANTHROPIC_MODEL_PRICES = new Map([
@@ -71,7 +71,7 @@ export const anthropicAdapter: ModelProviderAdapter = {
   },
   async complete<T>(apiKey: string, input: AgentCompletionRequest, fetcher: typeof fetch = fetch) {
     validateApiKey(apiKey);
-    const request = AgentCompletionRequestSchema.parse({ modelId: input.modelId, system: input.system, input: input.input, maxOutputTokens: input.maxOutputTokens }) as AgentCompletionRequest;
+    const request = AgentCompletionRequestSchema.parse({ modelId: input.modelId, system: input.system, input: input.input, maxOutputTokens: input.maxOutputTokens, ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}) }) as AgentCompletionRequest;
     const response = await fetcher('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
@@ -80,7 +80,7 @@ export const anthropicAdapter: ModelProviderAdapter = {
         messages: [{ role: 'user', content: request.input }],
         output_config: { format: { type: 'json_schema', schema: z.toJSONSchema(input.schema) } },
       }),
-      redirect: 'error', referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(60_000),
+      redirect: 'error', referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(request.timeoutMs ?? 60_000),
     });
     const parsed = z.object({
       content: z.array(z.object({ type: z.string(), text: z.string().optional() }).passthrough()).max(100),
@@ -90,6 +90,6 @@ export const anthropicAdapter: ModelProviderAdapter = {
     if (!text) throw new Error('Anthropic returned no structured agent result.');
     let decoded: unknown;
     try { decoded = JSON.parse(text); } catch { throw new Error('Anthropic returned invalid JSON for the agent result.'); }
-    return { value: input.schema.parse(decoded) as T, inputTokens: parsed.usage.input_tokens, outputTokens: parsed.usage.output_tokens };
+    return { value: validateStructuredOutput<T>(input.schema, decoded), inputTokens: parsed.usage.input_tokens, outputTokens: parsed.usage.output_tokens };
   },
 };

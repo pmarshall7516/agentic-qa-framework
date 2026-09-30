@@ -48,7 +48,7 @@ type SupportedProviderId = 'openai' | 'anthropic' | 'openrouter' | 'claude-code'
 type ApiKeyProviderId = Exclude<SupportedProviderId, 'claude-code'>;
 const ProviderIdSchema = z.enum(['openai', 'anthropic', 'openrouter', 'claude-code']);
 const providerAdapter = (providerId: SupportedProviderId) => providerId === 'openai' ? openAiAdapter : providerId === 'anthropic' ? anthropicAdapter : providerId === 'openrouter' ? openRouterAdapter : claudeCodeAdapter;
-const ModelSettingsSchema = z.object({ providerId: ProviderIdSchema.default('openai'), modelId: z.string().regex(/^[a-zA-Z0-9._:-]{1,200}$/), maxOutputTokens: z.number().int().min(256).max(32_000) }).strict();
+const ModelSettingsSchema = z.object({ providerId: ProviderIdSchema.default('openai'), modelId: z.string().regex(/^[a-zA-Z0-9._:-]{1,200}$/), maxOutputTokens: z.number().int().min(256).max(64_000) }).strict();
 const WorkItemTypeMappingsSchema = z.record(z.string().min(1).max(120), z.enum(['REQUIREMENT', 'TASK', 'OTHER']));
 const execFile = promisify(execFileCallback);
 const ProjectSchema = z.object({ id: z.string().min(1).max(200), name: z.string().min(1).max(200), state: z.string().max(80).optional() }).strict();
@@ -153,6 +153,8 @@ export class DesktopController {
   private readonly providerFetch: typeof fetch;
   private readonly getProviderAdapter: (providerId: SupportedProviderId) => ModelProviderAdapter;
   private readonly emitModelStream: (event: ModelStreamEvent) => void;
+  private readonly openProgressWindow: (streamId: string) => Promise<void>;
+  private readonly markProgressWindowReady: (streamId: string) => void;
   private readonly pendingModelPreviews = new Map<string, { runId: string; draftHash: string; preview: ReturnType<typeof buildModelPayload>; includedCriterionIds: string[]; expiresAt: number }>();
 
   constructor(options: {
@@ -183,6 +185,8 @@ export class DesktopController {
     providerFetch?: typeof fetch;
     providerAdapterFactory?: (providerId: SupportedProviderId) => ModelProviderAdapter;
     emitModelStream?: (event: ModelStreamEvent) => void;
+    openPlanProgressWindow?: (streamId: string) => Promise<void>;
+    readyPlanProgressWindow?: (streamId: string) => void;
   }) {
     this.store = options.store;
     this.ado = options.ado ?? new AdoClient();
@@ -216,6 +220,8 @@ export class DesktopController {
     this.providerFetch = options.providerFetch ?? fetch;
     this.getProviderAdapter = options.providerAdapterFactory ?? providerAdapter;
     this.emitModelStream = options.emitModelStream ?? (() => undefined);
+    this.openProgressWindow = options.openPlanProgressWindow ?? (async () => undefined);
+    this.markProgressWindowReady = options.readyPlanProgressWindow ?? (() => undefined);
   }
 
   async getState(): Promise<DesktopState> {
@@ -1129,8 +1135,28 @@ export class DesktopController {
     await this.setSetting(this.repositoryConfigSettingKey(target), config);
   }
 
+  async openPlanProgressWindow(streamIdInput: string): Promise<void> {
+    await this.openProgressWindow(z.string().uuid().parse(streamIdInput));
+  }
+
+  async readyPlanProgressWindow(streamIdInput: string): Promise<void> {
+    this.markProgressWindowReady(z.string().uuid().parse(streamIdInput));
+  }
+
   async createDraftPlan(previousRunId?: string, streamIdInput?: string): Promise<DraftPlan> {
     const streamId = z.string().uuid().parse(streamIdInput ?? randomUUID());
+    this.streamModelStatus(streamId, 'planning', 'plan-preparation', 'RUNNING', 'Checking the saved model and preparing the selected work-item context.');
+    try {
+      const plan = await this.buildDraftPlan(previousRunId, streamId);
+      this.streamModelStatus(streamId, 'planning', 'plan-ready', 'COMPLETED', 'The Plan agent finished. Review the generated plan in Agentic QA.');
+      return plan;
+    } catch (error) {
+      this.streamModelStatus(streamId, 'planning', 'plan-failed', 'FAILED', error instanceof Error ? error.message : 'The Plan agent could not prepare a plan.');
+      throw error;
+    }
+  }
+
+  private async buildDraftPlan(previousRunId: string | undefined, streamId: string): Promise<DraftPlan> {
     const configuredAgent = await this.requireConfiguredAgent();
     this.pendingPlans.clear();
     let target = TargetSchema.parse(await this.setting<TargetConfig>('run.target'));
@@ -1147,6 +1173,7 @@ export class DesktopController {
     if (selectedAccounts.length !== (target.testAccountIds ?? []).length) throw new Error('A selected browser test account is missing. Refresh Settings and select an available account.');
     if (selectedAccounts.some(({ origin }) => origin !== (target.siteBaseUrl ? new URL(target.siteBaseUrl).origin : ''))) throw new Error('A selected browser test account does not match the configured site origin.');
     if (selectedAccounts.some((account) => account.revision !== target.testAccountVersions?.[account.id])) throw new Error('A selected browser test account changed after this target was saved. Save the target again and create a fresh plan.');
+    this.streamModelStatus(streamId, 'planning', 'source-refresh', 'RUNNING', 'Refreshing Azure DevOps work items and source revisions.');
     const queue = await this.refreshPlanningQueue();
     if (!queue.length) throw new Error('Add at least one work item to the QA Queue before creating a plan.');
     const snapshots: WorkItemSnapshot[] = [];
@@ -1221,9 +1248,11 @@ export class DesktopController {
         });
       }
     }
+    this.streamModelStatus(streamId, 'planning', 'work-item-synthesis', 'RUNNING', 'Plan agent is synthesizing the selected Requirements and Tasks.');
     const synthesis = await synthesizeWorkItemPlan({
       provider: this.getProviderAdapter(configuredAgent.providerId), apiKey: configuredAgent.apiKey,
       modelId: configuredAgent.modelId,
+      maxOutputTokens: configuredAgent.maxOutputTokens,
       onModelText: (phase, chunk) => this.streamModelText(streamId, 'planning', phase, chunk),
       items: snapshots.map(({ id, parentId, kind, type, title, state, description, acceptanceCriteria, comments }) => ({ id, ...(parentId ? { parentId } : {}), kind, type, title, state, ...(description ? { description } : {}), ...(acceptanceCriteria ? { acceptanceCriteria } : {}), ...(comments?.length ? { comments } : {}) })),
       fetcher: this.providerFetch,
@@ -1290,6 +1319,18 @@ export class DesktopController {
   }
 
   async approvePlan(input: DraftPlan): Promise<void> {
+    const streamId = z.string().uuid().parse(input.manifest.runId);
+    this.streamModelStatus(streamId, 'run', 'qa-plan-generation', 'RUNNING', 'Preparing the confirmed QA plan and its agent assignments.');
+    try {
+      await this.approvePlanWithAgents(input);
+      this.streamModelStatus(streamId, 'run', 'qa-plan-ready', 'COMPLETED', 'The confirmed QA plan is ready to run.');
+    } catch (error) {
+      this.streamModelStatus(streamId, 'run', 'qa-plan-failed', 'FAILED', error instanceof Error ? error.message : 'The confirmed QA plan could not be prepared.');
+      throw error;
+    }
+  }
+
+  private async approvePlanWithAgents(input: DraftPlan): Promise<void> {
     const configuredAgent = await this.requireConfiguredAgent();
     const original = this.pendingPlans.get(input.manifest.runId);
     if (!original || JSON.stringify(original.manifest) !== JSON.stringify(input.manifest) || JSON.stringify(original.repositoryCommands ?? []) !== JSON.stringify(input.repositoryCommands ?? [])) throw new Error('This plan is no longer current. Create a fresh draft and review it again.');
@@ -1606,7 +1647,12 @@ export class DesktopController {
 
   private streamModelText(streamId: string, scope: ModelStreamEvent['scope'], phase: string, chunk: string): void {
     if (!chunk) return;
-    try { this.emitModelStream({ streamId, scope, phase, chunk, at: new Date().toISOString() }); }
+    try { this.emitModelStream({ type: 'text', streamId, scope, phase, chunk, at: new Date().toISOString() }); }
+    catch { /* A closed renderer cannot interrupt planning or change QA results. */ }
+  }
+
+  private streamModelStatus(streamId: string, scope: ModelStreamEvent['scope'], phase: string, status: 'RUNNING' | 'COMPLETED' | 'FAILED', message: string): void {
+    try { this.emitModelStream({ type: 'status', streamId, scope, phase, status, message: message.slice(0, 4000), at: new Date().toISOString() }); }
     catch { /* A closed renderer cannot interrupt planning or change QA results. */ }
   }
 
@@ -1668,10 +1714,22 @@ export class DesktopController {
   }
 
   async startRun(runIdInput: string): Promise<QAReport> {
-    await this.requireConfiguredAgent();
-    if (this.runStarting || this.activeRuns.size) throw new Error('Another QA run is already active.');
+    const runId = z.string().uuid().parse(runIdInput);
+    if (this.runStarting || this.activeRuns.size) {
+      this.streamModelStatus(runId, 'run', 'qa-run-failed', 'FAILED', 'Another QA run is already active.');
+      throw new Error('Another QA run is already active.');
+    }
     this.runStarting = true;
-    try { return await this.executeRun(runIdInput); }
+    this.streamModelStatus(runId, 'run', 'qa-run', 'RUNNING', 'Running the confirmed QA plan and collecting evidence.');
+    try {
+      await this.requireConfiguredAgent();
+      const report = await this.executeRun(runId);
+      this.streamModelStatus(runId, 'run', 'qa-run-ready', 'COMPLETED', 'The QA run finished. Review its evidence and report in Agentic QA.');
+      return report;
+    } catch (error) {
+      this.streamModelStatus(runId, 'run', 'qa-run-failed', 'FAILED', error instanceof Error ? error.message : 'The QA run could not be completed.');
+      throw error;
+    }
     finally { this.runStarting = false; }
   }
 
@@ -2017,7 +2075,7 @@ export class DesktopController {
     const catalog = await this.savedModelCatalog();
     const selected = catalog.find((model) => model.providerId === providerId && model.modelId === modelId && model.testStatus === 'reachable' && model.testedCredentialGeneration === generation);
     if (!selected) throw new Error('Select a saved model that passed its reachability test after the latest credential change before planning or running QA.');
-    return { providerId, modelId, maxOutputTokens: Math.max(256, Math.min(selected.maxOutputTokens, 32_000)), apiKey: key ?? '' };
+    return { providerId, modelId, maxOutputTokens: Math.max(256, Math.min(selected.maxOutputTokens, 64_000)), apiKey: key ?? '' };
   }
 
   private async setSetting(key: string, value: unknown): Promise<void> {

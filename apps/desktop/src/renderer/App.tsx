@@ -12,6 +12,7 @@ const navigation: Array<{ id: AppScreen; label: string }> = [
   { id: 'queue', label: 'QA Queue' },
   { id: 'history', label: 'Runs' },
 ];
+const MAX_MODEL_OUTPUT_TOKENS = 64_000;
 
 const EMPTY_STATE: DesktopState = {
   azureCliAvailable: false,
@@ -20,7 +21,7 @@ const EMPTY_STATE: DesktopState = {
   modelProviderConfigured: false,
   modelProvider: 'openai',
   modelId: '',
-  modelMaxOutputTokens: 1200,
+  modelMaxOutputTokens: 64_000,
 };
 
 function projectLabel(project?: AdoProject): string {
@@ -329,7 +330,7 @@ export function App({
   const [modelId, setModelId] = useState(initialState?.modelId ?? '');
   const [modelProvider, setModelProvider] = useState<'openai' | 'anthropic' | 'openrouter' | 'claude-code'>(initialState?.modelProvider ?? 'openai');
   const [providerModels, setProviderModels] = useState<ProviderModel[]>([]);
-  const [modelMaxOutputTokens, setModelMaxOutputTokens] = useState(initialState?.modelMaxOutputTokens ?? 1200);
+  const [modelMaxOutputTokens, setModelMaxOutputTokens] = useState(initialState?.modelMaxOutputTokens ?? 64_000);
   const [selectedRunModelId, setSelectedRunModelId] = useState('');
   const [profileId, setProfileId] = useState('');
   const [profileName, setProfileName] = useState('');
@@ -369,6 +370,10 @@ export function App({
 
   useEffect(() => api.onModelStream?.((event) => {
     if (event.streamId !== modelStreamIdRef.current) return;
+    if (event.type === 'status') {
+      setModelStreamPhase(event.message);
+      return;
+    }
     setModelStreamPhase(event.phase);
     setModelStreamText((current) => `${current}${event.chunk}`.slice(-60_000));
   }), [api]);
@@ -393,7 +398,7 @@ export function App({
       setSelectedGitRef(next.target?.adoRepository ? { name: next.target.adoRepository.refName, objectId: next.target.adoRepository.commit } : undefined);
       setModelProvider(next.modelProvider ?? 'openai');
       setModelId(next.modelId ?? '');
-      setModelMaxOutputTokens(next.modelMaxOutputTokens ?? 1200);
+      setModelMaxOutputTokens(next.modelMaxOutputTokens ?? 64_000);
       if (next.selectedProject) setWorkItemTypes(await api.listWorkItemTypes());
     }).catch((cause) => setError(errorMessage(cause)));
   }, [api, initialState]);
@@ -466,7 +471,7 @@ export function App({
     }
       setModelProvider(next.modelProvider ?? 'openai');
     setModelId(next.modelId ?? '');
-    setModelMaxOutputTokens(next.modelMaxOutputTokens ?? 1200);
+    setModelMaxOutputTokens(next.modelMaxOutputTokens ?? 64_000);
   }
 
   async function signIn() {
@@ -558,6 +563,7 @@ export function App({
       const next = await api.saveTarget(target);
       updateState(next);
       if (target.targetKind !== 'site' && repositoryConfigDraft.trim()) await api.saveRepositoryConfigDraft({ target, content: repositoryConfigDraft });
+      await api.openPlanProgressWindow?.(streamId);
       beginModelStream(streamId);
       const plan = await api.createDraftPlan(undefined, streamId);
       setDraftPlan(plan);
@@ -611,6 +617,7 @@ export function App({
     const streamId = crypto.randomUUID();
     await run(async () => {
       await api.saveRepositoryConfigDraft({ target, content: repositoryConfigDraft });
+      await api.openPlanProgressWindow?.(streamId);
       beginModelStream(streamId);
       const plan = await api.createDraftPlan(undefined, streamId);
       setDraftPlan(plan);
@@ -670,8 +677,9 @@ export function App({
   async function approvePlan() {
     if (!draftPlan) return;
     const streamId = draftPlan.manifest.runId;
-    beginModelStream(streamId);
     await run(async () => {
+      await api.openPlanProgressWindow?.(streamId);
+      beginModelStream(streamId);
       const approved = { ...draftPlan, contract: { ...draftPlan.contract, scenarios: draftPlan.contract.scenarios.map((scenario) => ({ ...scenario, approved: true })) } };
       await api.approvePlan(approved);
       setDraftPlan(undefined);
@@ -747,6 +755,10 @@ export function App({
   }
 
   async function saveModelSettings() {
+    if (!Number.isInteger(modelMaxOutputTokens) || modelMaxOutputTokens < 256 || modelMaxOutputTokens > MAX_MODEL_OUTPUT_TOKENS) {
+      setError(`Max output tokens must be between 256 and ${MAX_MODEL_OUTPUT_TOKENS.toLocaleString()}.`);
+      return;
+    }
     setIsSavingModel(true);
     try {
       await run(async () => {
@@ -865,6 +877,7 @@ export function App({
   async function refreshPlan() {
     const streamId = crypto.randomUUID();
     await run(async () => {
+      await api.openPlanProgressWindow?.(streamId);
       beginModelStream(streamId);
       const plan = await api.createDraftPlan(undefined, streamId);
       setDraftPlan(plan);
@@ -874,6 +887,7 @@ export function App({
   async function createRerunPlan(runId: string) {
     const streamId = crypto.randomUUID();
     await run(async () => {
+      await api.openPlanProgressWindow?.(streamId);
       beginModelStream(streamId);
       const plan = await api.createDraftPlan(runId, streamId);
       setDraftPlan(plan);
@@ -947,11 +961,12 @@ export function App({
   async function startSelectedRun() {
     if (!selectedRun || selectedRun.report) return;
     const runId = selectedRun.manifest.runId;
-    if (modelStreamIdRef.current !== runId) beginModelStream(runId);
-    setActiveRunId(runId);
-    let settled = false;
-    const pending = api.startRun(runId).finally(() => { settled = true; });
     await run(async () => {
+      await api.openPlanProgressWindow?.(runId);
+      if (modelStreamIdRef.current !== runId) beginModelStream(runId);
+      setActiveRunId(runId);
+      let settled = false;
+      const pending = api.startRun(runId).finally(() => { settled = true; });
       while (!settled) {
         await new Promise((resolveDelay) => setTimeout(resolveDelay, 600));
         const [progress, detail] = await Promise.all([api.getRunProgress(runId), api.getRun(runId)]);
@@ -1138,7 +1153,7 @@ export function App({
                 {targetKind !== 'repository' ? <div className="target-block"><label className="field-label" htmlFor="site-url">Development or staging URL</label><input id="site-url" className="text-input" value={siteBaseUrl} onChange={(event) => { const value = event.target.value; setSiteBaseUrl(value); let origin = ''; try { origin = new URL(value).origin; } catch { /* unfinished URL */ } setSelectedTestAccountIds((current) => current.filter((id) => testAccounts.some((account) => account.id === id && account.origin === origin))); }} placeholder="https://staging.example.test" /><p className="field-help">Only the origin in this URL will be approved for the browser worker. Production URLs are not recommended.</p><label className="field-label" htmlFor="test-account-select">Named test accounts</label><select id="test-account-select" className="text-input" multiple size={Math.min(4, Math.max(2, testAccounts.filter(({ origin }) => { try { return origin === new URL(siteBaseUrl).origin; } catch { return false; } }).length))} value={selectedTestAccountIds} onChange={(event) => setSelectedTestAccountIds(Array.from(event.target.selectedOptions, ({ value }) => value))}>{testAccounts.filter(({ origin }) => { try { return origin === new URL(siteBaseUrl).origin; } catch { return false; } }).map((account) => <option key={account.id} value={account.id}>{account.label} · {account.hasUsername ? 'username' : ''}{account.hasPassword ? ' password' : ''}</option>)}</select><p className="field-help">Select one or more accounts for the site origin. The agent sees labels and available fields only; values stay encrypted until the browser uses them. Manage accounts in Settings.</p><label className="checkbox-row"><input type="checkbox" checked={showBrowserWindow} onChange={(event) => setShowBrowserWindow(event.target.checked)} />Show Playwright browser window while testing</label><p className="field-help">Opens a separate Chromium window. When unchecked, site checks run headless.</p></div> : null}
                 {targetKind !== 'repository' ? <div className="target-block"><div className="queue-toolbar"><div><strong>Local Chromium browser</strong><span>{browserInstalled ? 'Installed and ready' : 'Required for site checks; downloads to this device (about 300 MB).'}</span></div><button className="button outline" type="button" disabled={busy || browserInstalled} onClick={() => void installBrowser()}>{busy ? 'Installing…' : browserInstalled ? 'Installed' : 'Install browser'}</button></div></div> : null}
                 {targetKind !== 'site' ? <div className="target-block"><div className="queue-toolbar"><div><strong>Docker repository worker</strong><span>{repoWorkerInstalled ? 'Worker image installed' : 'Docker Desktop required; prepares the pinned Node 22 and .NET 10 worker image.'}</span></div><button className="button outline" type="button" disabled={busy || repoWorkerInstalled} onClick={() => void installRepoWorker()}>{busy ? 'Preparing…' : repoWorkerInstalled ? 'Installed' : 'Prepare worker'}</button></div></div> : null}
-                <div className="disclosure-card"><div className="disclosure-icon">i</div><div><strong>Context sent when you prepare this plan</strong><p>The selected model receives the queued work-item type, title, state, description, acceptance criteria, comments when present, parent links, IDs, and revisions. It uses these ADO snapshots to create the feature summary, feature-level criterion proposals, and per-Task verification plans. The Story is feature context; Tasks are not QAed as separate records. The selected target and run instructions are sent later only if you approve this reviewed scope. Preparing a plan makes a model request; workers do not run until that separate approval.</p><ul>{state.queue.map(({ entry, snapshot }) => <li key={entry.key}>ADO #{entry.workItemId} r{snapshot?.revision ?? 'unknown'} · {snapshot?.type ?? 'work item'} · fields: System.WorkItemType, System.Title, System.State{snapshot?.description ? ', System.Description' : ''}{snapshot?.acceptanceCriteria ? ', Microsoft.VSTS.Common.AcceptanceCriteria' : ''}{snapshot?.comments?.length ? ', comments' : ''}{snapshot?.parentId ? ` · parent #${snapshot.parentId}` : ''}</li>)}</ul><p>{state.modelProvider} / {state.modelId}{state.modelProvider === 'claude-code' ? ' · model request uses the connected Claude plan allowance' : ''}</p></div></div>
+                <div className="disclosure-card"><div className="disclosure-icon">i</div><div><strong>Context sent when you prepare this plan</strong><p>The selected model receives the queued work-item type, title, state, description, acceptance criteria, comments when present, parent links, IDs, and revisions. It uses these ADO snapshots to create the feature summary, feature-level criterion proposals, and per-Task verification plans. The Story is feature context; Tasks are not QAed as separate records. If the response misses the required plan structure, the same model may receive one correction request with this same context. The selected target and run instructions are sent later only if you approve this reviewed scope. Workers do not run until that separate approval.</p><ul>{state.queue.map(({ entry, snapshot }) => <li key={entry.key}>ADO #{entry.workItemId} r{snapshot?.revision ?? 'unknown'} · {snapshot?.type ?? 'work item'} · fields: System.WorkItemType, System.Title, System.State{snapshot?.description ? ', System.Description' : ''}{snapshot?.acceptanceCriteria ? ', Microsoft.VSTS.Common.AcceptanceCriteria' : ''}{snapshot?.comments?.length ? ', comments' : ''}{snapshot?.parentId ? ` · parent #${snapshot.parentId}` : ''}</li>)}</ul><p>{state.modelProvider} / {state.modelId}{state.modelProvider === 'claude-code' ? ' · model requests use the connected Claude plan allowance' : ''}</p></div></div>
                 <div className="button-row"><button className="button primary" type="button" disabled={busy || !state.queue.length || !selectedSavedRunModel || (targetKind !== 'repository' && !siteBaseUrl.trim()) || (targetKind !== 'site' && (repositorySource === 'local' ? !repositoryPath : !selectedGitRepository || !selectedGitRef))} onClick={() => void saveRunTarget()}>{busy ? 'Preparing…' : 'Prepare agentic QA plan'}</button>{!selectedSavedRunModel ? <span className="field-help">Select a saved model with a successful reachability test first.</span> : null}</div>
               </div>
             </section>
@@ -1212,8 +1227,10 @@ export function App({
                 <div className="panel-title-row"><div><h2>Required AI agent provider</h2><p>{selectedProviderConnected ? modelProvider === 'claude-code' ? 'Claude Code is connected. Its credentials stay in Claude Code and are never returned to the renderer or sent to QA workers.' : `${modelProvider === 'openai' ? 'OpenAI' : modelProvider === 'anthropic' ? 'Anthropic' : 'OpenRouter'} API key is stored locally. The key is never returned to the renderer or sent to workers.` : 'Connect a provider before planning or running QA. No deterministic plan fallback is available.'}</p></div><span className="security-tag">{selectedProviderConnected ? 'CONNECTED' : 'REQUIRED'}</span></div>
                 <div className="filters-row settings-fields"><label>Provider<select className="text-input" value={modelProvider} onChange={(event) => { const next = event.target.value as 'openai' | 'anthropic' | 'openrouter' | 'claude-code'; setModelProvider(next); setProviderModels([]); setModelId(''); }}><option value="openai">OpenAI API</option><option value="anthropic">Anthropic API key</option><option value="openrouter">OpenRouter API key · multi-model catalog</option><option value="claude-code">Claude account · Claude Code plan</option></select></label><button className="button outline" type="button" disabled={busy} onClick={() => void connectProvider()}>{isConnectingClaude ? 'Checking Claude connection…' : isCheckingClaudeModels ? 'Checking models…' : modelProvider === 'claude-code' && selectedProviderConnected ? 'Check Claude account' : modelProvider === 'claude-code' ? 'Connect Claude account…' : 'Import key and discover models…'}</button></div>
                 {modelProvider === 'claude-code' && selectedProviderConnected ? <p className="connected-account" role="status"><span className="connected-indicator" aria-hidden="true" />Connected Claude account <strong>{state.modelProviderAccountEmail ?? 'Email not provided by Claude Code'}</strong></p> : null}
-                <div className="filters-row settings-fields model-settings-fields"><label>Model<ModelCombobox models={providerModels} value={modelId} disabled={busy} onChange={setModelId} /></label><label>Max output tokens<input className="text-input" type="number" min={256} max={32000} step={256} value={modelMaxOutputTokens} onChange={(event) => setModelMaxOutputTokens(Number(event.target.value))} /></label></div>
-                <div className="button-row"><button className="button outline" type="button" disabled={busy || !selectedProviderConnected} onClick={() => void discoverProviderModels()}>{isCheckingClaudeModels ? 'Checking 3 models…' : modelProvider === 'claude-code' ? 'Check account models' : 'Refresh model list'}</button><button className="button primary" type="button" disabled={busy || !selectedProviderConnected || !modelId} onClick={() => void saveModelSettings()}>{isSavingModel ? 'Saving and testing…' : 'Save and test model'}</button></div>
+                <div className="filters-row settings-fields model-settings-fields"><label>Model<ModelCombobox models={providerModels} value={modelId} disabled={busy} onChange={setModelId} /></label><label>Max output tokens<input className="text-input" type="number" min={256} max={MAX_MODEL_OUTPUT_TOKENS} step={256} value={modelMaxOutputTokens} aria-invalid={!Number.isInteger(modelMaxOutputTokens) || modelMaxOutputTokens < 256 || modelMaxOutputTokens > MAX_MODEL_OUTPUT_TOKENS} aria-describedby="model-output-token-help" onChange={(event) => setModelMaxOutputTokens(Number(event.target.value))} /></label></div>
+                <p className="field-help" id="model-output-token-help">Up to 64,000 output tokens per model request. The approved run-wide token, time, and cost budgets still apply.</p>
+                {(!Number.isInteger(modelMaxOutputTokens) || modelMaxOutputTokens < 256 || modelMaxOutputTokens > MAX_MODEL_OUTPUT_TOKENS) ? <p className="message error-message" role="alert">Choose a value from 256 to 64,000 tokens before saving this model.</p> : null}
+                <div className="button-row"><button className="button outline" type="button" disabled={busy || !selectedProviderConnected} onClick={() => void discoverProviderModels()}>{isCheckingClaudeModels ? 'Checking 3 models…' : modelProvider === 'claude-code' ? 'Check account models' : 'Refresh model list'}</button><button className="button primary" type="button" disabled={busy || !selectedProviderConnected || !modelId || !Number.isInteger(modelMaxOutputTokens) || modelMaxOutputTokens < 256 || modelMaxOutputTokens > MAX_MODEL_OUTPUT_TOKENS} onClick={() => void saveModelSettings()}>{isSavingModel ? 'Saving and testing…' : 'Save and test model'}</button></div>
                 <div className="saved-model-list"><h3>Saved models</h3>{(state.savedModels ?? []).map((model) => {
                   const isTesting = testingSavedModelId === model.id;
                   const statusLabel = isTesting ? 'Testing…' : model.testStatus === 'reachable' ? 'Test Success' : model.testStatus === 'unreachable' ? 'Test Fail' : model.testStatus === 'stale' ? 'Retest required' : 'Not tested';

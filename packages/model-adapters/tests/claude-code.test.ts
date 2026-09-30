@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import { StructuredOutputValidationError } from '../src/provider.js';
 import { claudeCodeAdapter } from '../src/claude-code.js';
 
 describe('Claude Code subscription adapter', () => {
@@ -29,6 +30,19 @@ describe('Claude Code subscription adapter', () => {
     expect(result).toEqual({ value: { plan: 'delegate' }, inputTokens: 45, outputTokens: 8 });
   });
 
+  it('honors the longer planning timeout and accepts the raised output ceiling', async () => {
+    const runCli = vi.fn(async (_args: string[], _input: string, timeoutMs?: number) => {
+      expect(timeoutMs).toBe(600_000);
+      return JSON.stringify({ result: '{"plan":"complete"}', usage: { input_tokens: 45, output_tokens: 40_000 } });
+    });
+    const adapter = claudeCodeAdapter.withRunner(runCli);
+
+    await expect(adapter.complete('', {
+      modelId: 'sonnet', system: 'Act as the QA planner.', input: 'Plan this work.', maxOutputTokens: 64_000,
+      timeoutMs: 600_000, schema: z.object({ plan: z.string() }).strict(),
+    })).resolves.toMatchObject({ value: { plan: 'complete' }, outputTokens: 40_000 });
+  });
+
   it('accepts Claude Code structured_output results and streams assistant text deltas', async () => {
     const streamed: string[] = [];
     const runCli = vi.fn(async (args: string[], _input: string, _timeout: number | undefined, onStdout?: (chunk: string) => void) => {
@@ -48,10 +62,53 @@ describe('Claude Code subscription adapter', () => {
     expect(streamed.join('')).toBe('{"plan":"delegate"}');
   });
 
+  it('uses completed structured tool JSON when Claude Code omits structured_output from the final result', async () => {
+    const streamed: string[] = [];
+    const adapter = claudeCodeAdapter.withRunner(async (_args, _input, _timeout, onStdout) => {
+      onStdout?.(`${JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'input_json_delta', partial_json: '{"plan":' } } })}\n`);
+      onStdout?.(`${JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'input_json_delta', partial_json: '"delegate"}' } } })}\n`);
+      return `${JSON.stringify({ type: 'result', is_error: false, result: '', structured_output: null })}\n`;
+    });
+
+    await expect(adapter.complete('', {
+      modelId: 'sonnet', system: 'Act as the QA planner.', input: 'Plan this work.', maxOutputTokens: 100,
+      schema: z.object({ plan: z.string() }).strict(), onText: (chunk) => streamed.push(chunk),
+    })).resolves.toMatchObject({ value: { plan: 'delegate' } });
+    expect(streamed.join('')).toBe('{"plan":"delegate"}');
+  });
+
+  it('recovers schema-valid JSON returned inside Claude Code markdown result text', async () => {
+    const adapter = claudeCodeAdapter.withRunner(async () => JSON.stringify({
+      type: 'result', is_error: false,
+      result: 'Here is the plan:\n```json\n{"plan":"delegate"}\n```',
+      structured_output: null,
+    }));
+
+    await expect(adapter.complete('', {
+      modelId: 'sonnet', system: 'Act as the QA planner.', input: 'Plan this work.', maxOutputTokens: 100,
+      schema: z.object({ plan: z.string() }).strict(),
+    })).resolves.toMatchObject({ value: { plan: 'delegate' } });
+  });
+
+  it('keeps schema-invalid JSON available for the Plan agent correction attempt', async () => {
+    const adapter = claudeCodeAdapter.withRunner(async () => JSON.stringify({
+      type: 'result', is_error: false, result: '{"featureSummary":"Wrong shape"}', structured_output: null,
+    }));
+
+    await expect(adapter.complete('', {
+      modelId: 'sonnet', system: 'Act as the QA planner.', input: 'Plan this work.', maxOutputTokens: 100,
+      schema: z.object({ featureSummary: z.string(), proposals: z.array(z.unknown()) }).strict(),
+    })).rejects.toMatchObject({
+      name: 'StructuredOutputValidationError',
+      candidate: { featureSummary: 'Wrong shape' },
+      issues: expect.arrayContaining([expect.objectContaining({ path: 'proposals', message: expect.any(String) })]),
+    });
+  });
+
   it('rejects invalid model ids and malformed or schema-invalid CLI results', async () => {
     await expect(claudeCodeAdapter.complete('', { modelId: 'custom-shell-command', system: 'system', input: 'input', maxOutputTokens: 100, schema: z.object({ plan: z.string() }) })).rejects.toThrow('not in the Claude Code model catalog');
     const malformed = claudeCodeAdapter.withRunner(async () => '{"result":"not-json"}');
-    await expect(malformed.complete('', { modelId: 'sonnet', system: 'system', input: 'input', maxOutputTokens: 100, schema: z.object({ plan: z.string() }) })).rejects.toThrow('structured result');
+    await expect(malformed.complete('', { modelId: 'sonnet', system: 'system', input: 'input', maxOutputTokens: 100, schema: z.object({ plan: z.string() }) })).rejects.toThrow(/JSON result|structured result/i);
   });
 
   it('does not treat a Claude CLI error envelope as a reachable account model', async () => {

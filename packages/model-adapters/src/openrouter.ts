@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { AgentCompletionRequestSchema, type AgentCompletionRequest, type ModelProviderAdapter, providerJson, validateApiKey, validateModelId } from './provider.js';
+import { AgentCompletionRequestSchema, type AgentCompletionRequest, type ModelProviderAdapter, providerJson, validateApiKey, validateModelId, validateStructuredOutput } from './provider.js';
 import { ProviderModelSchema } from '@agentic-qa/domain/agent';
 
 const OpenRouterModelsSchema = z.object({
@@ -61,7 +61,7 @@ export const openRouterAdapter: ModelProviderAdapter = {
   },
   async complete<T>(apiKey: string, input: AgentCompletionRequest, fetcher: typeof fetch = fetch) {
     validateApiKey(apiKey);
-    const request = AgentCompletionRequestSchema.parse({ modelId: input.modelId, system: input.system, input: input.input, maxOutputTokens: input.maxOutputTokens }) as AgentCompletionRequest;
+    const request = AgentCompletionRequestSchema.parse({ modelId: input.modelId, system: input.system, input: input.input, maxOutputTokens: input.maxOutputTokens, ...(input.timeoutMs ? { timeoutMs: input.timeoutMs } : {}) }) as AgentCompletionRequest;
     const response = await fetcher('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
@@ -71,7 +71,7 @@ export const openRouterAdapter: ModelProviderAdapter = {
         max_tokens: request.maxOutputTokens,
         response_format: { type: 'json_schema', json_schema: { name: 'agent_result', strict: true, schema: z.toJSONSchema(input.schema) } },
       }),
-      redirect: 'error', referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(60_000),
+      redirect: 'error', referrerPolicy: 'no-referrer', signal: AbortSignal.timeout(request.timeoutMs ?? 60_000),
     });
     const parsed = z.object({
       choices: z.array(z.object({ message: z.object({ content: z.string().max(1_000_000).nullable().optional() }).passthrough() }).passthrough()).max(10),
@@ -81,6 +81,6 @@ export const openRouterAdapter: ModelProviderAdapter = {
     if (!text) throw new Error('OpenRouter returned no structured agent result.');
     let decoded: unknown;
     try { decoded = JSON.parse(text); } catch { throw new Error('OpenRouter returned invalid JSON for the agent result.'); }
-    return { value: input.schema.parse(decoded) as T, inputTokens: parsed.usage.prompt_tokens, outputTokens: parsed.usage.completion_tokens };
+    return { value: validateStructuredOutput<T>(input.schema, decoded), inputTokens: parsed.usage.prompt_tokens, outputTokens: parsed.usage.completion_tokens };
   },
 };

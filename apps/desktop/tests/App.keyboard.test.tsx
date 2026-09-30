@@ -139,6 +139,7 @@ describe('desktop keyboard navigation', () => {
     const searchItems = vi.fn(async () => ({ items: [snapshot], nextAfterId: undefined }));
     const createDraftPlan = vi.fn(async () => plan);
     const approvePlan = vi.fn(async () => { approved = true; });
+    const openPlanProgressWindow = vi.fn(async () => undefined);
     const startRun = vi.fn(async () => { executed = true; return report; });
     const exportReport = vi.fn(async () => true);
     const classifyFinding = vi.fn(async () => { classified = true; return reviewedReport; });
@@ -167,6 +168,7 @@ describe('desktop keyboard navigation', () => {
       },
       selectSavedModel: vi.fn(async () => ({ ...signedInState, queue: [...selectedIds].map((workItemId) => workItemId === 42 ? { entry, snapshot } : { entry: taskEntry, snapshot: taskSnapshot }) })),
       createDraftPlan,
+      openPlanProgressWindow,
       approvePlan,
       listRuns: async () => approved ? [{ manifest: plan.manifest, ...(executed ? { report: classified ? reviewedReport : report } : {}) }] : [],
       getRun: async () => classified ? reviewedDetail : detail,
@@ -274,6 +276,7 @@ describe('desktop keyboard navigation', () => {
     await user.keyboard('{Enter}');
     expect(await screen.findByText(/Reviewed by QA reviewer:/)).toBeTruthy();
     expect(startRun).toHaveBeenCalledWith(runId);
+    expect(openPlanProgressWindow).toHaveBeenCalledWith(runId);
     expect(approvePlan).toHaveBeenCalledOnce();
     expect(classifyFinding).toHaveBeenCalledWith({ runId, findingId: finding.id, kind: 'PRODUCT_FAILURE', author: 'QA reviewer', reason: 'The locator assertion needs test repair.' });
   });

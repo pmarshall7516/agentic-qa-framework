@@ -211,6 +211,8 @@ export function createUiReviewFixture(scenarioName: string): { api: DesktopApi; 
   let browserAccounts: Array<import('../shared/ipc.js').BrowserTestAccountSummary> = [];
   const api: DesktopApi = {
     onModelStream: () => () => undefined,
+    openPlanProgressWindow: async () => undefined,
+    readyPlanProgressWindow: async () => undefined,
     getState: async () => currentState(),
     signIn: async () => withState({ accounts: [account], selectedAccountId: account.homeAccountId }),
     signOut: async () => withState({ accounts: [], selectedAccountId: undefined, selectedOrganization: undefined, selectedProject: undefined }),
