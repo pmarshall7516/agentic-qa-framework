@@ -57,7 +57,7 @@ const providerFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit)
   return new Response(JSON.stringify({ output_text: JSON.stringify(plan), usage: { input_tokens: 100, output_tokens: 100 } }), { status: 200 });
 });
 
-function fixture(browserStatus: 'PASSED' | 'FAILED' = 'PASSED', chooseModelKeyFile?: () => Promise<string | undefined>, signOutChoice: () => Promise<'keep' | 'delete' | 'cancel'> = async () => 'keep', evidenceRoot?: string, saveAdoProfilesConfig?: (contents: string) => Promise<boolean>) {
+function fixture(browserStatus: 'PASSED' | 'FAILED' = 'PASSED', chooseModelKeyFile?: () => Promise<string | undefined>, signOutChoice: () => Promise<'keep' | 'delete' | 'cancel'> = async () => 'keep', evidenceRoot?: string, saveAdoProfilesConfig?: (contents: string) => Promise<boolean>, claudeAuth: { connected: boolean; login?: () => Promise<void> } = { connected: false }) {
   const settings = new Map<string, unknown>();
   settings.set('model.provider', 'openai');
   settings.set('model.apiKey.openai', 'test-provider-key-with-enough-entropy');
@@ -128,17 +128,123 @@ function fixture(browserStatus: 'PASSED' | 'FAILED' = 'PASSED', chooseModelKeyFi
     observation: { id: randomUUID(), runId: input.runId, scenarioId: input.scenario.id, status: browserStatus, worker: 'browser', startedAt: '2026-09-27T12:00:00.000Z', endedAt: '2026-09-27T12:00:01.000Z', assertion: browserStatus === 'PASSED' ? 'Expected text is visible.' : 'Expected text was not visible.', artifactIds: [], sourceIdentity: new URL(input.target.siteBaseUrl).origin },
     artifacts: [], cancelled: false,
   }));
-  const controller = new DesktopController({ store, authFactory: async () => auth, ado, browserScenarioRunner: browserScenarioRunner as any, sitePreflight: async () => undefined, browserExecutablePath: () => process.execPath, confirmDeleteRun: async () => true, selectSignOutDataAction: signOutChoice, chooseModelKeyFile, evidenceRoot, saveAdoProfilesConfig, providerFetch: providerFetch as typeof fetch });
+  const controller = new DesktopController({ store, authFactory: async () => auth, ado, browserScenarioRunner: browserScenarioRunner as any, sitePreflight: async () => undefined, browserExecutablePath: () => process.execPath, confirmDeleteRun: async () => true, selectSignOutDataAction: signOutChoice, chooseModelKeyFile, evidenceRoot, saveAdoProfilesConfig, providerFetch: providerFetch as typeof fetch, isClaudeAccountConnected: async () => claudeAuth.connected, startClaudeLogin: async () => { await claudeAuth.login?.(); claudeAuth.connected = true; } });
   return { controller, settings, store, auth, ado, queue, snapshots, runRecords, browserScenarioRunner };
 }
 
 describe('desktop controller', () => {
+  it('stores named browser account secrets encrypted and returns metadata only', async () => {
+    const { controller, settings } = fixture();
+    const saved = await controller.saveBrowserTestAccount({ label: 'QA editor', origin: 'https://staging.example.test', username: 'qa-user-canary@example.test', password: 'qa-password-canary' });
+    expect(saved).toHaveLength(1);
+    expect(saved[0]).toMatchObject({ label: 'QA editor', origin: 'https://staging.example.test', hasUsername: true, hasPassword: true });
+    expect(JSON.stringify(saved)).not.toContain('qa-user-canary');
+    expect(JSON.stringify(await controller.getState())).not.toContain('qa-password-canary');
+    expect(JSON.stringify(await controller.listBrowserTestAccounts())).not.toContain('qa-password-canary');
+    expect(JSON.stringify(settings.get('browser.testAccounts'))).toContain('qa-password-canary');
+    await expect(controller.saveTarget({ targetKind: 'site', siteBaseUrl: 'https://staging.example.test', allowedOrigins: ['https://staging.example.test'], testAccountIds: [saved[0]!.id] })).resolves.toMatchObject({ target: { testAccountIds: [saved[0]!.id] } });
+    await expect(controller.saveTarget({ targetKind: 'site', siteBaseUrl: 'https://other.example.test', allowedOrigins: ['https://other.example.test'], testAccountIds: [saved[0]!.id] })).rejects.toThrow('does not match');
+    await controller.deleteBrowserTestAccount(saved[0]!.id);
+    expect(await controller.listBrowserTestAccounts()).toEqual([]);
+  });
+
+  it('rejects non-origin and insecure remote browser account scopes', async () => {
+    const { controller } = fixture();
+    await expect(controller.saveBrowserTestAccount({ label: 'Bad path', origin: 'https://staging.example.test/path', username: 'user', password: 'password' })).rejects.toThrow('must be an HTTPS origin');
+    await expect(controller.saveBrowserTestAccount({ label: 'Bad scheme', origin: 'http://staging.example.test', username: 'user', password: 'password' })).rejects.toThrow('must be an HTTPS origin');
+  });
+
+  it('resolves selected credentials only for the browser and scrubs them from persisted results', async () => {
+    const { controller, settings, queue, snapshots, browserScenarioRunner, runRecords } = fixture();
+    const username = 'browser-user-secret-canary@example.test';
+    const password = 'browser-password-secret-canary';
+    const profile = (await controller.saveBrowserTestAccount({ label: 'QA Sign-in', origin: 'https://site.example.test', username, password }))[0]!;
+    const requirement = { organization: 'org', projectId: 'project-1', projectName: 'Project One', id: 88, revision: 3, type: 'User Story', kind: 'REQUIREMENT', title: 'Sign in', state: 'Active', acceptanceCriteria: 'The signed-in workspace appears.', url: 'https://dev.azure.com/org/project-1/_workitems/edit/88', retrievedAt: '2026-09-27T12:00:00.000Z' };
+    const key = 'org:project-1:88'; queue.push({ key, organization: 'org', projectId: 'project-1', workItemId: 88, queuedAt: '2026-09-27T12:00:00.000Z', stale: false }); snapshots.set(key, requirement);
+    settings.set('run.target', { targetKind: 'site', siteBaseUrl: 'https://site.example.test', allowedOrigins: ['https://site.example.test'], testAccountIds: [profile.id], testAccountVersions: { [profile.id]: profile.revision } });
+    const originalImplementation = providerFetch.getMockImplementation()!;
+    providerFetch.mockImplementation(async (input, init) => {
+      if (!init?.body) return originalImplementation(input, init);
+      const request = JSON.parse(String(init?.body)) as { input: Array<{ content: string }> };
+      if ((request.input[0]?.content ?? '').includes('Write bounded Playwright scenarios')) {
+        const inputText = request.input.at(-1)?.content ?? '';
+        const encoded = inputText.match(/Approved browser assignment \(JSON data\):\n([\s\S]*?)\n\nReturn/)?.[1] ?? '{}';
+        const assignment = JSON.parse(encoded) as { criteria: Array<{ id: string }> };
+        return new Response(JSON.stringify({ output_text: JSON.stringify({ browserScenarios: [{ criterionId: assignment.criteria[0]!.id, summary: 'Authenticate', preconditions: [], steps: [{ action: 'fillSecret', accountId: profile.id, field: 'password', role: 'textbox', name: 'Password' }], expectedObservations: ['Workspace is visible.'], risk: 'low' }] }), usage: { input_tokens: 100, output_tokens: 100 } }), { status: 200 });
+      }
+      return originalImplementation(input, init);
+    });
+    try {
+      const draft = await controller.createDraftPlan();
+      const approved = { ...draft, contract: { ...draft.contract, scenarios: draft.contract.scenarios.map((scenario) => ({ ...scenario, approved: true })) } };
+      await controller.approvePlan(approved);
+      browserScenarioRunner.mockImplementation(async (input: any) => {
+        expect(input.testAccounts[profile.id]).toEqual({ password });
+        return { observation: { id: randomUUID(), runId: input.runId, scenarioId: input.scenario.id, status: 'PASSED', worker: 'browser', startedAt: '2026-09-27T12:00:00.000Z', endedAt: '2026-09-27T12:00:01.000Z', assertion: password, artifactIds: [], sourceIdentity: 'https://site.example.test' }, artifacts: [], steps: [], cancelled: false };
+      });
+      const report = await controller.startRun(draft.manifest.runId);
+      expect(report.verdict).toBe('PASS');
+      const record = runRecords.get(draft.manifest.runId);
+      expect(JSON.stringify(record.observations)).not.toContain(username);
+      expect(JSON.stringify(record.observations)).not.toContain(password);
+      expect(JSON.stringify(record.report)).not.toContain(username);
+      expect(JSON.stringify(record.report)).not.toContain(password);
+      expect(JSON.stringify(await controller.getRun(draft.manifest.runId))).not.toContain(password);
+    } finally { providerFetch.mockImplementation(originalImplementation); }
+  });
+
+  it('turns a browser authentication diagnostic into a blocked criterion with a concrete action', async () => {
+    const { controller, settings, queue, snapshots, browserScenarioRunner, runRecords } = fixture();
+    const requirement = { organization: 'org', projectId: 'project-1', projectName: 'Project One', id: 89, revision: 3, type: 'User Story', kind: 'REQUIREMENT', title: 'Open workspace', state: 'Active', acceptanceCriteria: 'The workspace appears after authentication.', url: 'https://dev.azure.com/org/project-1/_workitems/edit/89', retrievedAt: '2026-09-27T12:00:00.000Z' };
+    const key = 'org:project-1:89'; queue.push({ key, organization: 'org', projectId: 'project-1', workItemId: 89, queuedAt: '2026-09-27T12:00:00.000Z', stale: false }); snapshots.set(key, requirement);
+    settings.set('run.target', { targetKind: 'site', siteBaseUrl: 'https://site.example.test', allowedOrigins: ['https://site.example.test'] });
+    const draft = await controller.createDraftPlan();
+    await controller.approvePlan({ ...draft, contract: { ...draft.contract, scenarios: draft.contract.scenarios.map((scenario) => ({ ...scenario, approved: true })) } });
+    browserScenarioRunner.mockImplementation(async (input: any) => ({
+      observation: { id: randomUUID(), runId: input.runId, scenarioId: input.scenario.id, status: 'FAILED', worker: 'browser', startedAt: '2026-09-27T12:00:00.000Z', endedAt: '2026-09-27T12:00:01.000Z', assertion: 'The site displayed a sign-in page.', artifactIds: [], sourceIdentity: 'https://site.example.test', diagnostic: { stage: 'authentication', category: 'authentication_required', detail: 'The site requires sign-in.', nextAction: 'Select a named test account for this origin and create a fresh plan.', retryable: true } },
+      artifacts: [], steps: [], cancelled: false,
+    }));
+    const report = await controller.startRun(draft.manifest.runId);
+    expect(report).toMatchObject({ executionState: 'BLOCKED', verdict: 'BLOCKED', criterionResults: [{ state: 'BLOCKED' }] });
+    expect(report.explanation).toContain('Select a named test account');
+    expect(runRecords.get(draft.manifest.runId).observations[0].diagnostic.category).toBe('authentication_required');
+  });
+
+  it('blocks a plan when a selected account changes after the run was approved', async () => {
+    const { controller, queue, snapshots, browserScenarioRunner } = fixture();
+    const account = (await controller.saveBrowserTestAccount({ label: 'QA account', origin: 'https://site.example.test', username: 'qa@example.test', password: 'original-password' }))[0]!;
+    await controller.saveTarget({ targetKind: 'site', siteBaseUrl: 'https://site.example.test', allowedOrigins: ['https://site.example.test'], testAccountIds: [account.id] });
+    const requirement = { organization: 'org', projectId: 'project-1', projectName: 'Project One', id: 90, revision: 3, type: 'User Story', kind: 'REQUIREMENT', title: 'Open dashboard', state: 'Active', acceptanceCriteria: 'The dashboard appears.', url: 'https://dev.azure.com/org/project-1/_workitems/edit/90', retrievedAt: '2026-09-27T12:00:00.000Z' };
+    const key = 'org:project-1:90'; queue.push({ key, organization: 'org', projectId: 'project-1', workItemId: 90, queuedAt: '2026-09-27T12:00:00.000Z', stale: false }); snapshots.set(key, requirement);
+    const draft = await controller.createDraftPlan();
+    await controller.approvePlan({ ...draft, contract: { ...draft.contract, scenarios: draft.contract.scenarios.map((scenario) => ({ ...scenario, approved: true })) } });
+    await controller.saveBrowserTestAccount({ id: account.id, label: 'QA account', origin: 'https://site.example.test', username: 'qa@example.test', password: 'replacement-password' });
+    const report = await controller.startRun(draft.manifest.runId);
+    expect(report).toMatchObject({ executionState: 'BLOCKED', verdict: 'BLOCKED' });
+    expect(report.explanation).toContain('changed after plan approval');
+    expect(browserScenarioRunner).not.toHaveBeenCalled();
+  });
+
   it('requires a saved provider key and a supported agent model before creating a run plan', async () => {
     const { controller, settings } = fixture();
     settings.delete('model.provider');
     settings.delete('model.apiKey.openai');
     settings.delete('model.settings');
-    await expect(controller.createDraftPlan()).rejects.toThrow('Configure a provider API key and select a supported model');
+    await expect(controller.createDraftPlan()).rejects.toThrow('Connect an AI provider account and select a supported model');
+  });
+
+  it('connects a Claude plan account, discovers curated models and configures the required agent without storing a key', async () => {
+    const login = vi.fn(async () => undefined);
+    const { controller, settings } = fixture('PASSED', undefined, undefined, undefined, undefined, { connected: false, login });
+    settings.set('model.provider', 'claude-code');
+    expect((await controller.getState()).modelProviderConfigured).toBe(false);
+    await expect(controller.connectClaudeAccount()).resolves.toBe(true);
+    expect(login).toHaveBeenCalledOnce();
+    const models = await controller.listProviderModels('claude-code');
+    expect(models.map(({ modelId }) => modelId)).toEqual(['sonnet', 'opus', 'haiku']);
+    await controller.saveAgentModelSettings({ providerId: 'claude-code', modelId: 'sonnet', maxOutputTokens: 1200 });
+    expect(settings.get('model.apiKey.claude-code')).toBeUndefined();
+    expect(await controller.getState()).toMatchObject({ modelProvider: 'claude-code', modelId: 'sonnet', modelProviderConfigured: true });
   });
 
   it('stores provider credentials outside renderer state and validates selected models through discovery', async () => {
@@ -444,6 +550,7 @@ describe('desktop controller', () => {
 
   it('creates a local disclosure draft from requirement criteria and keeps tasks as context', async () => {
     const { controller, settings, store, queue, snapshots, runRecords, browserScenarioRunner } = fixture();
+    const savedAccount = (await controller.saveBrowserTestAccount({ label: 'QA Editor', origin: 'https://site.example.test', username: 'qa-user-canary@example.test', password: 'qa-password-canary' }))[0]!;
     const requirement = {
       organization: 'org', projectId: 'project-1', projectName: 'Project One', id: 17, revision: 5,
       type: 'User Story', kind: 'REQUIREMENT', title: 'Search', state: 'Active',
@@ -455,8 +562,10 @@ describe('desktop controller', () => {
       const entry = { key: `org:project-1:${snapshot.id}`, organization: 'org', projectId: 'project-1', workItemId: snapshot.id, queuedAt: '2026-01-01T00:00:00.000Z', stale: false };
       queue.push(entry); snapshots.set(entry.key, snapshot);
     }
-    settings.set('run.target', { targetKind: 'site', siteBaseUrl: 'https://site.example.test', allowedOrigins: ['https://site.example.test'] });
+    settings.set('run.target', { targetKind: 'site', siteBaseUrl: 'https://site.example.test', allowedOrigins: ['https://site.example.test'], runInstructions: 'Use the editor role and verify the filtered list.', testAccountIds: [savedAccount.id], testAccountVersions: { [savedAccount.id]: savedAccount.revision }, showBrowserWindow: true });
+    providerFetch.mockClear();
     const draft = await controller.createDraftPlan();
+    expect(draft.envelopePreview).toMatchObject({ runInstructions: 'Use the editor role and verify the filtered list.', showBrowserWindow: true, testAccounts: [{ id: savedAccount.id, label: 'QA Editor', hasUsername: true, hasPassword: true }] });
     expect(draft.contract.criteria.map(({ expectedBehavior }) => expectedBehavior)).toEqual(['Results show the title', 'Filters remain selected']);
     expect(draft.contract.criteria).toHaveLength(2);
     expect(draft.contract.sourceContext.find(({ workItemId }) => workItemId === 18)?.description).toBe('Add a filter-state API check.');
@@ -465,16 +574,22 @@ describe('desktop controller', () => {
     expect(draft.manifest.sources).toHaveLength(2);
     const approved = { ...draft, contract: { ...draft.contract, scenarios: draft.contract.scenarios.map((scenario) => ({ ...scenario, approved: true })) } };
     await controller.approvePlan(approved);
+    const providerTransmissions = JSON.stringify(providerFetch.mock.calls);
+    expect(providerTransmissions).toContain('Use the editor role');
+    expect(providerTransmissions).toContain('QA Editor');
+    expect(providerTransmissions).not.toContain('qa-user-canary@example.test');
+    expect(providerTransmissions).not.toContain('qa-password-canary');
     expect(store.createRun).toHaveBeenCalledOnce();
     const storedContract = runRecords.get(draft.manifest.runId).contract;
     expect(storedContract.scenarios.filter(({ layer }: { layer: string }) => layer === 'browser')).toHaveLength(2);
     expect(storedContract.scenarios.find(({ layer }: { layer: string }) => layer === 'browser')?.steps)
       .toEqual([{ action: 'expectText', text: 'Results show the title' }]);
     const report = await controller.startRun(draft.manifest.runId);
-    expect(report.executionState).toBe('COMPLETED');
+    expect(report.executionState, report.explanation).toBe('COMPLETED');
     expect(report.verdict).toBe('PASS');
     expect(report.criterionResults.every(({ state }: { state: string }) => state === 'VERIFIED')).toBe(true);
     expect(browserScenarioRunner).toHaveBeenCalledTimes(2);
+    expect(browserScenarioRunner.mock.calls[0]?.[0]).toMatchObject({ showBrowserWindow: true, testAccounts: {} });
     expect(runRecords.get(draft.manifest.runId).report).toEqual(report);
     const agentRun = await controller.getRun(draft.manifest.runId);
     expect(agentRun?.reviewerReport?.summary).toContain('Reviewer checked each criterion');

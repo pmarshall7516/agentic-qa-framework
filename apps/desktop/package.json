@@ -67,6 +67,7 @@
       "node_modules/better-sqlite3-multiple-ciphers/prebuilds/*.node"
     ],
     "mac": {
+      "icon": "build/icon.png",
       "target": [
         "dir",
         "dmg"
@@ -74,11 +75,11 @@
       "category": "public.app-category.developer-tools"
     },
     "win": {
+      "icon": "build/icon.png",
       "target": [
         "nsis",
         "portable"
       ],
-      "signAndEditExecutable": false,
       "signExecutable": false,
       "artifactName": "Agentic-QA-${version}-${arch}.${ext}"
     },

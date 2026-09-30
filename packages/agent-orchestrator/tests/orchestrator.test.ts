@@ -68,6 +68,23 @@ describe('agent orchestration', () => {
     expect(result.usage).toMatchObject({ providerCalls: 4, inputTokens: 1500, outputTokens: 600 });
   });
 
+  it('sends bounded extra instructions and selected account metadata without account values', async () => {
+    const base = fakeProvider();
+    const requests: AgentCompletionRequest[] = [];
+    const provider: ModelProviderAdapter = { ...base, async complete<T>(key: string, request: AgentCompletionRequest, fetcher?: typeof fetch) { requests.push(request); return base.complete<T>(key, request, fetcher); } };
+    await planQaRun({
+      ...validInput(provider),
+      runInstructions: 'The account must choose the saved-view role before opening the form.',
+      testAccounts: [{ id: '33333333-3333-4333-8333-333333333333', label: 'QA Editor', origin: 'https://staging.example.test', hasUsername: true, hasPassword: true }],
+    });
+    const transmitted = JSON.stringify(requests);
+    expect(transmitted).toContain('saved-view role');
+    expect(transmitted).toContain('QA Editor');
+    expect(transmitted).toContain('hasPassword');
+    expect(transmitted).not.toContain('password-canary');
+    expect(transmitted).not.toContain('username-canary');
+  });
+
   it('lets the orchestrator select the necessary approved layer and rejects invented criteria', async () => {
     const repoOnly = { ...plan, coverage: [{ ...plan.coverage[0], requiredLayers: ['repo'], assignmentIds: ['api'] }], assignments: [plan.assignments[0]] };
     expect((await planQaRun(validInput(fakeProvider(repoOnly)))).plan.coverage[0]?.requiredLayers).toEqual(['repo']);

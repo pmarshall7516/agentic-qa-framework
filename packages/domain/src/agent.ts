@@ -12,7 +12,7 @@ export const ModelCapabilitySchema = z.object({
 }).strict();
 
 export const ProviderModelSchema = z.object({
-  providerId: z.enum(['openai', 'anthropic', 'openrouter']),
+  providerId: z.enum(['openai', 'anthropic', 'openrouter', 'claude-code']),
   modelId: z.string().min(1).max(200),
   displayName: z.string().min(1).max(200),
   capabilities: ModelCapabilitySchema,
@@ -36,7 +36,7 @@ export const RunBudgetSchema = z.object({
 export const RunEnvelopeSchema = z.object({
   schemaVersion: z.literal(1),
   runId: z.string().uuid(),
-  providerId: z.enum(['openai', 'anthropic', 'openrouter']),
+  providerId: z.enum(['openai', 'anthropic', 'openrouter', 'claude-code']),
   defaultModelId: z.string().min(1).max(200),
   roleModels: z.partialRecord(AgentRoleSchema, z.string().min(1).max(200)).optional(),
   sourceIds: z.array(z.number().int().positive()).min(1).max(200),

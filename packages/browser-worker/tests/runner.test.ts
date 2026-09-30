@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { runBrowserScenario } from '../src/runner.js';
+import { browserLaunchOptions, runBrowserScenario } from '../src/runner.js';
 
 const runId = '22222222-2222-4222-8222-222222222222';
 let scratch = '';
@@ -43,7 +43,7 @@ describe('isolated browser worker', () => {
       onStepProgress: (step) => { progress.push(step); },
       scenario: scenario([{ action: 'goto', path: '/' }, { action: 'expectText', text: 'Ready to search' }]),
     });
-    expect(result.observation.status).toBe('PASSED');
+    expect(result.observation.status, result.observation.assertion).toBe('PASSED');
     expect(result.steps.map(({ stepId, order, status }) => ({ stepId, order, status }))).toEqual([
       { stepId: 'scenario-site:step:1', order: 1, status: 'PASSED' },
       { stepId: 'scenario-site:step:2', order: 2, status: 'PASSED' },
@@ -110,4 +110,48 @@ describe('isolated browser worker', () => {
     expect(result.cancelled).toBe(true);
     expect(result.observation.status).toBe('ERROR');
   });
+
+  it('keeps Chromium headless by default and exposes the visible-window setting', () => {
+    expect(browserLaunchOptions().headless).toBe(true);
+    expect(browserLaunchOptions(true).headless).toBe(false);
+  });
+
+  it('fills selected account secrets without including values in observations or progress', async () => {
+    const site = await serve((_request, response) => { response.setHeader('content-type', 'text/html; charset=utf-8'); response.end('<label>Email address<input type="text"></label><label>Password<input type="password"></label><button>Sign in</button><div id="status"></div><script>document.querySelector("button").onclick=()=>document.querySelector("#status").textContent="Dashboard ready"</script>'); });
+    scratch = await mkdtemp(path.join(tmpdir(), 'qa-browser-worker-'));
+    const username = 'qa-user-canary@example.test';
+    const password = 'qa-password-secret-canary';
+    const result = await runBrowserScenario({
+      runId, target: { siteBaseUrl: site.origin, allowedOrigins: [site.origin] }, artifactDirectory: scratch,
+      timeoutMs: 10_000, actionLimit: 10,
+      testAccounts: { '33333333-3333-4333-8333-333333333333': { username, password } },
+      scenario: scenario([
+        { action: 'fillSecret', accountId: '33333333-3333-4333-8333-333333333333', field: 'username', role: 'textbox', name: 'Email address' },
+        { action: 'fillSecret', accountId: '33333333-3333-4333-8333-333333333333', field: 'password', role: 'textbox', name: 'Password' },
+        { action: 'click', role: 'button', name: 'Sign in' },
+        { action: 'expectText', text: 'Dashboard ready' },
+      ]),
+    });
+    expect(result.observation.status, result.observation.assertion).toBe('PASSED');
+    expect(JSON.stringify({ observation: result.observation, steps: result.steps })).not.toContain(username);
+    expect(JSON.stringify({ observation: result.observation, steps: result.steps })).not.toContain(password);
+  }, 30_000);
+
+  it('returns an actionable blocked diagnostic for missing account fields and visible sign-in pages', async () => {
+    const site = await serve((_request, response) => response.end('<h1>Sign in to your account</h1><label>Email address<input></label><label>Password<input type="password"></label>'));
+    scratch = await mkdtemp(path.join(tmpdir(), 'qa-browser-worker-'));
+    const missingAccount = await runBrowserScenario({
+      runId, target: { siteBaseUrl: site.origin, allowedOrigins: [site.origin] }, artifactDirectory: scratch,
+      timeoutMs: 10_000, actionLimit: 10,
+      scenario: scenario([{ action: 'fillSecret', accountId: '33333333-3333-4333-8333-333333333333', field: 'password', role: 'textbox', name: 'Password' }]),
+    });
+    expect(missingAccount.observation.diagnostic).toMatchObject({ category: 'missing_test_account', stage: 'authentication', retryable: true });
+    const authPage = await runBrowserScenario({
+      runId, target: { siteBaseUrl: site.origin, allowedOrigins: [site.origin] }, artifactDirectory: scratch,
+      timeoutMs: 10_000, actionLimit: 10,
+      scenario: scenario([{ action: 'expectText', text: 'Dashboard ready' }]),
+    });
+    expect(authPage.observation.diagnostic).toMatchObject({ category: 'authentication_required', stage: 'authentication' });
+    expect(authPage.observation.diagnostic?.nextAction).toContain('named test account');
+  }, 30_000);
 });

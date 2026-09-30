@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { QAContractSchema, upgradeQAContract, validateReadyContract } from '../src/qa-contract.js';
-import { computeVerdict } from '../src/run.js';
+import { computeVerdict, ObservationSchema } from '../src/run.js';
 
 const emptyFindings: any[] = [];
 const result = (state: string): any => ({ criterionId: 'criterion-1', state, observationIds: [], missingEvidence: [], findingIds: [] });
@@ -25,6 +25,13 @@ describe('run verdict policy', () => {
     expect(computeVerdict({ executionState: 'COMPLETED', criterionResults: [result('VERIFIED')], findings: emptyFindings, coverageGaps: missingStoryCriteria })).toBe('NEEDS_REVIEW');
     expect(computeVerdict({ executionState: 'COMPLETED', criterionResults: [result('FAILED')], findings: emptyFindings, coverageGaps: missingStoryCriteria })).toBe('FAIL');
     expect(computeVerdict({ executionState: 'BLOCKED', criterionResults: [result('BLOCKED')], findings: emptyFindings, coverageGaps: missingStoryCriteria })).toBe('BLOCKED');
+  });
+
+  it('validates bounded diagnostics while preserving legacy observations', () => {
+    const legacy = { id: '11111111-1111-4111-8111-111111111111', runId: '22222222-2222-4222-8222-222222222222', scenarioId: 'login', status: 'FAILED', worker: 'browser', startedAt: '2026-09-29T12:00:00.000Z', endedAt: '2026-09-29T12:00:01.000Z', assertion: 'Could not find submit button', artifactIds: [], sourceIdentity: 'https://qa.example.test' };
+    expect(ObservationSchema.parse(legacy).diagnostic).toBeUndefined();
+    expect(ObservationSchema.safeParse({ ...legacy, diagnostic: { stage: 'authentication', category: 'manual_authentication_required', detail: 'Complete sign in in the browser.', nextAction: 'Finish the sign-in challenge and retry.', retryable: true } }).success).toBe(true);
+    expect(ObservationSchema.safeParse({ ...legacy, diagnostic: { stage: 'authentication', category: 'manual_authentication_required', detail: 'x'.repeat(2001), nextAction: 'Retry', retryable: true } }).success).toBe(false);
   });
 });
 

@@ -9,6 +9,11 @@ export const ObservationSchema = z.object({
   status: z.enum(['PASSED', 'FAILED', 'SKIPPED', 'ERROR']), worker: z.enum(['repo', 'browser']),
   startedAt: z.iso.datetime(), endedAt: z.iso.datetime(), assertion: z.string().max(4000),
   artifactIds: z.array(z.string().uuid()), sourceIdentity: z.string().max(500),
+  diagnostic: z.object({
+    stage: z.enum(['launch', 'navigation', 'authentication', 'interaction', 'assertion', 'environment']),
+    category: z.enum(['missing_test_account', 'authentication_required', 'manual_authentication_required', 'access_denied', 'target_unavailable', 'browser_unavailable', 'selector_or_action_failed', 'assertion_failed', 'policy_blocked', 'unknown']),
+    detail: z.string().min(1).max(2000), nextAction: z.string().min(1).max(1000), retryable: z.boolean(),
+  }).strict().optional(),
 }).strict();
 export const ArtifactSchema = z.object({
   id: z.string().uuid(), runId: z.string().uuid(), kind: z.enum(['trace', 'screenshot', 'log', 'test-result', 'network', 'report']),
@@ -33,7 +38,7 @@ export const RunManifestSchema = z.object({
   localGitState: z.enum(['clean', 'dirty', 'not-a-git-repository', 'unavailable']).optional(),
   sourceSnapshotHash: z.string().regex(/^[a-f0-9]{64}$/i).optional(), siteBaseUrl: z.url().optional(),
   contractId: z.string().uuid(), contractRevision: z.number().int().positive(), configHash: z.string().regex(/^[a-f0-9]{64}$/i),
-  toolVersions: z.record(z.string(), z.string()), providerId: z.enum(['openai', 'anthropic', 'openrouter']).optional(), modelId: z.string().max(200).optional(),
+  toolVersions: z.record(z.string(), z.string()), providerId: z.enum(['openai', 'anthropic', 'openrouter', 'claude-code']).optional(), modelId: z.string().max(200).optional(),
   limits: z.record(z.string(), z.number().nonnegative()), previousRunId: z.string().uuid().optional(),
 }).strict();
 export const QAReportSchema = z.object({

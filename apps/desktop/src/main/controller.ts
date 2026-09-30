@@ -27,11 +27,12 @@ import { buildModelPayload, requestScenarioSuggestions } from '@agentic-qa/model
 import { openAiAdapter } from '@agentic-qa/model-adapters/openai';
 import { anthropicAdapter } from '@agentic-qa/model-adapters/anthropic';
 import { openRouterAdapter } from '@agentic-qa/model-adapters/openrouter';
+import { claudeCodeAdapter } from '@agentic-qa/model-adapters/claude-code';
 import { validateApiKey } from '@agentic-qa/model-adapters/provider';
 import type { ProviderModel } from '@agentic-qa/domain/agent';
 import { buildDelegationDiagram, DelegationDiagramSchema, DelegationPlanSchema, ProviderModelSchema, RunBudgetSchema, RunEnvelopeSchema } from '@agentic-qa/domain/agent';
 import { EvidenceLinkedReviewSchema, planQaRun, RepositoryTestDraftSchema, reviewQaRun } from '@agentic-qa/agent-orchestrator';
-import type { AdoRunProfile, AdoRunProfileInput, DesktopState, DraftPlan, QueueItemView, SearchItemsInput, TargetConfig } from '../shared/ipc.js';
+import type { AdoRunProfile, AdoRunProfileInput, BrowserTestAccountInput, BrowserTestAccountSummary, DesktopState, DraftPlan, QueueItemView, SearchItemsInput, TargetConfig } from '../shared/ipc.js';
 
 const SETTING = {
   accountId: 'entra.selectedAccountId',
@@ -42,9 +43,10 @@ const SETTING = {
   activeProfile: 'ado.activeProfile',
 } as const;
 
-type SupportedProviderId = 'openai' | 'anthropic' | 'openrouter';
-const ProviderIdSchema = z.enum(['openai', 'anthropic', 'openrouter']);
-const providerAdapter = (providerId: SupportedProviderId) => providerId === 'openai' ? openAiAdapter : providerId === 'anthropic' ? anthropicAdapter : openRouterAdapter;
+type SupportedProviderId = 'openai' | 'anthropic' | 'openrouter' | 'claude-code';
+type ApiKeyProviderId = Exclude<SupportedProviderId, 'claude-code'>;
+const ProviderIdSchema = z.enum(['openai', 'anthropic', 'openrouter', 'claude-code']);
+const providerAdapter = (providerId: SupportedProviderId) => providerId === 'openai' ? openAiAdapter : providerId === 'anthropic' ? anthropicAdapter : providerId === 'openrouter' ? openRouterAdapter : claudeCodeAdapter;
 const ModelSettingsSchema = z.object({ providerId: ProviderIdSchema.default('openai'), modelId: z.string().regex(/^[a-zA-Z0-9._:-]{1,200}$/), maxOutputTokens: z.number().int().min(256).max(32_000) }).strict();
 const WorkItemTypeMappingsSchema = z.record(z.string().min(1).max(120), z.enum(['REQUIREMENT', 'TASK', 'OTHER']));
 const execFile = promisify(execFileCallback);
@@ -65,6 +67,8 @@ const SearchSchema = z.object({
   states: z.array(z.string().max(120)).max(20),
   afterId: z.number().int().positive().max(2_147_483_647).optional(),
 }).strict();
+const BrowserTestAccountSchema = z.object({ id: z.string().uuid(), label: z.string().trim().min(1).max(80), origin: z.url(), username: z.string().min(1).max(500), password: z.string().min(1).max(2000), revision: z.number().int().positive() }).strict();
+type BrowserTestAccountSecret = z.infer<typeof BrowserTestAccountSchema>;
 const TargetSchema = z.object({
   targetKind: z.enum(['repository', 'site', 'both']),
   repositorySource: z.enum(['local', 'ado-git']).optional(),
@@ -72,9 +76,14 @@ const TargetSchema = z.object({
   adoRepository: z.object({ organization: z.string().min(1).max(100), projectId: z.string().min(1).max(200), id: z.string().min(1).max(200), name: z.string().min(1).max(200), refName: z.string().min(1).max(300), commit: z.string().regex(/^[a-f0-9]{40,64}$/i) }).strict().optional(),
   siteBaseUrl: z.url().optional(),
   allowedOrigins: z.array(z.url()).max(10),
+  runInstructions: z.string().max(10_000).optional(),
+  testAccountIds: z.array(z.string().uuid()).max(20).optional(),
+  testAccountVersions: z.record(z.string().uuid(), z.number().int().positive()).optional(),
+  showBrowserWindow: z.boolean().optional(),
 }).strict().superRefine((target, ctx) => {
   if (['repository', 'both'].includes(target.targetKind) && !(target.repositoryPath || target.adoRepository)) ctx.addIssue({ code: 'custom', message: 'Select a local folder or Azure DevOps Git repository and ref.', path: ['repositoryPath'] });
   if (target.repositoryPath && target.adoRepository) ctx.addIssue({ code: 'custom', message: 'Select one repository source.', path: ['repositoryPath'] });
+  if (target.targetKind === 'repository' && target.showBrowserWindow) ctx.addIssue({ code: 'custom', message: 'A visible browser window requires a site target.', path: ['showBrowserWindow'] });
   if (['site', 'both'].includes(target.targetKind) && !target.siteBaseUrl) ctx.addIssue({ code: 'custom', message: 'Enter a development or staging site URL.', path: ['siteBaseUrl'] });
   if (target.siteBaseUrl) {
     const url = new URL(target.siteBaseUrl);
@@ -86,9 +95,28 @@ const TargetSchema = z.object({
     if (parsed.origin !== origin || parsed.username || parsed.password || parsed.search || parsed.hash || !['https:', 'http:'].includes(parsed.protocol)) ctx.addIssue({ code: 'custom', message: 'Approved origins must contain only an HTTPS origin (or HTTP localhost), without a path.', path: ['allowedOrigins'] });
   }
   if (target.siteBaseUrl && (target.allowedOrigins.length !== 1 || target.allowedOrigins[0] !== new URL(target.siteBaseUrl).origin)) ctx.addIssue({ code: 'custom', message: 'Only the configured site origin can be approved in this release.', path: ['allowedOrigins'] });
+  if (new Set(target.testAccountIds ?? []).size !== (target.testAccountIds ?? []).length) ctx.addIssue({ code: 'custom', message: 'Selected test accounts must be unique.', path: ['testAccountIds'] });
+  if (Object.keys(target.testAccountVersions ?? {}).length > 20 || Object.keys(target.testAccountVersions ?? {}).some((id) => !(target.testAccountIds ?? []).includes(id))) ctx.addIssue({ code: 'custom', message: 'Account revision metadata must match at most 20 selected accounts.', path: ['testAccountVersions'] });
 });
 
 function sha256(text: string): string { return createHash('sha256').update(text).digest('hex'); }
+
+function redactBrowserSecretText(value: string, accounts: Record<string, Partial<Record<'username' | 'password', string>>>): string {
+  return Object.values(accounts).flatMap((fields) => Object.values(fields)).filter((secret): secret is string => Boolean(secret))
+    .reduce((result, secret) => result.replaceAll(secret, '[REDACTED]'), value);
+}
+
+function scrubBrowserScenarioResult(result: BrowserScenarioResult, accounts: Record<string, Partial<Record<'username' | 'password', string>>>): BrowserScenarioResult {
+  return {
+    ...result,
+    observation: {
+      ...result.observation,
+      assertion: redactBrowserSecretText(result.observation.assertion, accounts),
+      ...(result.observation.diagnostic ? { diagnostic: { ...result.observation.diagnostic, detail: redactBrowserSecretText(result.observation.diagnostic.detail, accounts), nextAction: redactBrowserSecretText(result.observation.diagnostic.nextAction, accounts) } } : {}),
+    },
+    steps: (result.steps ?? []).map((step) => ({ ...step, assertion: redactBrowserSecretText(step.assertion, accounts) })),
+  };
+}
 
 export class DesktopController {
   private readonly store: QaStore;
@@ -115,6 +143,8 @@ export class DesktopController {
   private readonly repoWorkerImageProbe?: () => Promise<boolean>;
   private readonly repoWorkerImageInstaller?: () => Promise<void>;
   private readonly chooseModelKeyFile?: () => Promise<string | undefined>;
+  private readonly isClaudeAccountConnected: () => Promise<boolean>;
+  private readonly startClaudeLogin: () => Promise<void>;
   private readonly readAdoProfilesConfig?: () => Promise<string | undefined>;
   private readonly saveAdoProfilesConfig?: (contents: string) => Promise<boolean>;
   private readonly providerFetch: typeof fetch;
@@ -140,6 +170,8 @@ export class DesktopController {
     repoWorkerImageProbe?: () => Promise<boolean>;
     installRepoWorkerImage?: () => Promise<void>;
     chooseModelKeyFile?: () => Promise<string | undefined>;
+    isClaudeAccountConnected?: () => Promise<boolean>;
+    startClaudeLogin?: () => Promise<void>;
     readAdoProfilesConfig?: () => Promise<string | undefined>;
     saveAdoProfilesConfig?: (contents: string) => Promise<boolean>;
     providerFetch?: typeof fetch;
@@ -168,6 +200,8 @@ export class DesktopController {
     this.repoWorkerImageProbe = options.repoWorkerImageProbe;
     this.repoWorkerImageInstaller = options.installRepoWorkerImage;
     this.chooseModelKeyFile = options.chooseModelKeyFile;
+    this.isClaudeAccountConnected = options.isClaudeAccountConnected ?? (async () => false);
+    this.startClaudeLogin = options.startClaudeLogin ?? (async () => { throw new Error('Claude Code CLI is not configured.'); });
     this.readAdoProfilesConfig = options.readAdoProfilesConfig;
     this.saveAdoProfilesConfig = options.saveAdoProfilesConfig;
     this.providerFetch = options.providerFetch ?? fetch;
@@ -206,7 +240,7 @@ export class DesktopController {
       ...(activeAccountId && await this.setting<string>(SETTING.activeProfile) ? { activeAdoProfileId: await this.setting<string>(SETTING.activeProfile) } : {}),
       queue,
       ...(target ? { target } : {}),
-      modelProviderConfigured: Boolean(modelKey),
+      modelProviderConfigured: configuredProvider === 'claude-code' ? await this.isClaudeAccountConnected().catch(() => false) : Boolean(modelKey),
       modelProvider: providerId ?? modelSettings?.providerId ?? 'openai',
       modelId: modelSettings?.modelId ?? modelSettings?.model ?? '',
       modelMaxOutputTokens: modelSettings?.maxOutputTokens ?? 1200,
@@ -217,7 +251,7 @@ export class DesktopController {
     return this.importProviderKey('openai');
   }
 
-  async importProviderKey(providerIdInput: SupportedProviderId): Promise<boolean> {
+  async importProviderKey(providerIdInput: ApiKeyProviderId): Promise<boolean> {
     const providerId = ProviderIdSchema.parse(providerIdInput);
     const path = await this.chooseModelKeyFile?.();
     if (!path) return false;
@@ -231,8 +265,20 @@ export class DesktopController {
     return true;
   }
 
+  async connectClaudeAccount(): Promise<boolean> {
+    if (!await this.isClaudeAccountConnected().catch(() => false)) await this.startClaudeLogin();
+    if (!await this.isClaudeAccountConnected().catch(() => false)) throw new Error('Claude Code sign-in did not complete. Finish sign-in in the browser and try again.');
+    await this.store.setSetting('model.provider', 'claude-code');
+    this.pendingModelPreviews.clear();
+    return true;
+  }
+
   async listProviderModels(providerIdInput: SupportedProviderId): Promise<ProviderModel[]> {
     const providerId = ProviderIdSchema.parse(providerIdInput);
+    if (providerId === 'claude-code') {
+      if (!await this.isClaudeAccountConnected()) throw new Error('Connect a Claude plan account through Claude Code before discovering models.');
+      return providerAdapter(providerId).listModels('');
+    }
     const apiKey = await this.setting<string>(`model.apiKey.${providerId}`);
     if (!apiKey) throw new Error(`Connect an ${providerId === 'openai' ? 'OpenAI' : 'Anthropic'} API key before discovering models.`);
     return providerAdapter(providerId).listModels(apiKey, this.providerFetch);
@@ -240,9 +286,9 @@ export class DesktopController {
 
   async saveAgentModelSettings(input: { providerId: SupportedProviderId; modelId: string; maxOutputTokens: number }): Promise<void> {
     const settings = ModelSettingsSchema.parse(input);
-    const key = await this.setting<string>(`model.apiKey.${settings.providerId}`);
-    if (!key) throw new Error('Connect the selected provider before saving its model.');
-    const models = await providerAdapter(settings.providerId).listModels(key, this.providerFetch);
+    const key = settings.providerId === 'claude-code' ? '' : await this.setting<string>(`model.apiKey.${settings.providerId}`);
+    if (settings.providerId === 'claude-code' ? !await this.isClaudeAccountConnected() : !key) throw new Error('Connect the selected provider before saving its model.');
+    const models = await providerAdapter(settings.providerId).listModels(key ?? '', this.providerFetch);
     if (!models.some((model) => model.modelId === settings.modelId && model.capabilities.structuredOutput && model.capabilities.toolUse)) throw new Error('Choose a discovered model that supports structured output and tool use.');
     await this.store.setSetting('model.provider', settings.providerId);
     await this.store.setSetting('model.settings', settings);
@@ -251,7 +297,7 @@ export class DesktopController {
 
   async clearModelKey(): Promise<void> {
     const providerId = await this.setting<SupportedProviderId>('model.provider') ?? 'openai';
-    await this.store.setSetting(`model.apiKey.${providerId}`, null);
+    if (providerId !== 'claude-code') await this.store.setSetting(`model.apiKey.${providerId}`, null);
     await this.store.setSetting('model.settings', null);
     this.pendingModelPreviews.clear();
   }
@@ -827,8 +873,50 @@ export class DesktopController {
     return this.ado.listGitRefs(await this.accessToken(), await this.setting<string>(SETTING.organization) ?? '', z.string().min(1).max(200).parse(repositoryId));
   }
 
+  async listBrowserTestAccounts(): Promise<BrowserTestAccountSummary[]> {
+    return (await this.rawSetting<BrowserTestAccountSecret[]>('browser.testAccounts') ?? []).map(({ id, label, origin, username, password, revision }) => ({ id, label, origin, hasUsername: Boolean(username), hasPassword: Boolean(password), revision }));
+  }
+
+  async saveBrowserTestAccount(input: BrowserTestAccountInput): Promise<BrowserTestAccountSummary[]> {
+    const origin = new URL(input.origin);
+    if (origin.origin !== input.origin || origin.username || origin.password || origin.search || origin.hash || origin.pathname !== '/' || (origin.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(origin.hostname))) {
+      throw new Error('Test account origin must be an HTTPS origin, or HTTP localhost, without a path or credentials.');
+    }
+    const id = input.id ? z.string().uuid().parse(input.id) : randomUUID();
+    const stored = await this.rawSetting<BrowserTestAccountSecret[]>('browser.testAccounts') ?? [];
+    const current = stored.find(({ id: currentId }) => currentId === id);
+    if (input.id && !current) throw new Error('That saved browser test account no longer exists.');
+    if (!current && stored.length >= 20) throw new Error('You can save up to 20 browser test accounts.');
+    const account = BrowserTestAccountSchema.parse({ ...input, id, origin: origin.origin, revision: (current?.revision ?? 0) + 1 });
+    const next = current ? stored.map((entry) => entry.id === id ? account : entry) : [...stored, account];
+    await this.store.setSetting('browser.testAccounts', next);
+    return this.listBrowserTestAccounts();
+  }
+
+  async deleteBrowserTestAccount(idInput: string): Promise<BrowserTestAccountSummary[]> {
+    const id = z.string().uuid().parse(idInput);
+    const stored = await this.rawSetting<BrowserTestAccountSecret[]>('browser.testAccounts') ?? [];
+    await this.store.setSetting('browser.testAccounts', stored.filter((entry) => entry.id !== id));
+    return this.listBrowserTestAccounts();
+  }
+
   async saveTarget(input: TargetConfig): Promise<DesktopState> {
     const target = TargetSchema.parse(input);
+    const selectedAccountIds = target.testAccountIds ?? [];
+    let targetToSave: TargetConfig = { ...target, testAccountVersions: undefined };
+    if (selectedAccountIds.length && target.targetKind === 'repository') throw new Error('Browser test accounts can only be selected for a site target.');
+    if (selectedAccountIds.length) {
+      const profiles = await this.rawSetting<BrowserTestAccountSecret[]>('browser.testAccounts') ?? [];
+      const expectedOrigin = target.siteBaseUrl ? new URL(target.siteBaseUrl).origin : '';
+      const versions: Record<string, number> = {};
+      for (const id of selectedAccountIds) {
+        const profile = profiles.find((entry) => entry.id === id);
+        if (!profile) throw new Error('A selected browser test account no longer exists. Refresh the account list and choose an available account.');
+        if (profile.origin !== expectedOrigin) throw new Error(`Test account “${profile.label}” is saved for ${profile.origin}; it does not match the selected site origin ${expectedOrigin}.`);
+        versions[id] = profile.revision;
+      }
+      targetToSave = { ...target, testAccountVersions: versions };
+    }
     if (target.repositoryPath) {
       const current = await this.setting<TargetConfig>('run.target');
       const chosen = this.chosenRepositoryPath;
@@ -847,7 +935,7 @@ export class DesktopController {
       const refs = await this.ado.listGitRefs(token, organization, source.id);
       if (!refs.some(({ name, objectId }) => name === source.refName && objectId === source.commit)) throw new Error('The selected repository ref changed. Choose the current ref and review a fresh snapshot.');
     }
-    await this.store.setSetting('run.target', target);
+    await this.store.setSetting('run.target', targetToSave);
     return this.getState();
   }
 
@@ -893,6 +981,10 @@ export class DesktopController {
       target = priorTarget;
       await this.store.setSetting('run.target', target);
     }
+    const selectedAccounts = (await this.listBrowserTestAccounts()).filter(({ id }) => (target.testAccountIds ?? []).includes(id));
+    if (selectedAccounts.length !== (target.testAccountIds ?? []).length) throw new Error('A selected browser test account is missing. Refresh Settings and select an available account.');
+    if (selectedAccounts.some(({ origin }) => origin !== (target.siteBaseUrl ? new URL(target.siteBaseUrl).origin : ''))) throw new Error('A selected browser test account does not match the configured site origin.');
+    if (selectedAccounts.some((account) => account.revision !== target.testAccountVersions?.[account.id])) throw new Error('A selected browser test account changed after this target was saved. Save the target again and create a fresh plan.');
     const queue = await this.refreshPlanningQueue();
     if (!queue.length) throw new Error('Add at least one work item to the QA Queue before creating a plan.');
     const snapshots: WorkItemSnapshot[] = [];
@@ -1010,6 +1102,9 @@ export class DesktopController {
       allowedOrigins: target.allowedOrigins,
       commandIds: (repositoryCommands ?? []).map(({ id }) => id),
       excludedContext: [],
+      ...(target.runInstructions ? { runInstructions: target.runInstructions } : {}),
+      testAccounts: selectedAccounts,
+      showBrowserWindow: target.showBrowserWindow ?? false,
       budget: RunBudgetSchema.parse({ maxCostUsd: 1, maxInputTokens: 12_000, maxOutputTokens: configuredAgent.maxOutputTokens, maxProviderCalls: 12, maxAgents: 6, maxParallelAgents: 2, maxRetries: 1, maxRunSeconds: 1800, maxBrowserActions: 100, maxArtifactMiB: 500 }),
     };
     const draft = { manifest, contract, notes, envelopePreview, ...(repositoryCommands ? { repositoryCommands } : {}) };
@@ -1061,7 +1156,7 @@ export class DesktopController {
       } finally { if (temporary) await rm(temporary, { recursive: true, force: true }).catch(() => undefined); }
     }
     if (!original.envelopePreview) throw new Error('This plan has no approved run envelope. Create a fresh agentic plan.');
-    const { modelId: defaultModelId, ...previewFields } = original.envelopePreview;
+    const { modelId: defaultModelId, runInstructions: _runInstructions, testAccounts: _testAccounts, showBrowserWindow: _showBrowserWindow, ...previewFields } = original.envelopePreview;
     const approvedEnvelope = RunEnvelopeSchema.parse({
       schemaVersion: 1,
       ...previewFields,
@@ -1077,6 +1172,8 @@ export class DesktopController {
       provider: providerAdapter(configuredAgent.providerId),
       repositoryContext: approvedRepositoryContext,
       repositoryCommands: approvedRepositoryConfig?.tests.map(({ id, resultFormat, resultPaths }) => ({ id, resultFormat, resultPaths })) ?? [],
+      runInstructions: target.runInstructions,
+      testAccounts: original.envelopePreview.testAccounts,
       fetcher: this.providerFetch,
     });
     if (plannedAgents.plan.assignments.some(({ layer }) => layer === 'integration')) throw new Error('This app release does not yet execute integration-layer assignments. Refresh the plan and choose repository and/or browser coverage.');
@@ -1092,6 +1189,14 @@ export class DesktopController {
       risk: scenario.risk,
       approved: true,
     }));
+    const selectedAccountById = new Map(original.envelopePreview.testAccounts.map((account) => [account.id, account]));
+    for (const scenario of generatedBrowserScenarios) for (const step of scenario.steps) {
+      if (step.action !== 'fillSecret') continue;
+      const account = selectedAccountById.get(step.accountId);
+      if (!account || (step.field === 'username' && !account.hasUsername) || (step.field === 'password' && !account.hasPassword)) {
+        throw new Error(`A generated browser step refers to an unavailable ${step.field} test-account field. Review selected accounts and regenerate the plan.`);
+      }
+    }
     for (const test of plannedAgents.repositoryTests) {
       if (!micromatch.isMatch(test.path, approvedRepositoryConfig?.repository.include ?? []) || (approvedRepositoryConfig?.repository.exclude.some((pattern) => micromatch.isMatch(test.path, pattern)))) {
         throw new Error('A generated backend test path is outside the approved repository include/exclude scope. Refresh the repository configuration before approving the plan.');
@@ -1406,6 +1511,15 @@ export class DesktopController {
       scratch = await mkdtemp(join(this.scratchRoot, `agentic-qa-${runId}-`));
       await this.progress(runId, 'orchestrator', 'RUNNING', 'preflight', 'Checking the frozen target, configuration, time budget, and approved origins.');
       if (manifest.targetKind !== target.targetKind) throw new Error('Run target does not match the approved manifest.');
+      if ((target.testAccountIds ?? []).length) {
+        const latestAccounts = await this.rawSetting<BrowserTestAccountSecret[]>('browser.testAccounts') ?? [];
+        for (const id of target.testAccountIds ?? []) {
+          const savedRevision = target.testAccountVersions?.[id];
+          const current = latestAccounts.find(({ id: currentId }) => currentId === id);
+          if (!current) { executionState = 'BLOCKED'; siteBlocked = true; blockedReason = 'A selected browser test account was removed after plan approval. Add or select an account for this site origin, then create a fresh plan.'; break; }
+          if (!savedRevision || current.revision !== savedRevision) { executionState = 'BLOCKED'; siteBlocked = true; blockedReason = `Selected browser test account “${current.label}” changed after plan approval. Review the current credentials and create a fresh plan before running.`; break; }
+        }
+      }
       if (manifest.siteBaseUrl) {
         const manifestSite = new URL(manifest.siteBaseUrl);
         if (!target.siteBaseUrl || new URL(target.siteBaseUrl).origin !== manifestSite.origin) throw new Error('Run site does not match the approved manifest.');
@@ -1495,16 +1609,20 @@ export class DesktopController {
         }
         await this.progress(runId, 'browser', 'RUNNING', scenario.id, `Playwright worker started Scenario ${scenario.id} (${scenario.steps.length} bounded steps).`);
         try {
-          const result: BrowserScenarioResult = await this.browserScenarioRunner({
+          const scenarioTestAccounts = await this.resolveScenarioTestAccounts(target, scenario);
+          const workerResult: BrowserScenarioResult = await this.browserScenarioRunner({
             runId,
             target: { siteBaseUrl: manifest.siteBaseUrl!, allowedOrigins: [new URL(manifest.siteBaseUrl!).origin] },
             scenario,
             artifactDirectory: scratch,
             timeoutMs: Math.max(100, Math.min(15_000, deadlineAt - Date.now())),
             actionLimit: remaining,
+            showBrowserWindow: target.showBrowserWindow ?? false,
+            testAccounts: scenarioTestAccounts,
             signal: abort.signal,
             onStepProgress: async (step) => this.progress(runId, 'browser', step.status === 'PASSED' ? 'COMPLETED' : 'FAILED', step.stepId, `${step.status} · step ${step.order}/${scenario.steps.length} · ${step.action}`),
           });
+          const result = scrubBrowserScenarioResult(workerResult, scenarioTestAccounts);
           const artifactIds: string[] = [];
           for (const artifact of result.artifacts) {
             if (!this.evidenceRoot || !this.artifactKey) throw new Error('Encrypted evidence storage is unavailable.');
@@ -1519,9 +1637,15 @@ export class DesktopController {
           const browserObservation = ObservationSchema.parse({ ...result.observation, artifactIds });
           observations.push(browserObservation);
           await this.store.appendObservation(browserObservation);
+          if (browserObservation.diagnostic && ['missing_test_account', 'authentication_required', 'manual_authentication_required', 'access_denied', 'target_unavailable', 'browser_unavailable', 'policy_blocked'].includes(browserObservation.diagnostic.category)) {
+            executionState = 'BLOCKED';
+            siteBlocked = true;
+            blockedReason = `${browserObservation.diagnostic.detail} ${browserObservation.diagnostic.nextAction}`;
+          }
           await this.progress(runId, 'browser', browserObservation.status === 'PASSED' ? 'COMPLETED' : 'FAILED', scenario.id, `Playwright recorded ${result.steps?.length ?? scenario.steps.length} step result(s) and ${result.artifacts.filter(({ kind }) => kind === 'screenshot').length} ordered screenshot(s).`);
           actionsUsed += scenario.steps.length + 1;
           if (result.cancelled) { executionState = 'CANCELLED'; break; }
+          if (siteBlocked) break;
         } catch (error) {
           if (abort.signal.aborted) { executionState = 'CANCELLED'; break; }
           executionState = 'BLOCKED';
@@ -1568,7 +1692,8 @@ export class DesktopController {
           else if (layerObservations.some(({ status }) => status !== 'PASSED')) missingEvidence.push(`${layer} evidence contains a failed or errored observation.`);
         }
         const blocked = executionState !== 'COMPLETED' && missingEvidence.length > 0;
-        const state: CriterionResult['state'] = !missingEvidence.length ? 'VERIFIED' : blocked ? 'BLOCKED' : 'UNVERIFIED';
+        const hasBlockedObservation = linkedObservations.some(({ diagnostic }) => diagnostic && ['missing_test_account', 'authentication_required', 'manual_authentication_required', 'access_denied', 'target_unavailable', 'browser_unavailable', 'policy_blocked'].includes(diagnostic.category));
+        const state: CriterionResult['state'] = !missingEvidence.length ? 'VERIFIED' : blocked || hasBlockedObservation ? 'BLOCKED' : 'UNVERIFIED';
         const findingIds = findings.filter((finding) => finding.observationIds.some((id) => linkedObservations.some((observation) => observation.id === id))).map(({ id }) => id);
         return { criterionId: criterion.id, state, observationIds: linkedObservations.map(({ id }) => id), missingEvidence, findingIds };
       });
@@ -1689,8 +1814,9 @@ export class DesktopController {
     const saved = await this.setting<{ providerId?: SupportedProviderId; modelId?: string; model?: string; maxOutputTokens?: number }>('model.settings');
     const key = providerId ? await this.setting<string>(`model.apiKey.${providerId}`) : undefined;
     const modelId = saved?.modelId ?? saved?.model;
-    if (!providerId || !key || !modelId || saved?.providerId !== providerId) throw new Error('Configure a provider API key and select a supported model in Settings before planning or running QA.');
-    return { providerId, modelId, maxOutputTokens: Math.max(256, Math.min(saved?.maxOutputTokens ?? 1200, 32_000)), apiKey: key };
+    const configured = providerId === 'claude-code' ? await this.isClaudeAccountConnected() : Boolean(key);
+    if (!providerId || !configured || !modelId || saved?.providerId !== providerId) throw new Error('Connect an AI provider account and select a supported model in Settings before planning or running QA.');
+    return { providerId, modelId, maxOutputTokens: Math.max(256, Math.min(saved?.maxOutputTokens ?? 1200, 32_000)), apiKey: key ?? '' };
   }
 
   private async setSetting(key: string, value: unknown): Promise<void> {
@@ -1764,6 +1890,21 @@ export class DesktopController {
       } finally { if (temporary) await rm(temporary, { recursive: true, force: true }).catch(() => undefined); }
     }
     return { value: sha256(JSON.stringify({ target, ...(repositoryConfigHash ? { repositoryConfigHash } : {}) })), ...(repositoryConfigHash ? { repositoryConfigHash } : {}) };
+  }
+
+  private async resolveScenarioTestAccounts(target: TargetConfig, scenario: QAContract['scenarios'][number]): Promise<Record<string, Partial<Record<'username' | 'password', string>>>> {
+    const references = scenario.steps.filter((step) => step.action === 'fillSecret');
+    if (!references.length) return {};
+    const selected = new Set(target.testAccountIds ?? []);
+    const stored = await this.rawSetting<BrowserTestAccountSecret[]>('browser.testAccounts') ?? [];
+    const result: Record<string, Partial<Record<'username' | 'password', string>>> = {};
+    for (const reference of references) {
+      if (!selected.has(reference.accountId)) continue;
+      const account = stored.find(({ id, origin }) => id === reference.accountId && origin === (target.siteBaseUrl ? new URL(target.siteBaseUrl).origin : ''));
+      const value = account?.[reference.field];
+      if (value) result[reference.accountId] = { ...result[reference.accountId], [reference.field]: value };
+    }
+    return result;
   }
 
   private repositoryConfigSettingKey(target: TargetConfig): string {

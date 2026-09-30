@@ -18,6 +18,27 @@ export interface TargetConfig {
   adoRepository?: { organization: string; projectId: string; id: string; name: string; refName: string; commit: string };
   siteBaseUrl?: string;
   allowedOrigins: string[];
+  runInstructions?: string;
+  testAccountIds?: string[];
+  testAccountVersions?: Record<string, number>;
+  showBrowserWindow?: boolean;
+}
+
+export interface BrowserTestAccountSummary {
+  id: string;
+  label: string;
+  origin: string;
+  hasUsername: boolean;
+  hasPassword: boolean;
+  revision: number;
+}
+
+export interface BrowserTestAccountInput {
+  id?: string;
+  label: string;
+  origin: string;
+  username: string;
+  password: string;
 }
 
 export interface DraftPlan {
@@ -25,7 +46,7 @@ export interface DraftPlan {
   contract: QAContract;
   notes: string[];
   repositoryCommands?: Array<{ id: string; label: string; executable: string; arguments: string[]; workingDirectory: string; timeoutSeconds: number; resultFormat?: 'junit' | 'trx' | 'none'; resultPaths: string[]; scenarioMappings: Array<{ scenarioId: string; testCaseIds: string[] }> }>;
-  envelopePreview?: { providerId: 'openai' | 'anthropic' | 'openrouter'; modelId: string; sourceIds: number[]; sourceRevisions: Record<string, number>; repositoryPaths: string[]; allowedOrigins: string[]; commandIds: string[]; excludedContext: string[]; budget: RunBudget };
+  envelopePreview?: { providerId: 'openai' | 'anthropic' | 'openrouter' | 'claude-code'; modelId: string; sourceIds: number[]; sourceRevisions: Record<string, number>; repositoryPaths: string[]; allowedOrigins: string[]; commandIds: string[]; excludedContext: string[]; budget: RunBudget; runInstructions?: string; testAccounts: BrowserTestAccountSummary[]; showBrowserWindow: boolean };
 }
 
 export interface QueueItemView {
@@ -68,15 +89,16 @@ export interface DesktopState {
   customTypeMappings?: WorkItemTypeMappings;
   queue: QueueItemView[];
   target?: TargetConfig;
+  browserTestAccounts?: BrowserTestAccountSummary[];
   modelProviderConfigured?: boolean;
-  modelProvider?: 'openai' | 'anthropic' | 'openrouter';
+  modelProvider?: 'openai' | 'anthropic' | 'openrouter' | 'claude-code';
   modelId?: string;
   modelMaxOutputTokens?: number;
 }
 
 export interface ModelPayloadPreview {
   previewId: string;
-  provider: 'OpenAI' | 'Anthropic';
+  provider: 'OpenAI' | 'Anthropic' | 'Claude Code';
   model: string;
   estimatedInputTokens: number;
   maxOutputTokens: number;
@@ -122,12 +144,16 @@ export interface DesktopApi {
   listGitRepositories(): Promise<AdoGitRepository[]>;
   listGitRefs(repositoryId: string): Promise<AdoGitRef[]>;
   saveTarget(target: TargetConfig): Promise<DesktopState>;
+  listBrowserTestAccounts(): Promise<BrowserTestAccountSummary[]>;
+  saveBrowserTestAccount(input: BrowserTestAccountInput): Promise<BrowserTestAccountSummary[]>;
+  deleteBrowserTestAccount(id: string): Promise<BrowserTestAccountSummary[]>;
   getRepositoryConfigDraft(target: TargetConfig): Promise<string>;
   saveRepositoryConfigDraft(input: { target: TargetConfig; content: string }): Promise<void>;
   createDraftPlan(previousRunId?: string): Promise<DraftPlan>;
   importProviderKey(providerId: 'openai' | 'anthropic' | 'openrouter'): Promise<boolean>;
-  listProviderModels(providerId: 'openai' | 'anthropic' | 'openrouter'): Promise<ProviderModel[]>;
-  saveAgentModelSettings(input: { providerId: 'openai' | 'anthropic' | 'openrouter'; modelId: string; maxOutputTokens: number }): Promise<void>;
+  connectClaudeAccount(): Promise<boolean>;
+  listProviderModels(providerId: 'openai' | 'anthropic' | 'openrouter' | 'claude-code'): Promise<ProviderModel[]>;
+  saveAgentModelSettings(input: { providerId: 'openai' | 'anthropic' | 'openrouter' | 'claude-code'; modelId: string; maxOutputTokens: number }): Promise<void>;
   importModelKey(): Promise<boolean>;
   clearModelKey(): Promise<void>;
   saveModelSettings(input: { model: string; maxOutputTokens: number }): Promise<void>;

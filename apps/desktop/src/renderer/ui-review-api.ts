@@ -140,6 +140,21 @@ const report: QAReport = {
   completedAt: '2026-09-29T12:01:02.000Z',
   explanation: 'Direct browser evidence was collected; a reviewer still needs to classify the retained finding.',
 };
+const blockedObservation: Observation = {
+  ...observation,
+  id: '55555555-5555-4555-8555-555555555555',
+  status: 'FAILED',
+  assertion: 'The site displayed a sign-in page before the check could run.',
+  diagnostic: { stage: 'authentication', category: 'authentication_required', detail: 'The site requires sign-in before showing this page.', nextAction: 'Select a named test account for this site origin and create a fresh plan.', retryable: true },
+};
+const blockedFinding: Finding = { ...finding, observationIds: [blockedObservation.id], rationale: 'Browser QA is blocked by the site authentication requirement.' };
+const blockedReport: QAReport = {
+  ...report,
+  executionState: 'BLOCKED',
+  verdict: 'BLOCKED',
+  criterionResults: [{ criterionId: criterion.id, state: 'BLOCKED', observationIds: [blockedObservation.id], missingEvidence: ['Authentication blocked browser evidence.'], findingIds: [blockedFinding.id] }],
+  explanation: 'The browser check was blocked because the site requires sign-in. Select a named test account for this site origin and create a fresh plan.',
+};
 const queueEntry: QueueEntry = {
   key: `${organization.toLowerCase()}:${project.id}:${requirement.id}`,
   organization,
@@ -162,22 +177,25 @@ export function createUiReviewFixture(scenarioName: string): { api: DesktopApi; 
         selectedOrganization: organization,
         savedOrganizations: [organization],
         selectedProject: project,
-        queue: scenarioName === 'queue' || scenarioName === 'report' ? [{ entry: queueEntry, snapshot: requirement }] : [],
+        queue: scenarioName === 'queue' || scenarioName === 'report' || scenarioName === 'blocked-report' ? [{ entry: queueEntry, snapshot: requirement }] : [],
         target: { targetKind: 'site', siteBaseUrl: 'https://staging.example.test', allowedOrigins: ['https://staging.example.test'] },
         modelProviderConfigured: false,
         modelId: 'gpt-5.6-terra',
         modelMaxOutputTokens: 1200,
       };
-  let approved = scenarioName === 'report';
-  let providerConnected = scenarioName === 'report';
-  let executed = scenarioName === 'report';
+  let approved = scenarioName === 'report' || scenarioName === 'blocked-report';
+  let providerConnected = approved;
+  let executed = approved;
+  const scenarioObservation = scenarioName === 'blocked-report' ? blockedObservation : observation;
+  const scenarioFinding = scenarioName === 'blocked-report' ? blockedFinding : finding;
+  const scenarioReport = scenarioName === 'blocked-report' ? blockedReport : report;
   const runDetail: RunDetail = {
     manifest,
     contract: { ...contract, scenarios: contract.scenarios.map((item) => ({ ...item, approved: true })) },
-    observations: [observation],
-    findings: [finding],
+    observations: [scenarioObservation],
+    findings: [scenarioFinding],
     artifacts: [],
-    ...(scenarioName === 'report' ? { report } : {}),
+    ...(approved ? { report: scenarioReport } : {}),
   };
 
   const currentState = (): DesktopState => ({ ...state, queue: [...state.queue], modelProviderConfigured: providerConnected });
@@ -185,7 +203,8 @@ export function createUiReviewFixture(scenarioName: string): { api: DesktopApi; 
     state = { ...state, ...updates };
     return currentState();
   };
-  const runs = () => approved ? [{ manifest, report: executed ? report : undefined }] : [];
+  const runs = () => approved ? [{ manifest, report: executed ? scenarioReport : undefined }] : [];
+  let browserAccounts: Array<import('../shared/ipc.js').BrowserTestAccountSummary> = [];
   const api: DesktopApi = {
     getState: async () => currentState(),
     signIn: async () => withState({ accounts: [account], selectedAccountId: account.homeAccountId }),
@@ -238,11 +257,24 @@ export function createUiReviewFixture(scenarioName: string): { api: DesktopApi; 
     listGitRepositories: async () => [{ id: 'repo-portal', name: 'Portal Experience', defaultBranch: 'refs/heads/main' }],
     listGitRefs: async () => [{ name: 'refs/heads/main', objectId: 'c'.repeat(40) }],
     saveTarget: async (target: TargetConfig) => withState({ target }),
+    listBrowserTestAccounts: async () => browserAccounts,
+    saveBrowserTestAccount: async (input) => { const entry = { id: input.id ?? '66666666-6666-4666-8666-666666666666', label: input.label, origin: input.origin, hasUsername: true, hasPassword: true, revision: 1 }; browserAccounts = [...browserAccounts.filter(({ id }) => id !== entry.id), entry]; return browserAccounts; },
+    deleteBrowserTestAccount: async (id) => { browserAccounts = browserAccounts.filter((entry) => entry.id !== id); return browserAccounts; },
     getRepositoryConfigDraft: async () => JSON.stringify({ schemaVersion: 1, project: { name: 'Portal' }, repository: { include: ['**/*'], exclude: [] }, setup: [], tests: [{ id: 'project-tests', label: 'Project tests', executable: 'npm', arguments: ['test'], workingDirectory: '.', timeoutSeconds: 600, network: 'none', resultFormat: 'none', resultPaths: [], scenarioMappings: [] }], limits: { browserActions: 100, runSeconds: 1800, artifactMiB: 500 } }, null, 2),
     saveRepositoryConfigDraft: async () => undefined,
-    createDraftPlan: async () => plan,
+    createDraftPlan: async () => ({ ...plan, envelopePreview: {
+      providerId: state.modelProvider ?? 'openai', modelId: state.modelId ?? 'gpt-5.6-terra', sourceIds: [requirement.id, task.id],
+      sourceRevisions: { [`${organization}:${project.id}:${requirement.id}`]: requirement.revision }, repositoryPaths: [],
+      allowedOrigins: state.target?.allowedOrigins ?? [], commandIds: [], excludedContext: [],
+      budget: { maxCostUsd: 1, maxInputTokens: 12_000, maxOutputTokens: 1_200, maxProviderCalls: 12, maxAgents: 6, maxParallelAgents: 2, maxRetries: 1, maxRunSeconds: 1800, maxBrowserActions: 100, maxArtifactMiB: 500 },
+      ...(state.target?.runInstructions ? { runInstructions: state.target.runInstructions } : {}),
+      testAccounts: browserAccounts.filter(({ id }) => state.target?.testAccountIds?.includes(id)), showBrowserWindow: state.target?.showBrowserWindow ?? false,
+    } }),
     importProviderKey: async () => { providerConnected = true; return true; },
-    listProviderModels: async (providerId) => [{ providerId, modelId: 'gpt-5.6-terra', displayName: 'GPT-5.6 Terra', capabilities: { structuredOutput: true, toolUse: true, inputUsdPerMillionTokens: 0.25, outputUsdPerMillionTokens: 2 } }],
+    connectClaudeAccount: async () => { providerConnected = true; withState({ modelProvider: 'claude-code', modelProviderConfigured: true }); return true; },
+    listProviderModels: async (providerId) => providerId === 'claude-code'
+      ? ['sonnet', 'opus', 'haiku'].map((modelId) => ({ providerId, modelId, displayName: `Claude ${modelId[0]!.toUpperCase()}${modelId.slice(1)} (subscription)`, capabilities: { structuredOutput: true, toolUse: true, inputUsdPerMillionTokens: 2, outputUsdPerMillionTokens: 10 } }))
+      : [{ providerId, modelId: 'gpt-5.6-terra', displayName: 'GPT-5.6 Terra', capabilities: { structuredOutput: true, toolUse: true, inputUsdPerMillionTokens: 0.25, outputUsdPerMillionTokens: 2 } }],
     saveAgentModelSettings: async ({ providerId, modelId: selectedModel }) => { withState({ modelProvider: providerId, modelId: selectedModel, modelProviderConfigured: true }); },
     importModelKey: async () => false,
     clearModelKey: async () => undefined,

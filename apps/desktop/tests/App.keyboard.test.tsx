@@ -9,6 +9,9 @@ const listRuns = vi.fn(async () => []);
 const api = {
   isBrowserInstalled: async () => false,
   isRepoWorkerImageInstalled: async () => false,
+  listBrowserTestAccounts: async () => [],
+  saveBrowserTestAccount: async () => [],
+  deleteBrowserTestAccount: async () => [],
   listRuns,
 } as unknown as DesktopApi;
 
@@ -134,6 +137,9 @@ describe('desktop keyboard navigation', () => {
     const testApi = {
       isBrowserInstalled: async () => false,
       isRepoWorkerImageInstalled: async () => false,
+      listBrowserTestAccounts: async () => [],
+      saveBrowserTestAccount: async () => [],
+      deleteBrowserTestAccount: async () => [],
       signIn: async () => signedInState,
       listOrganizations: async () => [{ id: 'org-1', name: 'contoso' }],
       selectOrganization: async (organization: string) => ({ ...signedInState, selectedOrganization: organization }),

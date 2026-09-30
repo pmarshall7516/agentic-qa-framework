@@ -17,6 +17,9 @@ function fixture() {
     searchActiveStories: vi.fn(async () => ({ items: [] })),
     addQueueItems: vi.fn(async () => ({ queue: [] })),
     exportAdoProfilesConfig: vi.fn(async () => true),
+    listBrowserTestAccounts: vi.fn(async () => []),
+    saveBrowserTestAccount: vi.fn(async () => []),
+    deleteBrowserTestAccount: vi.fn(async () => []),
   } as any;
   const dispose = registerIpcHandlers(ipc, api, { devServerUrl: 'http://127.0.0.1:5173/' });
   return { handlers, api, dispose, ipc };
@@ -33,7 +36,8 @@ describe('validated desktop IPC', () => {
     const { handlers, api, ipc } = fixture();
     await expect(handlers.get('qa:get-state')!({ senderFrame: { url: 'http://127.0.0.1:5173/' } }, 'extra')).rejects.toThrow();
     expect(api.getState).not.toHaveBeenCalled();
-    expect(ipc.handle).toHaveBeenCalledTimes(57);
+    expect(ipc.handle).toHaveBeenCalledTimes(61);
+    expect([...handlers.keys()]).toContain('qa:connect-claude-account');
     expect([...handlers.keys()]).toContain('qa:generate-model-suggestions');
     expect([...handlers.keys()]).toContain('qa:list-git-repositories');
     expect([...handlers.keys()]).toContain('qa:save-work-item-type-mapping');
@@ -42,6 +46,8 @@ describe('validated desktop IPC', () => {
     expect([...handlers.keys()]).toContain('qa:get-run-progress');
     expect([...handlers.keys()]).toContain('qa:save-repository-config-draft');
     expect([...handlers.keys()]).toContain('qa:get-repository-config-draft');
+    expect([...handlers.keys()]).toContain('qa:list-browser-test-accounts');
+    expect([...handlers.keys()]).toContain('qa:save-browser-test-account');
     expect([...handlers.keys()]).toContain('qa:list-organizations');
     expect([...handlers.keys()]).toContain('qa:list-sprint-taskboard');
     expect([...handlers.keys()]).not.toContain('qa:save-client-id');
@@ -78,5 +84,14 @@ describe('validated desktop IPC', () => {
     const profile = { name: 'Derse QA', organization: 'Xorbix', project: { id: 'project-1', name: 'Derse' }, team: 'Derse Team', boardColumn: '', storyIds: [] };
     await expect(handlers.get('qa:save-ado-profile')!(sender, profile)).resolves.toEqual({ queue: [] });
     expect(api.saveAdoProfile).toHaveBeenCalledWith(profile);
+  });
+
+  it('validates test-account IPC values and keeps account listing behind trusted senders', async () => {
+    const { handlers, api } = fixture();
+    const sender = { senderFrame: { url: 'http://127.0.0.1:5173/' } };
+    await expect(handlers.get('qa:save-browser-test-account')!(sender, { label: 'QA user', origin: 'https://qa.example.test', username: 'user', password: 'password', unexpected: true })).rejects.toThrow();
+    expect(api.saveBrowserTestAccount).not.toHaveBeenCalled();
+    await expect(handlers.get('qa:list-browser-test-accounts')!({ senderFrame: { url: 'https://attacker.example' } })).rejects.toThrow('Untrusted');
+    await expect(handlers.get('qa:list-browser-test-accounts')!(sender)).resolves.toEqual([]);
   });
 });

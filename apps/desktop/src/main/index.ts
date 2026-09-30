@@ -14,8 +14,31 @@ import { REPO_WORKER_IMAGE } from '@agentic-qa/repo-worker/runner';
 const devServerUrl = !app.isPackaged && process.env.VITE_DEV_SERVER_URL === 'http://127.0.0.1:5173'
   ? process.env.VITE_DEV_SERVER_URL
   : undefined;
+app.setName('Agentic QA');
 const APP_CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'";
 const DEV_CSP = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' http://127.0.0.1:5173; style-src 'self' 'unsafe-inline' http://127.0.0.1:5173; img-src 'self' data:; connect-src 'self' http://127.0.0.1:5173 ws://127.0.0.1:5173; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'";
+
+function runClaudeCommand(args: string[], timeoutMs: number, captureOutput = false): Promise<{ code: number; output: string }> {
+  return new Promise((resolveCommand, rejectCommand) => {
+    const allowed = ['PATH', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'SYSTEMROOT', 'TEMP', 'TMP'];
+    const env = Object.fromEntries(allowed.flatMap((key) => process.env[key] ? [[key, process.env[key]!] as const] : []));
+    const child = spawn('claude', args, { env, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] });
+    let output = '';
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); setTimeout(() => child.kill('SIGKILL'), 1000).unref(); }, timeoutMs);
+    child.stdout.on('data', (chunk: Buffer) => { if (captureOutput) output = (output + chunk.toString('utf8')).slice(0, 4096); });
+    child.on('error', () => { clearTimeout(timer); rejectCommand(new Error('Claude Code CLI was not found. Install Claude Code, sign in to your Claude plan, then retry.')); });
+    child.on('close', (code) => { clearTimeout(timer); if (timedOut) rejectCommand(new Error('Claude Code sign-in timed out.')); else resolveCommand({ code: code ?? 1, output }); });
+  });
+}
+
+async function claudeAccountConnected(): Promise<boolean> {
+  const status = await runClaudeCommand(['auth', 'status', '--json'], 10_000, true);
+  try {
+    const parsed = JSON.parse(status.output);
+    return parsed.loggedIn === true && parsed.apiProvider === 'firstParty' && parsed.authMethod !== 'none';
+  } catch { return false; }
+}
 
 function dockerCommand(args: string[], timeoutMs = 10_000): Promise<{ code: number; errorText: string; output: string }> {
   return new Promise((resolveCommand, rejectCommand) => {
@@ -93,6 +116,7 @@ async function createWindow(): Promise<void> {
     minHeight: 680,
     backgroundColor: '#f5f6f8',
     title: 'Agentic QA',
+    icon: join(app.getAppPath(), 'dist', 'icon.png'),
     webPreferences: {
       preload: join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -138,6 +162,11 @@ async function createWindow(): Promise<void> {
     scratchRoot,
     artifactKey: () => getDatabaseKey(join(userDataPath, 'storage-key.enc')),
     authFactory: async () => new AzureCliAdoAuthService(),
+    isClaudeAccountConnected: claudeAccountConnected,
+    startClaudeLogin: async () => {
+      const result = await runClaudeCommand(['auth', 'login'], 5 * 60_000);
+      if (result.code !== 0) throw new Error('Claude Code sign-in did not complete. Finish sign-in in the browser, then retry.');
+    },
     chooseRepository: async () => {
       const result = await dialog.showOpenDialog(window, { properties: ['openDirectory', 'dontAddToRecent'] });
       return result.canceled ? undefined : result.filePaths[0];

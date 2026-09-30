@@ -30,6 +30,13 @@ describe('local report renderers', () => {
     expect(renderReport(input, 'html')).toContain(artifactId);
   });
 
+  it('renders blocked diagnostics with the concrete next action in HTML and Markdown', () => {
+    const input = { ...bundle, observations: [{ id: '44444444-4444-4444-8444-444444444444', runId: bundle.manifest.runId, scenarioId: 's-1', status: 'FAILED', worker: 'browser', startedAt: '2026-09-27T12:00:00.000Z', endedAt: '2026-09-27T12:00:01.000Z', assertion: 'The site displayed a sign-in page.', artifactIds: [], sourceIdentity: 'https://test.example', diagnostic: { stage: 'authentication', category: 'authentication_required', detail: 'Sign-in is required.', nextAction: 'Select a named account and retry.', retryable: true } }] };
+    expect(renderReport(input, 'markdown')).toContain('Next action: Select a named account and retry.');
+    expect(renderReport(input, 'html')).toContain('authentication_required');
+    expect(renderReport(input, 'json')).toContain('Select a named account and retry.');
+  });
+
   it('redacts browser form values from exported JSON contracts', () => {
     const input = { ...bundle, contract: { ...bundle.contract, scenarios: [{ id: 's-1', steps: [{ action: 'fill', role: 'textbox', name: 'Password', value: 'credential-canary' }] }] } };
     const json = renderReport(input, 'json');

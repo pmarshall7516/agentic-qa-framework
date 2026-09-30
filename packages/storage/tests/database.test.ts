@@ -121,6 +121,7 @@ describe('encrypted QA store', () => {
     await store.setSetting('ado.customTypeMappings.contoso.p-1', { 'User Story': 'REQUIREMENT' });
     await store.setSetting('repository.config.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', { schemaVersion: 1 });
     await store.setSetting('entra.clientId', 'legacy-client-id');
+    await store.setSetting('browser.testAccounts', [{ id: '33333333-3333-4333-8333-333333333333', username: 'private-user', password: 'private-password' }]);
     await store.setSetting('model.apiKey', 'kept-model-key');
 
     await store.deleteLocalQaData();
@@ -136,6 +137,7 @@ describe('encrypted QA store', () => {
     await expect(store.getSetting('ado.customTypeMappings.contoso.p-1')).resolves.toBeUndefined();
     await expect(store.getSetting('repository.config.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')).resolves.toBeUndefined();
     await expect(store.getSetting('entra.clientId')).resolves.toBeUndefined();
+    await expect(store.getSetting('browser.testAccounts')).resolves.toBeUndefined();
     await expect(store.getSetting('model.apiKey')).resolves.toBe('kept-model-key');
     await store.close();
   });

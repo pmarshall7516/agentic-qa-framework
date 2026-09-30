@@ -119,4 +119,14 @@ describe('QA Contract v2 source context', () => {
     }).success).toBe(false);
     expect(QAContractSchema.safeParse(missingAcceptanceCriteria).success).toBe(true);
   });
+
+  it('accepts account and field references for secret fills without embedding secret literals', () => {
+    const scenario = {
+      ...contractV2.scenarios[0],
+      steps: [{ action: 'fillSecret', accountId: '22222222-2222-4222-8222-222222222222', field: 'password', role: 'textbox', name: 'Password' }],
+    };
+    expect(QAContractSchema.safeParse({ ...contractV2, scenarios: [scenario] }).success).toBe(true);
+    expect(QAContractSchema.safeParse({ ...contractV2, scenarios: [{ ...scenario, steps: [{ ...scenario.steps[0], value: 'secret-canary' }] }] }).success).toBe(false);
+    expect(QAContractSchema.safeParse({ ...contractV2, scenarios: [{ ...scenario, steps: [{ ...scenario.steps[0], accountId: 'not-an-id' }] }] }).success).toBe(false);
+  });
 });

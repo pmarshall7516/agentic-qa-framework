@@ -44,6 +44,7 @@ try {
   browser = await chromium.launch({ headless: true });
 
   const page = await openScenario('onboarding');
+  assert.match(await page.title(), /Agentic QA/);
   await page.getByRole('heading', { name: 'Start your QA workspace' }).waitFor();
   await capture(page, '01-onboarding');
   await page.getByRole('button', { name: 'Sign in with Azure DevOps' }).click();
@@ -52,12 +53,28 @@ try {
   await page.getByRole('button', { name: /Contoso/ }).click();
   await page.getByRole('button', { name: /Portal Experience/ }).click();
   await page.getByRole('heading', { name: 'Find work to verify' }).waitFor();
+  await page.locator('.brand-symbol img').waitFor();
+  assert.equal(await page.locator('.brand-symbol img').evaluate((image) => image.naturalWidth), 1024, 'the provided app icon should load at its native 1024px width');
   await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('heading', { name: 'Settings' }).waitFor();
   await page.getByRole('button', { name: 'Import key and discover models…' }).click();
   await page.getByText('1 supported models discovered.').waitFor();
   await page.getByLabel('Search models').fill('terra');
   await page.getByLabel('Supported model').selectOption('gpt-5.6-terra');
+  await page.getByRole('button', { name: 'Save required agent model' }).click();
+  await page.getByText('Required agent provider, model and output-token limit saved locally.').waitFor();
+  await page.getByLabel('Account label').fill('QA Editor');
+  await page.getByLabel('Exact site origin').fill('https://staging.example.test');
+  await page.getByLabel('Username').fill('qa-user@example.test');
+  await page.getByLabel('Password').fill('fixture-password-canary');
+  await page.getByRole('button', { name: 'Save encrypted test account' }).click();
+  await page.getByText('Encrypted test account saved. Its username and password are not available for readback.').waitFor();
+  assert.equal(await page.getByLabel('Password').inputValue(), '', 'saved password field should clear immediately');
+  await page.getByLabel('Provider').selectOption('claude-code');
+  await page.getByRole('button', { name: 'Connect Claude account…' }).click();
+  await page.getByText('Claude account connected. 3 supported models discovered.').waitFor();
+  await page.getByLabel('Search models').fill('sonnet');
+  await page.getByLabel('Supported model').selectOption('sonnet');
   await page.getByRole('button', { name: 'Save required agent model' }).click();
   await page.getByText('Required agent provider, model and output-token limit saved locally.').waitFor();
   await page.getByRole('button', { name: 'Work items' }).click();
@@ -79,10 +96,16 @@ try {
   await page.getByRole('button', { name: 'Start QA' }).click();
   await page.getByRole('heading', { name: 'Set up a QA run' }).waitFor();
   await page.getByLabel('Development or staging URL').fill('https://staging.example.test');
+  await page.getByLabel('Named test accounts').selectOption('66666666-6666-4666-8666-666666666666');
+  await page.getByLabel('Extra QA context or instructions (optional)').fill('Use the editor role and verify the filtered result list.');
+  await page.getByLabel('Show Playwright browser window while testing').check();
   await capture(page, '05-run-setup');
   await page.getByRole('button', { name: 'Prepare agentic QA plan' }).click();
   await page.getByRole('heading', { name: 'Review the QA plan' }).waitFor();
   await page.getByRole('heading', { name: 'Orchestrator plan' }).waitFor();
+  await page.getByText(/QA Editor/).waitFor();
+  await page.getByText(/Use the editor role and verify the filtered result list/).waitFor();
+  await page.getByText(/visible Playwright window/).waitFor();
   await capture(page, '06-plan-review');
   await capture(page, '06-plan-review', 800);
   await page.getByRole('button', { name: 'Approve reviewed QA scope' }).click();
@@ -97,6 +120,13 @@ try {
   await history.getByText('Local report preview').waitFor();
   await capture(history, '07-report');
 
+  const blocked = await openScenario('blocked-report');
+  await blocked.getByRole('button', { name: 'Runs' }).click();
+  await blocked.getByRole('button', { name: /site · 1 source snapshots/ }).click();
+  await blocked.getByText('authentication_required').waitFor();
+  await blocked.getByText('Select a named test account for this site origin and create a fresh plan.').waitFor();
+  await capture(blocked, '07-blocked-report');
+
   await page.getByRole('button', { name: 'Settings' }).click();
   await page.getByRole('heading', { name: 'Settings' }).waitFor();
   await capture(page, '08-settings');
@@ -107,7 +137,7 @@ try {
 
   assert.deepEqual(consoleErrors, [], `Browser console errors: ${consoleErrors.join(' | ')}`);
   console.log(`Playwright UI review passed. Screenshots: ${screenshots}`);
-  console.log('Checked onboarding, required provider/model discovery and search, organization/project selection, work search and child Tasks, Queue, run setup, agentic plan approval, execution/report, Settings, 800px overflow, and browser errors.');
+  console.log('Checked onboarding, required provider/model discovery and search, named test account save and clearing, organization/project selection, work search and child Tasks, Queue, run context/account/headed-browser controls, plan disclosure, success and blocked reports, Settings, 800px overflow, and browser errors.');
 } finally {
   await browser?.close();
   await server.close();

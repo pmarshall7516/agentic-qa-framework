@@ -33,6 +33,9 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .sidebar { height: 100vh; height: 100dvh; position: sticky; top: 0; display: flex; flex-direction: column; padding: clamp(18px, 2vh, 26px) 14px 16px; background: #15171c; border-right: 1px solid #262a32; color: var(--ink); }
 .brand-row { display: flex; align-items: center; gap: 12px; padding: 2px 7px clamp(28px, 4vh, 42px); }
 .brand-symbol { display: grid; place-items: center; flex: 0 0 clamp(42px, 3.3vw, 50px); width: clamp(42px, 3.3vw, 50px); height: clamp(42px, 3.3vw, 50px); border: 1px solid #3b5d84; border-radius: 10px; background: #203653; color: #9bc7ff; font-size: clamp(15px, 1.3vw, 18px); font-weight: 800; letter-spacing: -1px; }
+.brand-symbol img { display: block; width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
+.checkbox-row { display: flex; align-items: center; gap: 10px; margin: 12px 0 4px; color: var(--text-primary); font-size: 13px; font-weight: 650; }
+.checkbox-row input { width: 16px; height: 16px; accent-color: var(--accent); }
 .brand-name { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .brand-name strong { color: #eef1f7; font-size: clamp(15px, 1.15vw, 17px); font-weight: 650; letter-spacing: -.25px; }
 .brand-name span { color: #737d8d; font-size: 9px; letter-spacing: 1.15px; }

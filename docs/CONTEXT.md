@@ -33,3 +33,7 @@ This glossary defines the product's core terms. Use these names consistently in 
 **Verdict**: The run-level decision computed from criterion outcomes and unresolved findings: `PASS`, `FAIL`, `NEEDS_REVIEW` or `BLOCKED`. _Avoid_: AI score.
 
 **Run Manifest**: The frozen identity of selected work items, targets, contract, versions and limits for one QA execution. _Avoid_: Mutable run settings.
+
+**Browser Test Account**: A named local profile scoped to one approved site origin. Username and password values remain encrypted and are referenced by ID and field in a browser Scenario; an AI agent sees only the account label and available fields. _Avoid_: Browser session or shared login.
+
+**Diagnostic**: A structured, bounded explanation attached to an Observation when execution fails or is blocked. It records the stage, category, safe detail, next action and whether retry is practical. _Avoid_: AI-generated verdict.

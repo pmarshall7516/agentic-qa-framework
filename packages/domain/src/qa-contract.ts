@@ -26,6 +26,7 @@ const BrowserStepSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('goto'), path: z.string().startsWith('/').max(1000) }).strict(),
   z.object({ action: z.literal('click'), role: z.enum(['button', 'link', 'tab', 'checkbox']), name: z.string().min(1).max(200) }).strict(),
   z.object({ action: z.literal('fill'), role: z.enum(['textbox', 'searchbox']), name: z.string().min(1).max(200), value: z.string().max(2000) }).strict(),
+  z.object({ action: z.literal('fillSecret'), accountId: z.string().uuid(), field: z.enum(['username', 'password']), role: z.enum(['textbox', 'searchbox']), name: z.string().min(1).max(200) }).strict(),
   z.object({ action: z.literal('press'), role: z.enum(['textbox', 'searchbox']), name: z.string().min(1).max(200), key: z.enum(['Enter', 'Escape', 'Tab']) }).strict(),
   z.object({ action: z.literal('expectVisible'), role: z.enum(['button', 'link', 'heading', 'textbox', 'status', 'alert']), name: z.string().min(1).max(200) }).strict(),
   z.object({ action: z.literal('expectText'), text: z.string().min(1).max(1000) }).strict(),
