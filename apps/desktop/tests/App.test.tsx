@@ -43,7 +43,7 @@ describe('desktop M1 screens', () => {
       selectedOrganization: 'contoso',
       selectedProject: { id: 'project-1', name: 'Portal' },
     }} />);
-    expect(connectedMarkup).toContain('Work items');
+    expect(connectedMarkup).toContain('Work Items');
     expect(connectedMarkup).toContain('QA Queue');
     expect(connectedMarkup).toContain('Runs');
     expect(connectedMarkup).toContain('Settings');
@@ -74,6 +74,41 @@ describe('desktop M1 screens', () => {
     expect(listWorkItemTypes).toHaveBeenCalledOnce();
   });
 
+  it('includes the known Story ID when applying a Task whose ADO details omit its parent relation', async () => {
+    const user = userEvent.setup();
+    const story = { organization: 'contoso', projectId: 'project-1', projectName: 'Portal', id: 22500, revision: 3, type: 'User Story', kind: 'REQUIREMENT' as const, title: 'Export results', state: 'Active', url: 'https://dev.azure.com/contoso/project-1/_workitems/edit/22500', retrievedAt: '2026-10-08T12:00:00.000Z' };
+    const task = { ...story, id: 22553, parentId: undefined, type: 'Task', kind: 'TASK' as const, title: 'Add CSV export', url: 'https://dev.azure.com/contoso/project-1/_workitems/edit/22553' };
+    const initialState: DesktopState = {
+      ...state,
+      azureCliAvailable: true,
+      accounts: [{ homeAccountId: 'account-1', tenantId: 'tenant-1', username: 'qa@example.com' }],
+      selectedAccountId: 'account-1',
+      selectedOrganization: 'contoso',
+      selectedProject: { id: 'project-1', name: 'Portal' },
+      activeAdoProfileId: 'profile-1',
+    };
+    const applyQueueChanges = vi.fn(async () => ({ ...initialState, queue: [] }));
+    const testApi = {
+      ...api,
+      listProfileIterations: async () => [{ id: '11111111-1111-4111-8111-111111111111', name: 'Sprint 1', path: 'Portal\\Sprint 1', timeFrame: 'current' as const }],
+      searchActiveStories: async () => ({ items: [story] }),
+      listSprintTaskboard: async () => [],
+      getChildren: async () => [task],
+      applyQueueChanges,
+    } as unknown as DesktopApi;
+
+    render(<App api={testApi} initialState={initialState} />);
+    await user.click(await screen.findByRole('button', { name: 'Load active Stories' }));
+    await user.click(screen.getByRole('button', { name: 'Load child Tasks' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Select #22553 Add CSV export' }));
+    await user.click(screen.getByRole('button', { name: 'Apply queue changes' }));
+
+    expect(applyQueueChanges).toHaveBeenCalledWith({
+      additions: [{ workItemId: 22553, parentId: 22500 }, { workItemId: 22500 }],
+      removals: [],
+    });
+  });
+
   it('shows saved models with per-model reachability actions in Settings', async () => {
     const user = userEvent.setup();
     const model = { id: '77777777-7777-4777-8777-777777777777', providerId: 'openai' as const, modelId: 'gpt-6-luna', displayName: 'GPT-6 Luna', capabilities: { structuredOutput: true, toolUse: true }, maxOutputTokens: 1200, testStatus: 'unreachable' as const };
@@ -83,6 +118,7 @@ describe('desktop M1 screens', () => {
     const testApi = { ...api, testSavedModel, getState, listBrowserTestAccounts: async () => [], isBrowserInstalled: async () => false, isRepoWorkerImageInstalled: async () => false } as DesktopApi;
     render(<App api={testApi} initialState={initialState} />);
     await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(screen.getByRole('tab', { name: 'AI Providers' }));
     expect(await screen.findByText(/openai \/ gpt-6-luna/)).toBeTruthy();
     expect(screen.getByText('Test Fail')).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'Retest' }));
@@ -109,6 +145,7 @@ describe('desktop M1 screens', () => {
     const testApi = { ...api, listBrowserTestAccounts: async () => [], isBrowserInstalled: async () => false, isRepoWorkerImageInstalled: async () => false } as unknown as DesktopApi;
     render(<App api={testApi} initialState={initialState} />);
     await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(screen.getByRole('tab', { name: 'AI Providers' }));
 
     const tokenInput = screen.getByRole('spinbutton', { name: 'Max output tokens' }) as HTMLInputElement;
     expect(tokenInput.max).toBe('64000');
@@ -138,6 +175,7 @@ describe('desktop M1 screens', () => {
     render(<App api={testApi} initialState={initialState} />);
 
     await user.click(screen.getByRole('button', { name: 'Settings' }));
+    await user.click(screen.getByRole('tab', { name: 'AI Providers' }));
     expect(screen.getAllByText('qa@example.com').length).toBeGreaterThan(1);
     await user.click(screen.getByRole('button', { name: 'Check account models' }));
     expect(listProviderModels).toHaveBeenCalledWith('claude-code');

@@ -95,7 +95,12 @@ function fixture(browserStatus: 'PASSED' | 'FAILED' = 'PASSED', chooseModelKeyFi
       if (existing) { existing.stale = false; snapshots.set(entry.key, snapshot); return existing; }
       queue.push(entry); snapshots.set(entry.key, snapshot); return entry;
     }),
+    applyQueueChanges: vi.fn(async (additions: any[], removals: string[]) => {
+      for (const key of removals) await (store as any).removeFromQueue(key);
+      for (const snapshot of additions) await (store as any).addToQueue(snapshot);
+    }),
     removeFromQueue: vi.fn(async (key: string) => { const i = queue.findIndex((item) => item.key === key); if (i >= 0) queue.splice(i, 1); }),
+    clearQueue: vi.fn(async () => { queue.splice(0); snapshots.clear(); }),
     reorderQueue: vi.fn(async () => {}),
     markStale: vi.fn(async () => {}),
     createRun: vi.fn(async (manifest: any, contract: any) => { runRecords.set(manifest.runId, { manifest, contract, observations: [], findings: [], artifacts: [], progress: [] }); }),
@@ -147,6 +152,15 @@ function fixture(browserStatus: 'PASSED' | 'FAILED' = 'PASSED', chooseModelKeyFi
 }
 
 describe('desktop controller', () => {
+  it('persists the Story removal confirmation preference in encrypted settings', async () => {
+    const { controller, settings } = fixture();
+
+    const state = await controller.saveQueuePreferences({ confirmStoryRemoval: false });
+
+    expect(settings.get('queue.confirmStoryRemoval')).toBe(false);
+    expect(state.confirmStoryRemoval).toBe(false);
+  });
+
   it('automatically tests a saved model with a fixed minimal prompt', async () => {
     const { store, settings } = fixture();
     settings.delete('model.catalog');
@@ -559,7 +573,7 @@ describe('desktop controller', () => {
 
     expect(ado.fetchWorkItems).toHaveBeenCalledTimes(1);
     expect(ado.fetchWorkItems).toHaveBeenCalledWith('secret-token', expect.objectContaining({ ids: [17, 18] }));
-    expect(store.addToQueue).toHaveBeenCalledTimes(2);
+    expect(store.applyQueueChanges).toHaveBeenCalledWith(expect.arrayContaining([expect.objectContaining({ id: 17 }), expect.objectContaining({ id: 18 })]), []);
   });
 
   it('persists a validated Task-to-Story relationship when batch ADO details omit parent relations', async () => {
@@ -577,7 +591,7 @@ describe('desktop controller', () => {
 
     expect(ado.fetchWorkItems).toHaveBeenCalledWith('secret-token', expect.objectContaining({ ids: [18, 17] }));
     expect(ado.getChildIds).toHaveBeenCalledWith('secret-token', { organization: 'org', parentId: 17 });
-    expect(store.addToQueue).toHaveBeenCalledWith(expect.objectContaining({ id: 18, kind: 'TASK', parentId: 17 }));
+    expect(store.applyQueueChanges).toHaveBeenCalledWith(expect.arrayContaining([expect.objectContaining({ id: 17, kind: 'REQUIREMENT' }), expect.objectContaining({ id: 18, kind: 'TASK', parentId: 17 })]), []);
   });
 
   it('rejects a forged or stale Task-to-Story relationship before adding any selected item', async () => {

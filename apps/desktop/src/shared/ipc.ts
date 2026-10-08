@@ -56,6 +56,7 @@ export type ModelStreamEvent =
 export interface QueueItemView {
   entry: QueueEntry;
   snapshot?: WorkItemSnapshot;
+  unresolvedParent?: boolean;
 }
 
 export interface QueueWorkItemSelection {
@@ -92,6 +93,7 @@ export interface DesktopState {
   selectedProject?: AdoProject;
   customTypeMappings?: WorkItemTypeMappings;
   queue: QueueItemView[];
+  confirmStoryRemoval?: boolean;
   target?: TargetConfig;
   browserTestAccounts?: BrowserTestAccountSummary[];
   modelProviderConfigured?: boolean;
@@ -143,7 +145,10 @@ export interface DesktopApi {
   getChildren(parentWorkItemId: number): Promise<WorkItemSnapshot[]>;
   addQueueItem(workItemId: number): Promise<DesktopState>;
   addQueueItems(items: QueueWorkItemSelection[]): Promise<DesktopState>;
+  applyQueueChanges(input: { additions: QueueWorkItemSelection[]; removals: string[] }): Promise<DesktopState>;
   removeQueueItem(key: string): Promise<DesktopState>;
+  clearQueue(): Promise<DesktopState>;
+  saveQueuePreferences(input: { confirmStoryRemoval: boolean }): Promise<DesktopState>;
   moveQueueItem(key: string, direction: 'up' | 'down'): Promise<DesktopState>;
   refreshQueue(): Promise<DesktopState>;
   chooseRepository(): Promise<string | undefined>;

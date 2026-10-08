@@ -8,11 +8,22 @@ import { errorMessage } from './error-message.js';
 import { SprintWorkPicker } from './SprintWorkPicker.js';
 
 const navigation: Array<{ id: AppScreen; label: string }> = [
-  { id: 'work-items', label: 'Work items' },
+  { id: 'work-items', label: 'Work Items' },
   { id: 'queue', label: 'QA Queue' },
   { id: 'history', label: 'Runs' },
 ];
 const MAX_MODEL_OUTPUT_TOKENS = 64_000;
+const SETTINGS_TABS = ['Connections', 'AI Providers', 'Test Accounts', 'Preferences'] as const;
+
+function workItemKey(item: Pick<WorkItemSnapshot, 'organization' | 'projectId' | 'id'>): string {
+  return `${item.organization.toLocaleLowerCase('en-US')}:${item.projectId}:${item.id}`;
+}
+
+interface QueueDraft { keys: Set<string>; base: Set<string>; snapshots: Map<string, WorkItemSnapshot> }
+function makeQueueDraft(queue: QueueItemView[]): QueueDraft {
+  const keys = new Set(queue.map(({ entry }) => entry.key));
+  return { keys, base: new Set(keys), snapshots: new Map(queue.flatMap(({ entry, snapshot }) => snapshot ? [[entry.key, snapshot] as const] : [])) };
+}
 
 const EMPTY_STATE: DesktopState = {
   azureCliAvailable: false,
@@ -145,14 +156,18 @@ function ScenarioStepEditor({ scenarioId, index, step, accounts, onChange, onRem
 
 function WorkItemCard({
   item,
-  queued,
-  onAdd,
+  selected,
+  onToggle,
+  parent,
+  children,
   onChildren,
   childrenExpanded,
 }: {
   item: WorkItemSnapshot;
-  queued: boolean;
-  onAdd: (id: number) => void;
+  selected: boolean;
+  onToggle: (item: WorkItemSnapshot, checked: boolean, parent?: WorkItemSnapshot, children?: WorkItemSnapshot[]) => void;
+  parent?: WorkItemSnapshot;
+  children?: WorkItemSnapshot[];
   onChildren?: (id: number) => void;
   childrenExpanded?: boolean;
 }) {
@@ -177,14 +192,7 @@ function WorkItemCard({
         {item.comments?.length ? <details className="work-comments"><summary>{item.comments.length} ADO comments</summary><ul>{item.comments.map((comment, index) => <li key={index}>{comment}</li>)}</ul></details> : null}
       </div>
       {item.kind === 'REQUIREMENT' && onChildren ? <button className="text-button child-toggle" type="button" onClick={() => onChildren(item.id)}>{childrenExpanded ? 'Hide tasks' : 'Browse child tasks'}</button> : null}
-      <button
-        className={queued ? 'button quiet' : 'button outline'}
-        type="button"
-        disabled={queued || (item.kind !== 'REQUIREMENT' && item.kind !== 'TASK')}
-        onClick={() => onAdd(item.id)}
-      >
-        {queued ? 'Queued' : 'Add to queue'}
-      </button>
+      <label className="work-item-queue-select"><input type="checkbox" aria-label={`Select #${item.id} ${item.title || item.type}`} checked={selected} disabled={item.kind !== 'REQUIREMENT' && item.kind !== 'TASK'} onChange={(event) => onToggle(item, event.target.checked, parent, children)} /><span>{selected ? 'In QA Queue' : 'Add to QA Queue'}</span></label>
     </article>
   );
 }
@@ -199,10 +207,11 @@ function QueueWorkItemRow({ view, index, queueLength, busy, onMove, onRemove }: 
 }) {
   const { entry, snapshot } = view;
   const task = snapshot?.kind === 'TASK';
+  const removeLabel = task ? `Remove Task #${entry.workItemId}` : `Remove Story #${entry.workItemId} and Tasks`;
   return <article className={`queue-card ${task ? 'queue-card-task' : 'queue-card-story'}`}>
     <span className="queue-index">{String(index + 1).padStart(2, '0')}</span>
-    <div className="queue-copy"><div className="work-meta"><span>{snapshot?.type ?? 'Work item'}</span><span>#{entry.workItemId}</span><span>{snapshot?.projectName ?? entry.projectId}</span>{snapshot?.parentId ? <span>Parent #{snapshot.parentId}</span> : null}</div><h3>{snapshot?.title ?? 'Work item details unavailable'}</h3><p>{entry.organization} · {snapshot?.state ?? 'Unknown state'} · Revision {snapshot?.revision ?? '—'}</p>{entry.stale ? <span className="stale-badge">Source changed or inaccessible · refresh before run</span> : null}</div>
-    <div className="queue-actions"><button aria-label={`Move item ${entry.workItemId} up`} className="icon-button" disabled={busy || index === 0} onClick={() => onMove(entry.key, 'up')}>↑</button><button aria-label={`Move item ${entry.workItemId} down`} className="icon-button" disabled={busy || index === queueLength - 1} onClick={() => onMove(entry.key, 'down')}>↓</button><button className="text-button remove-button" type="button" disabled={busy} onClick={() => onRemove(entry.key)}>Remove</button></div>
+    <div className="queue-copy"><div className="work-meta"><span>{snapshot?.type ?? 'Work item'}</span><span>#{entry.workItemId}</span><span>{snapshot?.projectName ?? entry.projectId}</span>{snapshot?.parentId ? <span>Parent #{snapshot.parentId}</span> : null}</div><h3>{snapshot?.title ?? 'Work item details unavailable'}</h3><p>{entry.organization} · {snapshot?.state ?? 'Unknown state'} · Revision {snapshot?.revision ?? '—'}</p>{entry.stale ? <span className="stale-badge">Source changed or inaccessible · refresh before run</span> : null}{view.unresolvedParent ? <span className="stale-badge">Parent Story missing · select or refresh the parent Story in Work Items before planning</span> : null}</div>
+    <div className="queue-actions"><button aria-label={`Move item ${entry.workItemId} up`} className="icon-button" disabled={busy || index === 0} onClick={() => onMove(entry.key, 'up')}>↑</button><button aria-label={`Move item ${entry.workItemId} down`} className="icon-button" disabled={busy || index === queueLength - 1} onClick={() => onMove(entry.key, 'down')}>↓</button><button className="text-button remove-button" type="button" disabled={busy} aria-label={removeLabel} onClick={() => onRemove(entry.key)}>{task ? 'Remove Task' : 'Remove Story and Tasks'}</button></div>
   </article>;
 }
 
@@ -283,6 +292,10 @@ export function App({
 }) {
   const [state, setState] = useState<DesktopState>(initialState ?? EMPTY_STATE);
   const [screen, setScreen] = useState<AppScreen>(initialState?.selectedProject ? 'work-items' : initialState?.selectedAccountId ? 'project' : 'connections');
+  const [queueDraft, setQueueDraft] = useState<QueueDraft>(() => makeQueueDraft(initialState?.queue ?? []));
+  const [settingsTab, setSettingsTab] = useState<(typeof SETTINGS_TABS)[number]>('Connections');
+  const [queueDialog, setQueueDialog] = useState<{ kind: 'remove-story'; key: string } | { kind: 'clear-queue' }>();
+  const [suppressStoryRemovalPrompt, setSuppressStoryRemovalPrompt] = useState(false);
   const [organization, setOrganization] = useState(initialState?.selectedOrganization ?? '');
   const [organizations, setOrganizations] = useState<Array<{ id: string; name: string }>>([]);
   const [projects, setProjects] = useState<AdoProject[]>([]);
@@ -353,13 +366,132 @@ export function App({
   const [reviewAuthor, setReviewAuthor] = useState('');
   const [reviewReason, setReviewReason] = useState('');
 
-  const queuedIds = useMemo(
-    () => new Set(state.queue.map(({ entry }) => `${entry.organization.toLowerCase()}:${entry.projectId}:${entry.workItemId}`)),
-    [state.queue],
-  );
+  const draftChanges = useMemo(() => ({
+    additions: [...queueDraft.keys].filter((key) => !queueDraft.base.has(key)),
+    removals: [...queueDraft.base].filter((key) => !queueDraft.keys.has(key)),
+  }), [queueDraft]);
+  const hasQueueDraftChanges = draftChanges.additions.length > 0 || draftChanges.removals.length > 0;
   const queueProjectGroups = useMemo(() => buildQueueProjectGroups(state.queue), [state.queue]);
+  const queueDialogStory = queueDialog?.kind === 'remove-story' ? state.queue.find(({ entry }) => entry.key === queueDialog.key) : undefined;
+  const queueDialogTaskCount = queueDialogStory?.snapshot ? state.queue.filter(({ snapshot }) => snapshot?.kind === 'TASK' && snapshot.organization.toLocaleLowerCase('en-US') === queueDialogStory.snapshot!.organization.toLocaleLowerCase('en-US') && snapshot.projectId === queueDialogStory.snapshot!.projectId && snapshot.parentId === queueDialogStory.snapshot!.id).length : 0;
   const selectedProviderConnected = modelProvider === state.modelProvider && state.modelProviderConfigured === true;
   const selectedSavedRunModel = state.savedModels?.find((model) => model.id === selectedRunModelId && model.testStatus === 'reachable');
+
+  function resetQueueDraft(queue: QueueItemView[] = state.queue) {
+    setQueueDraft(makeQueueDraft(queue));
+  }
+
+  function openWorkItems() {
+    resetQueueDraft();
+    setScreen('work-items');
+  }
+
+  function toggleQueueDraft(item: WorkItemSnapshot, checked: boolean, parent?: WorkItemSnapshot, children: WorkItemSnapshot[] = []) {
+    setQueueDraft((current) => {
+      const keys = new Set(current.keys);
+      const snapshots = new Map(current.snapshots);
+      const key = workItemKey(item);
+      if (checked) {
+        keys.add(key);
+        snapshots.set(key, item.kind === 'TASK' && parent ? { ...item, parentId: parent.id } : item);
+        if (item.kind === 'TASK' && parent) {
+          const parentKey = workItemKey(parent);
+          keys.add(parentKey);
+          snapshots.set(parentKey, parent);
+        }
+      } else {
+        keys.delete(key);
+        if (item.kind === 'REQUIREMENT') {
+          for (const child of children) {
+            const childKey = workItemKey(child);
+            keys.delete(childKey);
+          }
+          for (const [snapshotKey, snapshot] of snapshots) {
+            if (snapshot.kind === 'TASK' && snapshot.organization.toLocaleLowerCase('en-US') === item.organization.toLocaleLowerCase('en-US') && snapshot.projectId === item.projectId && snapshot.parentId === item.id) keys.delete(snapshotKey);
+          }
+        }
+      }
+      return { ...current, keys, snapshots };
+    });
+  }
+
+  async function toggleWorkItemSelection(item: WorkItemSnapshot, checked: boolean, parent?: WorkItemSnapshot, children: WorkItemSnapshot[] = []) {
+    if (!checked || item.kind !== 'TASK' || !item.parentId || parent) {
+      toggleQueueDraft(item, checked, parent, children);
+      return;
+    }
+    const knownParent = [...queueDraft.snapshots.values(), ...results, ...state.queue.flatMap(({ snapshot }) => snapshot ? [snapshot] : [])]
+      .find((candidate) => candidate.id === item.parentId && candidate.kind === 'REQUIREMENT' && candidate.organization.toLocaleLowerCase('en-US') === item.organization.toLocaleLowerCase('en-US') && candidate.projectId === item.projectId);
+    try {
+      const resolvedParent = knownParent ?? (await api.searchItems({ term: String(item.parentId), types: [], states: [] })).items.find((candidate) => candidate.id === item.parentId && candidate.kind === 'REQUIREMENT');
+      if (!resolvedParent) throw new Error(`Could not load parent Story #${item.parentId}. Select the Task again after refreshing the work items.`);
+      toggleQueueDraft(item, true, resolvedParent, children);
+    } catch (caught) {
+      setError(errorMessage(caught));
+    }
+  }
+
+  async function applyQueueDraft() {
+    setBusy(true);
+    setError('');
+    try {
+      const additions = draftChanges.additions.map((key) => {
+        const item = queueDraft.snapshots.get(key);
+        if (!item) throw new Error(`Work item ${key} needs to be loaded again before it can be added.`);
+        return { workItemId: item.id, ...(item.kind === 'TASK' && item.parentId ? { parentId: item.parentId } : {}) };
+      });
+      const next = await api.applyQueueChanges({ additions, removals: draftChanges.removals });
+      updateState(next);
+      resetQueueDraft(next.queue);
+      setNotice(`Applied ${draftChanges.additions.length} addition(s) and ${draftChanges.removals.length} removal(s) to the QA Queue.`);
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmQueueDialog() {
+    const dialog = queueDialog;
+    if (!dialog) return;
+    setBusy(true);
+    setError('');
+    try {
+      if (dialog.kind === 'remove-story') {
+        if (suppressStoryRemovalPrompt) updateState(await api.saveQueuePreferences({ confirmStoryRemoval: false }));
+        updateState(await api.removeQueueItem(dialog.key));
+        setNotice('The Story and its queued Tasks were removed from the QA Queue.');
+      } else {
+        updateState(await api.clearQueue());
+        setNotice('The QA Queue was cleared.');
+      }
+      setQueueDialog(undefined);
+      setSuppressStoryRemovalPrompt(false);
+    } catch (caught) {
+      setError(errorMessage(caught));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function requestStoryRemoval(key: string) {
+    if (state.confirmStoryRemoval === false) {
+      void mutateQueue(() => api.removeQueueItem(key));
+      return;
+    }
+    setSuppressStoryRemovalPrompt(false);
+    setQueueDialog({ kind: 'remove-story', key });
+  }
+
+  function onSettingsTabKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
+    const currentIndex = SETTINGS_TABS.indexOf(settingsTab);
+    const nextIndex = event.key === 'ArrowRight' ? (currentIndex + 1) % SETTINGS_TABS.length : event.key === 'ArrowLeft' ? (currentIndex + SETTINGS_TABS.length - 1) % SETTINGS_TABS.length : -1;
+    if (nextIndex < 0) return;
+    event.preventDefault();
+    const next = SETTINGS_TABS[nextIndex]!;
+    setSettingsTab(next);
+    requestAnimationFrame(() => document.getElementById(`settings-tab-${next.toLocaleLowerCase().replaceAll(' ', '-')}`)?.focus());
+  }
 
   function beginModelStream(streamId: string) {
     modelStreamIdRef.current = streamId;
@@ -382,6 +514,7 @@ export function App({
     if (initialState) return;
     void api.getState().then(async (next) => {
       setState(next);
+      setQueueDraft(makeQueueDraft(next.queue));
       setOrganization(next.selectedOrganization ?? '');
       setProfileOrganization(next.selectedOrganization ?? '');
       setProfileProjectId(next.selectedProject?.id ?? '');
@@ -402,6 +535,12 @@ export function App({
       if (next.selectedProject) setWorkItemTypes(await api.listWorkItemTypes());
     }).catch((cause) => setError(errorMessage(cause)));
   }, [api, initialState]);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timeout = window.setTimeout(() => setNotice(''), 6000);
+    return () => window.clearTimeout(timeout);
+  }, [notice]);
 
   useEffect(() => {
     if (screen !== 'run-setup') return;
@@ -1030,7 +1169,7 @@ export function App({
               key={item.id}
               className={`nav-item ${activeNavigation === item.id ? 'selected' : ''}`}
               aria-current={activeNavigation === item.id ? 'page' : undefined}
-              onClick={() => { setScreen(item.id); if (item.id === 'history') void openHistory(); }}
+              onClick={() => { if (item.id === 'work-items') openWorkItems(); else setScreen(item.id); if (item.id === 'history') void openHistory(); }}
             >
               <span>{item.label}</span>
               {item.id === 'queue' && state.queue.length > 0 ? (
@@ -1067,7 +1206,7 @@ export function App({
 
         <main className="content-area">
           {error ? <div className="message error-message" role="alert">{error}</div> : null}
-          {notice ? <div className={`message ${isCheckingClaudeModels ? 'info-message' : 'success-message'}`} role="status">{notice}</div> : null}
+          {notice ? <div className={`toast ${isCheckingClaudeModels ? 'info-message' : 'success-message'}`} role="status" aria-live="polite"><span>{notice}</span><button className="toast-dismiss" type="button" aria-label="Dismiss notification" onClick={() => setNotice('')}>×</button></div> : null}
           {modelStreamText && (screen !== 'history' || modelStreamId === selectedRunId) ? <section className="model-stream" aria-label="Live model response">
             <div className="model-stream-heading"><strong>{modelStreamPhase.replaceAll('-', ' ')}</strong><span>Live model response</span></div>
             <pre aria-live="off">{modelStreamText}</pre>
@@ -1114,17 +1253,18 @@ export function App({
 
           {screen === 'work-items' ? (
             <section className="page-section">
-              <div className="page-heading"><div><p className="eyebrow">WORK ITEMS</p><h1>Find work to verify</h1></div></div>
-              <p className="page-description">Search Stories and Tasks in <strong>{projectLabel(state.selectedProject)}</strong>. Add a Story, its child Tasks, or both to the local QA Queue.</p>
-              <SprintWorkPicker api={api} activeAdoProfileId={state.activeAdoProfileId} queuedIds={queuedIds} onQueueChanged={updateState} onError={setError} onNotice={setNotice} />
+              <div className="page-heading"><div><p className="eyebrow">WORK ITEMS</p><h1>Work Items</h1></div></div>
+              <p className="page-description">Search Stories and Tasks in <strong>{projectLabel(state.selectedProject)}</strong>. Existing queue selections are checked. Selecting a Task also selects its Story; apply staged changes to save them.</p>
+              <SprintWorkPicker api={api} activeAdoProfileId={state.activeAdoProfileId} queuedIds={queueDraft.keys} onSelectionChange={toggleQueueDraft} onError={setError} onNotice={setNotice} />
               <div className="search-panel">
                 <label className="field-label" htmlFor="work-search">Work item ID or title</label>
                 <div className="search-line"><div className="search-input-wrap"><span aria-hidden="true">⌕</span><input id="work-search" className="search-input" value={searchTerm} onChange={(event) => { setSearchTerm(event.target.value); setSearchHasMore(false); }} onKeyDown={(event) => { if (event.key === 'Enter') void search(); }} placeholder="e.g. 4821 or remember filters" /></div><button className="button primary" type="button" disabled={busy || !state.selectedProject} onClick={() => void search()}>{busy ? 'Searching…' : 'Search work items'}</button></div>
                 <div className="filters-row"><label>Type <select aria-label="Filter by work item type" value={typeFilter} onChange={(event) => { setTypeFilter(event.target.value); setSearchHasMore(false); }}><option value="">All types</option>{workItemTypes.map((type) => <option key={type}>{type}</option>)}</select></label><label>State <select aria-label="Filter by state" value={stateFilter} onChange={(event) => { setStateFilter(event.target.value); setSearchHasMore(false); }}><option value="">All states</option>{['New', 'Active', 'Resolved', 'Closed', 'To Do', 'Doing', 'Done'].map((value) => <option key={value}>{value}</option>)}</select></label></div>
               </div>
               <div className="results-heading"><h2>Search results</h2><span>{results.length ? `${results.length} items` : ''}</span></div>
-              <div className="results-list">{results.map((item) => <div className="result-group" key={`${item.organization}:${item.projectId}:${item.id}`}><WorkItemCard item={item} queued={queuedIds.has(`${item.organization.toLowerCase()}:${item.projectId}:${item.id}`)} onAdd={(id) => void mutateQueue(() => api.addQueueItem(id))} onChildren={(id) => void toggleChildren(id)} childrenExpanded={expandedParents.has(item.id)} />{expandedParents.has(item.id) ? <div className="child-items">{childrenByParent[item.id]?.length ? childrenByParent[item.id]!.map((child) => <WorkItemCard key={child.id} item={child} queued={queuedIds.has(`${child.organization.toLowerCase()}:${child.projectId}:${child.id}`)} onAdd={(id) => void mutateQueue(() => api.addQueueItem(id))} />) : <div className="child-empty">No child tasks were returned for this requirement.</div>}</div> : null}</div>)}{!results.length ? <div className="empty-card"><span className="empty-icon">⌕</span><strong>Search this project</strong><p>Results include current source revisions. Add requirements or tasks to your local QA Queue.</p></div> : null}</div>
+              <div className="results-list">{results.map((item) => <div className="result-group" key={`${item.organization}:${item.projectId}:${item.id}`}><WorkItemCard item={item} children={childrenByParent[item.id] ?? []} selected={queueDraft.keys.has(workItemKey(item))} onToggle={(workItem, checked, parent, children) => void toggleWorkItemSelection(workItem, checked, parent, children)} onChildren={(id) => void toggleChildren(id)} childrenExpanded={expandedParents.has(item.id)} />{expandedParents.has(item.id) ? <div className="child-items">{childrenByParent[item.id]?.length ? childrenByParent[item.id]!.map((child) => <WorkItemCard key={child.id} item={child} parent={item} selected={queueDraft.keys.has(workItemKey(child))} onToggle={(workItem, checked, parent) => toggleQueueDraft(workItem, checked, parent)} />) : <div className="child-empty">No child tasks were returned for this requirement.</div>}</div> : null}</div>)}{!results.length ? <div className="empty-card"><span className="empty-icon">⌕</span><strong>Search this project</strong><p>Results include current source revisions. Select work items to stage changes to your local QA Queue.</p></div> : null}</div>
               {searchHasMore ? <div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void loadMoreSearchResults()}>{busy ? 'Loading…' : 'Load more work items'}</button></div> : null}
+              {hasQueueDraftChanges ? <div className="selection-footer" role="region" aria-label="Apply QA Queue changes"><div className="selection-footer-inner"><span>{draftChanges.additions.length} addition(s) · {draftChanges.removals.length} removal(s)</span><div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => resetQueueDraft()}>Discard changes</button><button className="button primary" type="button" disabled={busy} onClick={() => void applyQueueDraft()}>{busy ? 'Applying…' : 'Apply queue changes'}</button></div></div></div> : null}
             </section>
           ) : null}
 
@@ -1132,8 +1272,8 @@ export function App({
             <section className="page-section">
               <div className="page-heading"><div><p className="eyebrow">READY TO REVIEW</p><h1>Your QA Queue</h1></div><span className="step-count">{state.queue.length} items</span></div>
               <p className="page-description">Selected work stays on this device. Queue order changes presentation only; it does not affect verdict priority.</p>
-              <div className="queue-toolbar"><div><strong>{state.queue.length} selected</strong><span>Stories with their queued Tasks · grouped by Azure DevOps project</span></div><div className="button-row"><button className="button outline" type="button" disabled={busy || !state.queue.length} onClick={() => void mutateQueue(() => api.refreshQueue())}>{busy ? 'Refreshing…' : 'Refresh source revisions'}</button><button className="button primary" type="button" disabled={!state.queue.length} onClick={() => setScreen('run-setup')}>Start QA</button></div></div>
-              <div className="queue-list">{queueProjectGroups.map((project) => <section className="queue-project-group" aria-label={project.label} key={project.key}><h2>{project.label}</h2>{project.stories.map(({ story, tasks }) => <section className="queue-story-group" aria-label={`Story #${story.view.entry.workItemId} ${story.view.snapshot?.title ?? 'Work item details unavailable'}`} key={story.view.entry.key}><QueueWorkItemRow view={story.view} index={story.index} queueLength={state.queue.length} busy={busy} onMove={(key, direction) => void mutateQueue(() => api.moveQueueItem(key, direction))} onRemove={(key) => void mutateQueue(() => api.removeQueueItem(key))} />{tasks.length ? <div className="queue-task-rows" aria-label={`Tasks under Story #${story.view.entry.workItemId}`}>{tasks.map(({ view, index }) => <QueueWorkItemRow key={view.entry.key} view={view} index={index} queueLength={state.queue.length} busy={busy} onMove={(key, direction) => void mutateQueue(() => api.moveQueueItem(key, direction))} onRemove={(key) => void mutateQueue(() => api.removeQueueItem(key))} />)}</div> : null}</section>)}{project.otherItems.length ? <div className="queue-other-items">{project.stories.length ? <h3>Other queued work</h3> : null}{project.otherItems.map(({ view, index }) => <QueueWorkItemRow key={view.entry.key} view={view} index={index} queueLength={state.queue.length} busy={busy} onMove={(key, direction) => void mutateQueue(() => api.moveQueueItem(key, direction))} onRemove={(key) => void mutateQueue(() => api.removeQueueItem(key))} />)}</div> : null}</section>)}{!state.queue.length ? <div className="empty-card"><span className="empty-icon">＋</span><strong>Your queue is ready for requirements</strong><p>Search a project and add work items. A task can inform QA scope, but it does not prove its parent’s acceptance criteria.</p><button className="button outline" type="button" onClick={() => setScreen('work-items')}>Find work items</button></div> : null}</div>
+              <div className="queue-toolbar"><div><strong>{state.queue.length} selected</strong><span>Stories with their queued Tasks · grouped by Azure DevOps project</span></div><div className="button-row"><button className="button outline" type="button" disabled={busy || !state.queue.length} onClick={() => void mutateQueue(() => api.refreshQueue())}>Refresh</button><button className="button outline" type="button" disabled={busy || !state.queue.length} onClick={() => setQueueDialog({ kind: 'clear-queue' })}>Clear Queue</button><button className="button primary" type="button" disabled={!state.queue.length || state.queue.some(({ unresolvedParent }) => unresolvedParent)} onClick={() => setScreen('run-setup')}>Start QA</button></div></div>
+              <div className="queue-list">{queueProjectGroups.map((project) => <section className="queue-project-group" aria-label={project.label} key={project.key}><h2>{project.label}</h2>{project.stories.map(({ story, tasks }) => <section className="queue-story-group" aria-label={`Story #${story.view.entry.workItemId} ${story.view.snapshot?.title ?? 'Work item details unavailable'}`} key={story.view.entry.key}><QueueWorkItemRow view={story.view} index={story.index} queueLength={state.queue.length} busy={busy} onMove={(key, direction) => void mutateQueue(() => api.moveQueueItem(key, direction))} onRemove={requestStoryRemoval} />{tasks.length ? <div className="queue-task-rows" aria-label={`Tasks under Story #${story.view.entry.workItemId}`}>{tasks.map(({ view, index }) => <QueueWorkItemRow key={view.entry.key} view={view} index={index} queueLength={state.queue.length} busy={busy} onMove={(key, direction) => void mutateQueue(() => api.moveQueueItem(key, direction))} onRemove={(key) => void mutateQueue(() => api.removeQueueItem(key))} />)}</div> : null}</section>)}{project.otherItems.length ? <div className="queue-other-items">{project.stories.length ? <h3>Other queued work</h3> : null}{project.otherItems.map(({ view, index }) => <QueueWorkItemRow key={view.entry.key} view={view} index={index} queueLength={state.queue.length} busy={busy} onMove={(key, direction) => void mutateQueue(() => api.moveQueueItem(key, direction))} onRemove={(key) => void mutateQueue(() => api.removeQueueItem(key))} />)}</div> : null}</section>)}{!state.queue.length ? <div className="empty-card"><span className="empty-icon">＋</span><strong>Your queue is ready for requirements</strong><p>Search a project and add work items. A Task informs scope, but does not prove its parent’s acceptance criteria.</p><button className="button outline" type="button" onClick={openWorkItems}>Find Work Items</button></div> : null}</div>
             </section>
           ) : null}
 
@@ -1192,6 +1332,9 @@ export function App({
             <section className="page-section">
               <div className="page-heading"><div><p className="eyebrow">PREFERENCES</p><h1>Settings</h1></div></div>
               <p className="page-description">Manage Azure DevOps, browser accounts and saved agent models. Preparing QA requires a saved model whose latest reachability test succeeded.</p>
+              <div className="settings-tabs" role="tablist" aria-label="Settings sections">{SETTINGS_TABS.map((tab) => { const id = `settings-tab-${tab.toLocaleLowerCase().replaceAll(' ', '-')}`; return <button className="settings-tab" id={id} key={tab} type="button" role="tab" aria-selected={settingsTab === tab} aria-controls="settings-panel" tabIndex={settingsTab === tab ? 0 : -1} onClick={() => setSettingsTab(tab)} onKeyDown={onSettingsTabKeyDown}>{tab}</button>; })}</div>
+              <div id="settings-panel" className="settings-panel" role="tabpanel" aria-labelledby={`settings-tab-${settingsTab.toLocaleLowerCase().replaceAll(' ', '-')}`}>
+              {settingsTab === 'Connections' ? <>
               <div className="panel selection-panel">
                 <div className="panel-title-row"><div><h2>Azure DevOps account</h2><p>Authentication runs through Azure CLI in your system browser. Access is read-only.</p></div><span className="security-tag">{state.selectedAccountId ? 'CONNECTED' : 'NOT CONNECTED'}</span></div>
                 {state.accounts.map((account) => <div className="account-row" key={account.homeAccountId}><span className="account-avatar">{(account.displayName ?? account.username).slice(0, 1).toUpperCase()}</span><div><strong>{account.displayName ?? account.username}{state.selectedAccountId === account.homeAccountId ? ' · Active' : ''}</strong><span>{account.username}</span></div>{state.selectedAccountId === account.homeAccountId ? <button className="button quiet" type="button" disabled={busy} onClick={() => void run(() => api.signOut(account.homeAccountId), updateState)}>Disconnect</button> : <button className="button quiet" type="button" disabled={busy} onClick={() => void run(() => api.selectAccount(account.homeAccountId), updateState)}>Use account</button>}</div>)}
@@ -1200,16 +1343,20 @@ export function App({
                 {!state.azureCliAvailable ? <p className="field-help" role="note">Azure CLI is not installed. Install Azure CLI, then restart this app.</p> : null}
                 <div className="permission-note"><span>🔒</span><p>Azure CLI keeps the sign-in on this machine. A short-lived ADO token is used only in the main process and never sent to QA workers.</p></div>
               </div>
+              </> : null}
+              {settingsTab === 'Connections' ? <>
               <div className="panel selection-panel">
                 <div className="panel-title-row"><div><h2>Azure DevOps team profiles</h2><p>Your selected project and default team are saved automatically. Add a profile here only when you need a different team or board scope.</p></div></div>
                 <div className="button-row"><button className="button outline" type="button" disabled={busy || !state.adoProfiles?.length} onClick={() => void run(async () => { const saved = await api.exportAdoProfilesConfig(); setNotice(saved ? 'Configuration exported from your saved app settings.' : 'Configuration export canceled.'); })}>Export current settings…</button><span className="field-help">Your project and team setup is saved locally as you select it.</span></div>
-                {state.adoProfiles?.length ? <div className="saved-organizations">{state.adoProfiles.map((profile) => <div className="profile-card" key={profile.id}><div><strong>{profile.name}{state.activeAdoProfileId === profile.id ? ' · Active' : ''}</strong><span>{profile.organization} / {profile.project.name} · {profile.team} · {profile.boardColumn} · {profile.storyIds.length} Stories</span></div><div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void run(() => api.activateAdoProfile(profile.id), updateState)}>{state.activeAdoProfileId === profile.id ? 'Selected' : 'Use for runs'}</button><button className="button quiet" type="button" disabled={busy} onClick={() => editAdoProfile(profile)}>Edit</button><button className="button quiet" type="button" disabled={busy} onClick={() => void run(() => api.deleteAdoProfile(profile.id), updateState)}>Remove</button></div></div>)}</div> : <p className="field-help">Select an organization and project on the Work items screen to set up its default team automatically.</p>}
+                {state.adoProfiles?.length ? <div className="saved-organizations">{state.adoProfiles.map((profile) => <div className="profile-card" key={profile.id}><div><strong>{profile.name}{state.activeAdoProfileId === profile.id ? ' · Active' : ''}</strong><span>{profile.organization} / {profile.project.name} · {profile.team} · {profile.boardColumn} · {profile.storyIds.length} Stories</span></div><div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => void run(() => api.activateAdoProfile(profile.id), updateState)}>{state.activeAdoProfileId === profile.id ? 'Selected' : 'Use for runs'}</button><button className="button quiet" type="button" disabled={busy} onClick={() => editAdoProfile(profile)}>Edit</button><button className="button quiet" type="button" disabled={busy} onClick={() => void run(() => api.deleteAdoProfile(profile.id), updateState)}>Remove</button></div></div>)}</div> : <p className="field-help">Select an organization and project on the Work Items screen to set up its default team automatically.</p>}
                 <div className="filters-row settings-fields"><label>Profile name<input className="text-input" value={profileName} maxLength={100} onChange={(event) => setProfileName(event.target.value)} placeholder="Derse QA" /></label><label>Organization URL or name<input className="text-input" value={profileOrganization} maxLength={500} onChange={(event) => setProfileOrganization(event.target.value)} placeholder="https://dev.azure.com/Xorbix" /></label></div>
                 <div className="filters-row settings-fields"><label>Project name<input className="text-input" value={profileProjectName} maxLength={200} onChange={(event) => setProfileProjectName(event.target.value)} placeholder="Derse" /></label><label>Project ID <span className="field-help">Optional · resolves from project name</span><input className="text-input" value={profileProjectId} maxLength={200} onChange={(event) => setProfileProjectId(event.target.value)} placeholder="Project ID" /></label><label>Team<input className="text-input" value={profileTeam} maxLength={200} onChange={(event) => setProfileTeam(event.target.value)} placeholder="Derse Team" /></label></div>
               <div className="button-row"><button className="button outline" type="button" disabled={busy || !profileOrganization.trim() || !profileProjectName.trim()} onClick={() => void run(async () => { const teams = await api.listAdoTeams({ organization: profileOrganization.trim(), project: { ...(profileProjectId.trim() ? { id: profileProjectId.trim() } : {}), name: profileProjectName.trim() } }); setAdoTeams(teams); if (teams.length) setProfileTeam((current) => teams.some(({ name }) => name === current) ? current : teams.find(({ name }) => name.toLocaleLowerCase('en-US') === profileProjectName.toLocaleLowerCase('en-US'))?.name ?? teams[0]!.name); setNotice(teams.length ? `Loaded ${teams.length} teams from the selected Azure DevOps project.` : 'No teams were returned for this project.'); })}>Load project teams</button>{adoTeams.length ? <label>Team<select className="text-input" value={profileTeam} onChange={(event) => setProfileTeam(event.target.value)}><option value="">Choose a team</option>{adoTeams.map(({ id, name }) => <option key={id} value={name}>{name}</option>)}</select></label> : <label>Team<input className="text-input" value={profileTeam} maxLength={200} onChange={(event) => setProfileTeam(event.target.value)} placeholder="Load teams or enter a team name" /></label>}</div>
                 <div className="filters-row settings-fields"><label>Taskboard column <span className="field-help">Optional · used by the legacy configured task loader</span><input className="text-input" value={profileColumn} maxLength={120} onChange={(event) => setProfileColumn(event.target.value)} placeholder="Leave blank to include all sprint Tasks" /></label><label>Story IDs <span className="field-help">Optional · sprint browsing finds Stories automatically</span><input className="text-input" value={profileStoryIds} maxLength={1600} onChange={(event) => setProfileStoryIds(event.target.value)} placeholder="20024, 19997" /></label></div>
                 <div className="button-row"><button className="button primary" type="button" disabled={busy || !profileName.trim() || !profileOrganization.trim() || !profileProjectName.trim() || !profileTeam.trim()} onClick={() => void saveAdoProfile()}>{profileId ? 'Save profile' : 'Add profile'}</button>{profileId ? <button className="button quiet" type="button" onClick={() => { setProfileId(''); setProfileName(''); }}>Cancel edit</button> : null}</div>
               </div>
+              </> : null}
+              {settingsTab === 'Test Accounts' ? <>
               <div className="panel selection-panel">
                 <div className="panel-title-row"><div><h2>Browser test accounts</h2><p>Credentials are stored in encrypted local settings. The renderer can submit values but can only read back labels and field availability.</p></div></div>
                 {testAccounts.map((account) => <div className="profile-card" key={account.id}><div><strong>{account.label}</strong><span>{account.origin} · {account.hasUsername ? 'username saved' : ''}{account.hasUsername && account.hasPassword ? ' · ' : ''}{account.hasPassword ? 'password saved' : ''}</span></div><div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => { setTestAccountId(account.id); setTestAccountLabel(account.label); setTestAccountOrigin(account.origin); setTestAccountUsername(''); setTestAccountPassword(''); }}>Replace credentials</button><button className="button quiet" type="button" disabled={busy} onClick={() => void deleteBrowserTestAccount(account.id)}>Remove</button></div></div>)}
@@ -1219,10 +1366,9 @@ export function App({
                 <div className="button-row"><button className="button primary" type="button" disabled={busy || !testAccountLabel.trim() || !testAccountOrigin.trim() || !testAccountUsername || !testAccountPassword} onClick={() => void saveBrowserTestAccount()}>{testAccountId ? 'Replace saved account' : 'Save encrypted test account'}</button>{testAccountId ? <button className="button quiet" type="button" onClick={() => { setTestAccountId(''); setTestAccountLabel(''); setTestAccountUsername(''); setTestAccountPassword(''); }}>Cancel replace</button> : null}</div>
                 <p className="field-help">Only use dedicated non-production test users. This app does not save cookies or browser sessions. If a site requires MFA, the run report will mark that check blocked and explain what to do next.</p>
               </div>
-              <div className="panel selection-panel">
-                <div className="panel-title-row"><div><h2>Organizations</h2><p>Saved separately for each signed-in account.</p></div><button className="button outline" type="button" onClick={() => setScreen('project')}>Manage organizations</button></div>
-                {state.savedOrganizations?.length ? <div className="saved-organizations">{state.savedOrganizations.map((name) => <span className="context-pill" key={name}>{name}</span>)}</div> : <p className="field-help">No organizations saved yet.</p>}
-              </div>
+              </> : null}
+              {settingsTab === 'Connections' ? <div className="panel selection-panel"><div className="panel-title-row"><div><h2>Organizations</h2><p>Saved separately for each signed-in account.</p></div><button className="button outline" type="button" onClick={() => setScreen('project')}>Manage organizations</button></div>{state.savedOrganizations?.length ? <div className="saved-organizations">{state.savedOrganizations.map((name) => <span className="context-pill" key={name}>{name}</span>)}</div> : <p className="field-help">No organizations saved yet.</p>}</div> : null}
+              {settingsTab === 'AI Providers' ? <>
               <div className="panel selection-panel model-settings">
                 <div className="panel-title-row"><div><h2>Required AI agent provider</h2><p>{selectedProviderConnected ? modelProvider === 'claude-code' ? 'Claude Code is connected. Its credentials stay in Claude Code and are never returned to the renderer or sent to QA workers.' : `${modelProvider === 'openai' ? 'OpenAI' : modelProvider === 'anthropic' ? 'Anthropic' : 'OpenRouter'} API key is stored locally. The key is never returned to the renderer or sent to workers.` : 'Connect a provider before planning or running QA. No deterministic plan fallback is available.'}</p></div><span className="security-tag">{selectedProviderConnected ? 'CONNECTED' : 'REQUIRED'}</span></div>
                 <div className="filters-row settings-fields"><label>Provider<select className="text-input" value={modelProvider} onChange={(event) => { const next = event.target.value as 'openai' | 'anthropic' | 'openrouter' | 'claude-code'; setModelProvider(next); setProviderModels([]); setModelId(''); }}><option value="openai">OpenAI API</option><option value="anthropic">Anthropic API key</option><option value="openrouter">OpenRouter API key · multi-model catalog</option><option value="claude-code">Claude account · Claude Code plan</option></select></label><button className="button outline" type="button" disabled={busy} onClick={() => void connectProvider()}>{isConnectingClaude ? 'Checking Claude connection…' : isCheckingClaudeModels ? 'Checking models…' : modelProvider === 'claude-code' && selectedProviderConnected ? 'Check Claude account' : modelProvider === 'claude-code' ? 'Connect Claude account…' : 'Import key and discover models…'}</button></div>
@@ -1243,6 +1389,9 @@ export function App({
                 })}{!(state.savedModels ?? []).length ? <p className="field-help">Models you save appear here with their latest prompt-test result.</p> : null}</div>
                 {selectedProviderConnected ? <button className="button quiet" type="button" disabled={busy} onClick={() => void run(async () => { await api.clearModelKey(); setProviderModels([]); setModelId(''); updateState(await api.getState()); setNotice(modelProvider === 'claude-code' ? 'Claude model selection cleared. Your Claude Code account remains signed in.' : 'Provider key and selected agent model removed from encrypted local storage.'); })}>{modelProvider === 'claude-code' ? 'Clear selected Claude model' : 'Remove provider connection'}</button> : null}
                 <small>{modelProvider === 'claude-code' ? 'Saving or retesting a model sends one short prompt with no project data and uses your Claude plan allowance. Checking account models sends one short prompt per candidate model. Prices shown are API-equivalent estimates only.' : 'Choose a private one-line key file in the native picker. Saving or retesting a model sends one short prompt with no project data; standard provider charges may apply. The key is stored in encrypted local settings and never returned to the renderer.'}</small>
+              </div>
+              </> : null}
+              {settingsTab === 'Preferences' ? <div className="panel selection-panel"><div className="panel-title-row"><div><h2>Queue confirmations</h2><p>Choose whether removing a Story asks before removing its queued Tasks. Clear Queue always asks for confirmation.</p></div></div><label className="checkbox-row"><input type="checkbox" checked={state.confirmStoryRemoval !== false} disabled={busy} onChange={(event) => void run(() => api.saveQueuePreferences({ confirmStoryRemoval: event.target.checked }), updateState)} />Ask before removing a Story and its queued Tasks</label></div> : null}
               </div>
             </section>
           ) : null}
@@ -1308,6 +1457,7 @@ export function App({
               </div> : null}
             </section>
           ) : null}
+          {queueDialog ? <div className="dialog-backdrop"><section className="confirmation-dialog" role="dialog" aria-modal="true" aria-labelledby="queue-confirm-title" aria-describedby="queue-confirm-description"><h2 id="queue-confirm-title">{queueDialog.kind === 'clear-queue' ? 'Clear the QA Queue?' : 'Remove Story and Tasks?'}</h2><p id="queue-confirm-description">{queueDialog.kind === 'clear-queue' ? `This removes all ${state.queue.length} queued items from this device.` : `Remove “${queueDialogStory?.snapshot?.title ?? `Story #${queueDialogStory?.entry.workItemId ?? ''}`}” and ${queueDialogTaskCount} queued Task${queueDialogTaskCount === 1 ? '' : 's'} from the QA Queue?`}</p>{queueDialog.kind === 'remove-story' ? <label className="checkbox-row"><input type="checkbox" checked={suppressStoryRemovalPrompt} onChange={(event) => setSuppressStoryRemovalPrompt(event.target.checked)} />Don’t show this confirmation again</label> : null}<div className="button-row"><button className="button outline" type="button" disabled={busy} onClick={() => setQueueDialog(undefined)}>Cancel</button><button className="button primary" type="button" disabled={busy} onClick={() => void confirmQueueDialog()}>{busy ? 'Removing…' : queueDialog.kind === 'clear-queue' ? 'Clear Queue' : 'Remove Story and Tasks'}</button></div></section></div> : null}
         </main>
       </div>
     </div>

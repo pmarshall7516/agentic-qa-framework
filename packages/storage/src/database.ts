@@ -23,10 +23,12 @@ export interface QaStoreOptions {
 
 export interface QaStore {
   addToQueue(snapshot: WorkItemSnapshot): Promise<QueueEntry>;
+  applyQueueChanges(additions: WorkItemSnapshot[], removals: string[]): Promise<void>;
   getQueue(): Promise<QueueEntry[]>;
   getSnapshot(key: string): Promise<WorkItemSnapshot | undefined>;
   markStale(key: string, stale: boolean): Promise<void>;
   removeFromQueue(key: string): Promise<void>;
+  clearQueue(): Promise<void>;
   reorderQueue(keys: readonly string[]): Promise<void>;
   close(): Promise<void>;
   getSetting(key: string): Promise<unknown>;
@@ -200,7 +202,7 @@ export async function openQaStore(options: QaStoreOptions): Promise<QaStore> {
     db.pragma('journal_mode = WAL');
     migrate(db);
 
-    const addTransaction = db.transaction((snapshot: WorkItemSnapshot) => {
+    const upsertQueueSnapshot = (snapshot: WorkItemSnapshot) => {
       const entry = makeQueueEntry(snapshot, (options.now ?? (() => new Date().toISOString()))());
       db!.prepare(`
         INSERT INTO work_items (key, payload_json, revision, retrieved_at)
@@ -237,7 +239,19 @@ export async function openQaStore(options: QaStoreOptions): Promise<QaStore> {
         return entry;
       }
       return rowToEntry(existing);
-    });
+    };
+    const addTransaction = db.transaction((snapshot: WorkItemSnapshot) => upsertQueueSnapshot(snapshot));
+    const cascadeRemoveStatement = db.prepare(`
+      DELETE FROM queue_entries
+      WHERE key = ? OR key IN (
+        SELECT q.key FROM queue_entries q
+        JOIN work_items w ON w.key = q.key
+        WHERE json_extract(w.payload_json, '$.kind') = 'TASK'
+          AND json_extract(w.payload_json, '$.parentId') = ?
+          AND q.organization = ? AND q.project_id = ?
+      )
+    `);
+    const deleteSnapshotsForQueue = db.prepare('DELETE FROM work_items WHERE key NOT IN (SELECT key FROM queue_entries)');
 
     const getQueueStatement = db.prepare(
       'SELECT * FROM queue_entries ORDER BY position ASC, queued_at ASC',
@@ -280,7 +294,34 @@ export async function openQaStore(options: QaStoreOptions): Promise<QaStore> {
     return {
       async addToQueue(input) {
         const snapshot = WorkItemSnapshotSchema.parse(input);
+        if (snapshot.kind === 'TASK' && (!snapshot.parentId || !db!.prepare('SELECT 1 FROM queue_entries WHERE key = ?').get(`${snapshot.organization.toLocaleLowerCase('en-US')}:${snapshot.projectId}:${snapshot.parentId}`))) {
+          throw new Error(`Task #${snapshot.id} cannot be queued without its parent Story.`);
+        }
         return addTransaction(snapshot) as QueueEntry;
+      },
+      async applyQueueChanges(additionsInput, removalsInput) {
+        const additions = additionsInput.map((snapshot) => WorkItemSnapshotSchema.parse(snapshot));
+        const removals = removalsInput.map((key) => z.string().min(1).max(400).parse(key));
+        const apply = db!.transaction(() => {
+          for (const key of removals) {
+            const entry = db!.prepare('SELECT organization, project_id, work_item_id FROM queue_entries WHERE key = ?').get(key) as { organization: string; project_id: string; work_item_id: number } | undefined;
+            if (!entry) continue;
+            const snapshot = db!.prepare('SELECT payload_json FROM work_items WHERE key = ?').get(key) as { payload_json: string } | undefined;
+            const item = snapshot ? WorkItemSnapshotSchema.parse(JSON.parse(snapshot.payload_json)) : undefined;
+            if (item?.kind === 'REQUIREMENT') cascadeRemoveStatement.run(key, item.id, entry.organization, entry.project_id);
+            else db!.prepare('DELETE FROM queue_entries WHERE key = ?').run(key);
+          }
+          deleteSnapshotsForQueue.run();
+          for (const snapshot of additions) upsertQueueSnapshot(snapshot);
+          const queue = db!.prepare(`SELECT q.key, w.payload_json FROM queue_entries q JOIN work_items w ON w.key = q.key`).all() as Array<{ key: string; payload_json: string }>;
+          const queuedStories = new Set(queue.filter(({ payload_json }) => JSON.parse(payload_json).kind === 'REQUIREMENT').map(({ payload_json }) => {
+            const item = JSON.parse(payload_json) as WorkItemSnapshot;
+            return `${item.organization.toLocaleLowerCase('en-US')}:${item.projectId}:${item.id}`;
+          }));
+          const orphan = queue.map(({ payload_json }) => WorkItemSnapshotSchema.parse(JSON.parse(payload_json))).find((item) => item.kind === 'TASK' && (!item.parentId || !queuedStories.has(`${item.organization.toLocaleLowerCase('en-US')}:${item.projectId}:${item.parentId}`)));
+          if (orphan) throw new Error(`Task #${orphan.id} cannot be queued without its parent Story.`);
+        });
+        apply.immediate();
       },
       async getQueue() {
         return (getQueueStatement.all() as QueueRow[]).map(rowToEntry);
@@ -296,7 +337,19 @@ export async function openQaStore(options: QaStoreOptions): Promise<QaStore> {
         updateStaleStatement.run(stale ? 1 : 0, keyValue);
       },
       async removeFromQueue(keyValue) {
-        deleteEntryStatement.run(keyValue);
+        const remove = db!.transaction(() => {
+          const entry = db!.prepare('SELECT organization, project_id, work_item_id FROM queue_entries WHERE key = ?').get(keyValue) as { organization: string; project_id: string; work_item_id: number } | undefined;
+          const row = getSnapshotStatement.get(keyValue) as { payload_json: string } | undefined;
+          const item = row ? WorkItemSnapshotSchema.parse(JSON.parse(row.payload_json)) : undefined;
+          if (entry && item?.kind === 'REQUIREMENT') cascadeRemoveStatement.run(keyValue, item.id, entry.organization, entry.project_id);
+          else deleteEntryStatement.run(keyValue);
+          deleteSnapshotsForQueue.run();
+        });
+        remove.immediate();
+      },
+      async clearQueue() {
+        const clear = db!.transaction(() => { db!.exec('DELETE FROM queue_entries; DELETE FROM work_items;'); });
+        clear.immediate();
       },
       async reorderQueue(keys) {
         const currentKeys = (getQueueStatement.all() as QueueRow[]).map(({ key }) => key);

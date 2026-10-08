@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { AdoIteration, AdoTaskboardItem } from '@agentic-qa/ado/client';
 import type { WorkItemSnapshot } from '@agentic-qa/domain/work-item';
-import type { DesktopApi, DesktopState } from '../shared/ipc.js';
+import type { DesktopApi } from '../shared/ipc.js';
 import { errorMessage } from './error-message.js';
 
-export function SprintWorkPicker({ api, activeAdoProfileId, queuedIds, onQueueChanged, onError, onNotice }: {
+export function SprintWorkPicker({ api, activeAdoProfileId, queuedIds, onSelectionChange, onError, onNotice }: {
   api: DesktopApi;
   activeAdoProfileId?: string;
   queuedIds: Set<string>;
-  onQueueChanged: (state: DesktopState) => void;
+  onSelectionChange: (item: WorkItemSnapshot, checked: boolean, parent?: WorkItemSnapshot, children?: WorkItemSnapshot[]) => void;
   onError: (message: string) => void;
   onNotice: (message: string) => void;
 }) {
@@ -21,13 +21,11 @@ export function SprintWorkPicker({ api, activeAdoProfileId, queuedIds, onQueueCh
   const [taskboardItems, setTaskboardItems] = useState<AdoTaskboardItem[]>([]);
   const [workItemQuery, setWorkItemQuery] = useState('');
   const [selectedColumns, setSelectedColumns] = useState<Set<string>>(new Set());
-  const [selected, setSelected] = useState<Set<number>>(new Set());
   const [childrenByStory, setChildrenByStory] = useState<Record<number, WorkItemSnapshot[]>>({});
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [afterId, setAfterId] = useState<number>();
   const [loadingIterations, setLoadingIterations] = useState(false);
   const [loadingStories, setLoadingStories] = useState(false);
-  const [saving, setSaving] = useState(false);
 
   const selectedIteration = useMemo(() => iterations.find(({ id }) => id === iterationId), [iterations, iterationId]);
   const matchingIterations = useMemo(() => {
@@ -43,7 +41,6 @@ export function SprintWorkPicker({ api, activeAdoProfileId, queuedIds, onQueueCh
     setActiveSprintOption(0);
     setStories([]);
     setTaskboardItems([]);
-    setSelected(new Set());
     setChildrenByStory({});
     setExpanded(new Set());
     setAfterId(undefined);
@@ -78,7 +75,6 @@ export function SprintWorkPicker({ api, activeAdoProfileId, queuedIds, onQueueCh
     setTaskboardItems([]);
     setWorkItemQuery('');
     setSelectedColumns(new Set());
-    setSelected(new Set());
     setChildrenByStory({});
     setExpanded(new Set());
     setAfterId(undefined);
@@ -102,7 +98,6 @@ export function SprintWorkPicker({ api, activeAdoProfileId, queuedIds, onQueueCh
       });
       setAfterId(page.nextAfterId);
       if (!append) {
-        setSelected(new Set());
         setChildrenByStory({});
         setExpanded(new Set());
         setWorkItemQuery('');
@@ -129,33 +124,8 @@ export function SprintWorkPicker({ api, activeAdoProfileId, queuedIds, onQueueCh
     }
   }
 
-  function select(id: number, checked: boolean) {
-    setSelected((current) => {
-      const next = new Set(current);
-      if (checked) next.add(id); else next.delete(id);
-      return next;
-    });
-  }
-
-  async function addSelected() {
-    if (!selected.size) return;
-    setSaving(true);
-    onError('');
-    try {
-      const parentByTaskId = new Map(Object.entries(childrenByStory).flatMap(([parentId, children]) => (children ?? []).map(({ id }) => [id, Number(parentId)] as const)));
-      const selections = [...selected].map((workItemId) => ({ workItemId, ...(parentByTaskId.has(workItemId) ? { parentId: parentByTaskId.get(workItemId)! } : {}) }));
-      onQueueChanged(await api.addQueueItems(selections));
-      onNotice(`Added ${selected.size} selected ${selected.size === 1 ? 'work item' : 'work items'} to the QA Queue.`);
-      setSelected(new Set());
-    } catch (error) {
-      onError(errorMessage(error));
-    } finally {
-      setSaving(false);
-    }
-  }
-
   const selectable = [...stories, ...Object.values(childrenByStory).flat()];
-  const availableSelected = selectable.filter(({ id, organization, projectId }) => selected.has(id) && !queuedIds.has(`${organization.toLowerCase()}:${projectId}:${id}`));
+  const selectedCount = selectable.filter((item) => queuedIds.has(`${item.organization.toLocaleLowerCase('en-US')}:${item.projectId}:${item.id}`)).length;
   const query = workItemQuery.trim().toLocaleLowerCase('en-US');
   const matchesWorkItem = (item: WorkItemSnapshot) => !query || String(item.id).includes(query) || (item.title ?? '').toLocaleLowerCase('en-US').includes(query);
   const columnByTaskId = new Map(taskboardItems.map(({ workItemId, column }) => [workItemId, column.trim()]));
@@ -163,7 +133,7 @@ export function SprintWorkPicker({ api, activeAdoProfileId, queuedIds, onQueueCh
   const taskMatches = (task: WorkItemSnapshot) => matchesWorkItem(task) && (!selectedColumns.size || selectedColumns.has(columnByTaskId.get(task.id) ?? ''));
   const visibleStories = stories.filter((story) => storyMatches(story) || (childrenByStory[story.id] ?? []).some(taskMatches));
 
-  return <section className={`panel selection-panel sprint-picker${selected.size ? ' selection-active' : ''}`} aria-labelledby="sprint-picker-title">
+  return <section className={`panel selection-panel sprint-picker${selectedCount ? ' selection-active' : ''}`} aria-labelledby="sprint-picker-title">
     <div className="panel-title-row"><div><p className="eyebrow">SPRINT SCOPE</p><h2 id="sprint-picker-title">Active Stories by sprint</h2><p>Choose a sprint, browse its active Requirements, then select Stories and child Tasks for the QA Queue.</p></div>
       <button className="button outline" type="button" disabled={!activeAdoProfileId || loadingIterations} onClick={() => void refreshIterations()}>{loadingIterations ? 'Loading sprints…' : 'Refresh sprints'}</button></div>
     <>
@@ -181,16 +151,15 @@ export function SprintWorkPicker({ api, activeAdoProfileId, queuedIds, onQueueCh
         <div className="sprint-filter-row"><label className="sprint-work-search">Filter Stories and Tasks<input className="text-input" type="search" role="searchbox" aria-label="Filter Stories and Tasks" placeholder="Search by ADO ID or name…" value={workItemQuery} onChange={(event) => setWorkItemQuery(event.target.value)} /><small>Search Stories and loaded Tasks by ID or name.</small></label>
           <details className="task-column-filter"><summary aria-label="Task columns">Task columns{selectedColumns.size ? <span className="task-column-count">{selectedColumns.size}</span> : null}</summary><div className="task-column-menu"><fieldset><legend>Filter Tasks by sprint column</legend>{taskColumns.length ? taskColumns.map((column) => <label key={column}><input type="checkbox" checked={selectedColumns.has(column)} onChange={(event) => setSelectedColumns((current) => { const next = new Set(current); if (event.target.checked) next.add(column); else next.delete(column); return next; })} />{column}</label>) : <p className="field-help">No taskboard columns were returned for this sprint.</p>}</fieldset>{selectedColumns.size ? <button className="text-button" type="button" onClick={() => setSelectedColumns(new Set())}>Clear column filters</button> : null}</div></details>
         </div>
-        <div className="sprint-selection-toolbar"><span>{query ? `${visibleStories.length} of ${stories.length} Stories · ` : `${stories.length} Stories · `}{selected.size} selected</span></div>
+        <div className="sprint-selection-toolbar"><span>{query ? `${visibleStories.length} of ${stories.length} Stories · ` : `${stories.length} Stories · `}{selectedCount} selected in QA Queue</span></div>
         {visibleStories.length ? <div className="sprint-story-list">{visibleStories.map((story) => <article className="sprint-story" key={`${story.organization}:${story.projectId}:${story.id}`}>
-          <label className="sprint-item-select"><input type="checkbox" aria-label={`Select #${story.id} ${story.title || 'Requirement'}`} checked={selected.has(story.id)} disabled={queuedIds.has(`${story.organization.toLowerCase()}:${story.projectId}:${story.id}`)} onChange={(event) => select(story.id, event.target.checked)} /><span><strong>#{story.id} · {story.title || 'Untitled Requirement'}</strong><small>{story.type} · {story.state}</small></span></label>
+          <label className="sprint-item-select"><input type="checkbox" aria-label={`Select #${story.id} ${story.title || 'Requirement'}`} checked={queuedIds.has(`${story.organization.toLocaleLowerCase('en-US')}:${story.projectId}:${story.id}`)} onChange={(event) => onSelectionChange(story, event.target.checked, undefined, childrenByStory[story.id] ?? [])} /><span><strong>#{story.id} · {story.title || 'Untitled Requirement'}</strong><small>{story.type} · {story.state}</small></span></label>
           {expanded.has(story.id) ? <><div className="sprint-task-list">{childrenByStory[story.id]?.length ? childrenByStory[story.id]!.filter((task) => (!query || storyMatches(story) || matchesWorkItem(task)) && (!selectedColumns.size || selectedColumns.has(columnByTaskId.get(task.id) ?? ''))).map((task) => {
             const column = columnByTaskId.get(task.id);
-            return <label className="sprint-item-select" key={task.id}><input type="checkbox" aria-label={`Select #${task.id} ${task.title || 'Task'}`} checked={selected.has(task.id)} disabled={queuedIds.has(`${task.organization.toLowerCase()}:${task.projectId}:${task.id}`)} onChange={(event) => select(task.id, event.target.checked)} /><span><strong>#{task.id} · {task.title || 'Untitled Task'}</strong><small className="sprint-task-meta">Task · {task.state}<span className="sprint-task-column" aria-label={`Taskboard column: ${column ?? 'Not in selected sprint'}`}>{column ?? 'Not in selected sprint'}</span></small></span></label>;
+            return <label className="sprint-item-select" key={task.id}><input type="checkbox" aria-label={`Select #${task.id} ${task.title || 'Task'}`} checked={queuedIds.has(`${task.organization.toLocaleLowerCase('en-US')}:${task.projectId}:${task.id}`)} onChange={(event) => onSelectionChange(task, event.target.checked, story)} /><span><strong>#{task.id} · {task.title || 'Untitled Task'}</strong><small className="sprint-task-meta">Task · {task.state}<span className="sprint-task-column" aria-label={`Taskboard column: ${column ?? 'Not in selected sprint'}`}>{column ?? 'Not in selected sprint'}</span></small></span></label>;
           }) : <p className="field-help">{childrenByStory[story.id]?.length ? 'No child Tasks match the text and column filters.' : 'No child Tasks are linked to this Story in Azure DevOps.'}</p>}</div><button className="text-button sprint-hide-tasks" type="button" onClick={() => void toggleChildren(story)}>Hide Tasks</button></> : <button className="text-button" type="button" onClick={() => void toggleChildren(story)}>{childrenByStory[story.id] ? `Show ${childrenByStory[story.id]!.length} Tasks` : 'Load child Tasks'}</button>}
         </article>)}</div> : <p className="field-help" role="status">No Stories or loaded Tasks match “{workItemQuery}”.</p>}
         {afterId !== undefined ? <button className="button outline" type="button" disabled={loadingStories} onClick={() => void loadStories(true)}>{loadingStories ? 'Loading…' : 'Load more Stories'}</button> : null}
-        {selected.size ? <div className="selection-footer" role="region" aria-label="QA Queue selection actions"><div className="selection-footer-inner"><span>{availableSelected.length} selected</span><button className="button primary" type="button" disabled={saving || !availableSelected.length} onClick={() => void addSelected()}>{saving ? 'Adding…' : `Add ${availableSelected.length || ''} selected to QA Queue`}</button></div></div> : null}
       </> : null}
     </>
   </section>;

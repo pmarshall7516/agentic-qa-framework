@@ -42,6 +42,7 @@ const SETTING = {
   organizations: 'ado.organizations',
   profiles: 'ado.profiles',
   activeProfile: 'ado.activeProfile',
+  confirmStoryRemoval: 'queue.confirmStoryRemoval',
 } as const;
 
 type SupportedProviderId = 'openai' | 'anthropic' | 'openrouter' | 'claude-code';
@@ -228,10 +229,9 @@ export class DesktopController {
     const selectedAccountId = await this.setting<string>(SETTING.accountId);
     if (selectedAccountId) await this.migrateLegacySelections(selectedAccountId);
     const configuredProvider = await this.setting<SupportedProviderId>('model.provider') ?? 'openai';
-    const [organization, project, entries, target, providerId, modelKey, modelSettings] = await Promise.all([
+    const [organization, project, target, providerId, modelKey, modelSettings] = await Promise.all([
       this.setting<string>(SETTING.organization),
       this.setting<AdoProject>(SETTING.project),
-      this.store.getQueue(),
       this.setting<TargetConfig>('run.target'),
       this.setting<SupportedProviderId>('model.provider'),
       this.setting<string>(`model.apiKey.${configuredProvider}`),
@@ -242,10 +242,16 @@ export class DesktopController {
     const activeAccountId = selectedAccountId && accounts.some(({ homeAccountId }) => homeAccountId === selectedAccountId) ? selectedAccountId : undefined;
     if (activeAccountId && organization && project) await this.ensureDefaultAdoProfile(organization, project);
     const customTypeMappings = activeAccountId && organization && project ? await this.typeMappings(organization, project.id) : {};
-    const queue: QueueItemView[] = await Promise.all(entries.map(async (entry: QueueEntry) => ({
+    let entries = await this.store.getQueue();
+    await this.repairQueuedParents(entries, activeAccountId);
+    entries = await this.store.getQueue();
+    const snapshots = await Promise.all(entries.map(async (entry) => ({ entry, snapshot: await this.store.getSnapshot(entry.key) })));
+    const requirementKeys = new Set(snapshots.filter(({ snapshot }) => snapshot?.kind === 'REQUIREMENT').map(({ entry }) => entry.key));
+    const queue: QueueItemView[] = snapshots.map(({ entry, snapshot }) => ({
       entry,
-      snapshot: await this.store.getSnapshot(entry.key),
-    })));
+      ...(snapshot ? { snapshot } : {}),
+      ...(snapshot?.kind === 'TASK' && (!snapshot.parentId || !requirementKeys.has(`${entry.organization}:${entry.projectId}:${snapshot.parentId}`)) ? { unresolvedParent: true } : {}),
+    }));
     const claudeAccountEmail = configuredProvider === 'claude-code'
       ? await this.getClaudeAccountEmail().catch(() => undefined)
       : undefined;
@@ -260,6 +266,7 @@ export class DesktopController {
       adoProfiles: activeAccountId ? await this.setting<AdoRunProfile[]>(SETTING.profiles) ?? [] : [],
       ...(activeAccountId && await this.setting<string>(SETTING.activeProfile) ? { activeAdoProfileId: await this.setting<string>(SETTING.activeProfile) } : {}),
       queue,
+      confirmStoryRemoval: await this.rawSetting<boolean>(SETTING.confirmStoryRemoval) !== false,
       ...(target ? { target } : {}),
       modelProviderConfigured: configuredProvider === 'claude-code' ? await this.isClaudeAccountConnected().catch(() => false) : Boolean(modelKey),
       modelProvider: providerId ?? modelSettings?.providerId ?? 'openai',
@@ -843,27 +850,22 @@ export class DesktopController {
 
   async addQueueItem(workItemId: number): Promise<DesktopState> {
     const id = z.number().int().positive().max(2_147_483_647).parse(workItemId);
-    const [organization, project, token] = await Promise.all([
-      this.setting<string>(SETTING.organization),
-      this.setting<AdoProject>(SETTING.project),
-      this.accessToken(),
-    ]);
-    if (!organization || !project) throw new Error('Choose an Azure DevOps project first.');
-    const [snapshot] = await this.ado.fetchWorkItems(token, {
-      organization, projectId: project.id, projectName: project.name, ids: [id],
-      customTypeMappings: await this.typeMappings(organization, project.id),
-    });
-    if (!snapshot) throw new Error('Azure DevOps did not return that work item. It may have been deleted or access may have changed.');
-    if (snapshot.kind !== 'REQUIREMENT' && snapshot.kind !== 'TASK') throw new Error('Only Requirements and Tasks can be added to the QA Queue.');
-    await this.store.addToQueue(snapshot);
-    return this.getState();
+    return this.addQueueItems([{ workItemId: id }]);
   }
 
   async addQueueItems(selectionsInput: Array<{ workItemId: number; parentId?: number }>): Promise<DesktopState> {
+    return this.applyQueueChanges({ additions: selectionsInput, removals: [] });
+  }
+
+  async applyQueueChanges(input: { additions: Array<{ workItemId: number; parentId?: number }>; removals: string[] }): Promise<DesktopState> {
+    const { additions: selectionsInput, removals } = z.object({
+      additions: z.array(z.object({ workItemId: z.number().int().positive().max(2_147_483_647), parentId: z.number().int().positive().max(2_147_483_647).optional() }).strict()).max(200),
+      removals: z.array(z.string().min(1).max(400)).max(400),
+    }).strict().parse(input);
     const selections = z.array(z.object({
       workItemId: z.number().int().positive().max(2_147_483_647),
       parentId: z.number().int().positive().max(2_147_483_647).optional(),
-    }).strict()).min(1).max(200).parse(selectionsInput);
+    }).strict()).max(200).parse(selectionsInput);
     const bySelectedId = new Map<number, { workItemId: number; parentId?: number }>();
     for (const selection of selections) {
       const current = bySelectedId.get(selection.workItemId);
@@ -878,7 +880,12 @@ export class DesktopController {
       this.setting<AdoProject>(SETTING.project),
       this.accessToken(),
     ]);
-    if (!organization || !project) throw new Error('Choose an Azure DevOps project before adding work items to the queue.');
+    if ((!uniqueSelections.length && !removals.length)) return this.getState();
+    if (!organization || !project) throw new Error('Choose an Azure DevOps project before changing the queue.');
+    if (!uniqueSelections.length) {
+      await this.store.applyQueueChanges([], removals);
+      return this.getState();
+    }
     const fetchedItems = await this.ado.fetchWorkItems(token, {
       organization,
       projectId: project.id,
@@ -890,22 +897,40 @@ export class DesktopController {
     const missingIds = uniqueIds.filter((id) => !byId.has(id));
     if (missingIds.length) throw new Error(`Azure DevOps could not load selected work item${missingIds.length === 1 ? '' : 's'} ${missingIds.join(', ')}. Refresh the sprint results and try again.`);
     if (uniqueIds.some((id) => byId.get(id)!.kind !== 'REQUIREMENT' && byId.get(id)!.kind !== 'TASK')) throw new Error('Only Requirements and Tasks can be added to the QA Queue. No selected items were added.');
-    if (parentIds.some((id) => !byId.has(id) || byId.get(id)!.kind !== 'REQUIREMENT')) throw new Error('A selected Task references a Story that Azure DevOps could not validate. No selected items were added.');
+    const inferredParentByTaskId = new Map<number, number>();
+    for (const selection of uniqueSelections) {
+      const item = byId.get(selection.workItemId)!;
+      if (item.kind !== 'TASK') continue;
+      const parentId = selection.parentId ?? item.parentId;
+      if (!parentId) throw new Error(`Task #${item.id} has no verifiable parent Story. Refresh the work item and try again.`);
+      inferredParentByTaskId.set(item.id, parentId);
+    }
+    const allParentIds = [...new Set([...parentIds, ...inferredParentByTaskId.values()])];
+    const missingParentIds = allParentIds.filter((id) => !byId.has(id));
+    if (missingParentIds.length) {
+      const parents = await this.ado.fetchWorkItems(token, { organization, projectId: project.id, projectName: project.name, ids: missingParentIds, customTypeMappings: await this.typeMappings(organization, project.id) });
+      for (const parent of parents) byId.set(parent.id, parent);
+    }
+    if (allParentIds.some((id) => !byId.has(id) || byId.get(id)!.kind !== 'REQUIREMENT')) throw new Error('A selected Task references a Story that Azure DevOps could not validate. No selected items were added.');
     const verifiedParentByTaskId = new Map<number, number>();
     for (const selection of uniqueSelections) {
-      if (!selection.parentId) continue;
-      if (byId.get(selection.workItemId)!.kind !== 'TASK') throw new Error(`Only a Task can be nested under Story #${selection.parentId}. No selected items were added.`);
+      const parentId = inferredParentByTaskId.get(selection.workItemId);
+      if (!parentId) continue;
+      if (byId.get(selection.workItemId)!.kind !== 'TASK') throw new Error(`Only a Task can be nested under Story #${parentId}. No selected items were added.`);
       if (!verifiedParentByTaskId.has(selection.workItemId)) {
-        const childIds = await this.ado.getChildIds(token, { organization, parentId: selection.parentId });
-        if (!childIds.includes(selection.workItemId)) throw new Error(`Task #${selection.workItemId} is no longer linked to Story #${selection.parentId}. Refresh the sprint results and try again.`);
-        verifiedParentByTaskId.set(selection.workItemId, selection.parentId);
+        const childIds = await this.ado.getChildIds(token, { organization, parentId });
+        if (!childIds.includes(selection.workItemId)) throw new Error(`Task #${selection.workItemId} is no longer linked to Story #${parentId}. Refresh the sprint results and try again.`);
+        verifiedParentByTaskId.set(selection.workItemId, parentId);
       }
     }
+    const snapshotsToAdd = new Map<number, WorkItemSnapshot>();
+    for (const parentId of verifiedParentByTaskId.values()) snapshotsToAdd.set(parentId, byId.get(parentId)!);
     for (const id of uniqueIds) {
       const parentId = verifiedParentByTaskId.get(id);
       const snapshot = byId.get(id)!;
-      await this.store.addToQueue(parentId && snapshot.parentId !== parentId ? { ...snapshot, parentId } : snapshot);
+      snapshotsToAdd.set(id, parentId && snapshot.parentId !== parentId ? { ...snapshot, parentId } : snapshot);
     }
+    await this.store.applyQueueChanges([...snapshotsToAdd.values()], removals);
     return this.getState();
   }
 
@@ -923,6 +948,17 @@ export class DesktopController {
   async removeQueueItem(key: string): Promise<DesktopState> {
     const validated = z.string().min(1).max(400).parse(key);
     await this.store.removeFromQueue(validated);
+    return this.getState();
+  }
+
+  async clearQueue(): Promise<DesktopState> {
+    await this.store.clearQueue();
+    return this.getState();
+  }
+
+  async saveQueuePreferences(input: { confirmStoryRemoval: boolean }): Promise<DesktopState> {
+    const preferences = z.object({ confirmStoryRemoval: z.boolean() }).strict().parse(input);
+    await this.store.setSetting(SETTING.confirmStoryRemoval, preferences.confirmStoryRemoval);
     return this.getState();
   }
 
@@ -1157,6 +1193,11 @@ export class DesktopController {
   }
 
   private async buildDraftPlan(previousRunId: string | undefined, streamId: string): Promise<DraftPlan> {
+    const savedQueue = await this.store.getQueue();
+    const savedSnapshots = await Promise.all(savedQueue.map(async (entry) => ({ entry, snapshot: await this.store.getSnapshot(entry.key) })));
+    const storyKeys = new Set(savedSnapshots.filter(({ snapshot }) => snapshot?.kind === 'REQUIREMENT').map(({ entry }) => entry.key));
+    const orphanTask = savedSnapshots.find(({ entry, snapshot }) => snapshot?.kind === 'TASK' && (!snapshot.parentId || !storyKeys.has(`${entry.organization}:${entry.projectId}:${snapshot.parentId}`)));
+    if (orphanTask) throw new Error(`Task #${orphanTask.entry.workItemId} is missing its parent Story in the QA Queue. Open Work Items and apply the parent Story selection before planning.`);
     const configuredAgent = await this.requireConfiguredAgent();
     this.pendingPlans.clear();
     let target = TargetSchema.parse(await this.setting<TargetConfig>('run.target'));
@@ -2057,6 +2098,27 @@ export class DesktopController {
     if (scoped && !accountId) return undefined;
     const value = scoped ? await this.rawSetting<T>(this.accountSettingKey(key, accountId!)) : await this.rawSetting<T>(key);
     return value === null || value === undefined ? undefined : value as T;
+  }
+
+  private async repairQueuedParents(entries: QueueEntry[], activeAccountId?: string): Promise<void> {
+    const queuedKeys = new Set(entries.map(({ key }) => key));
+    const parents = new Map<string, { organization: string; projectId: string; projectName: string; parentId: number }>();
+    for (const entry of entries) {
+      const snapshot = await this.store.getSnapshot(entry.key);
+      if (snapshot?.kind !== 'TASK' || !snapshot.parentId) continue;
+      const parentKey = `${entry.organization}:${entry.projectId}:${snapshot.parentId}`;
+      if (!queuedKeys.has(parentKey)) parents.set(parentKey, { organization: snapshot.organization, projectId: snapshot.projectId, projectName: snapshot.projectName, parentId: snapshot.parentId });
+    }
+    for (const [parentKey, parent] of parents) {
+      let snapshot = await this.store.getSnapshot(parentKey);
+      if (!snapshot && activeAccountId) {
+        try {
+          const token = await this.accessToken();
+          [snapshot] = await this.ado.fetchWorkItems(token, { organization: parent.organization, projectId: parent.projectId, projectName: parent.projectName, ids: [parent.parentId], customTypeMappings: await this.typeMappings(parent.organization, parent.projectId) });
+        } catch { /* Keep the legacy Task visible with a repair message while offline or signed out. */ }
+      }
+      if (snapshot?.kind === 'REQUIREMENT') await this.store.addToQueue(snapshot);
+    }
   }
 
   private async rawSetting<T>(key: string): Promise<T | undefined> {

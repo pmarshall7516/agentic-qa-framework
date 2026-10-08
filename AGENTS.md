@@ -75,6 +75,7 @@ For each delegated task, provide: goal and requirement IDs; exact owned paths; p
 ## Domain and verdict rules
 
 - Use the canonical terms `Requirement`, `Task`, `QA Queue`, `Target`, `Acceptance Criterion`, `QA Contract`, `Scenario`, `Observation`, `Evidence`, `Coverage`, `Finding`, `Verdict` and `Run Manifest` from `docs/CONTEXT.md`.
+- Every Task in the QA Queue must have its parent Requirement queued; Work Items stages queue membership changes until the user applies them.
 - A task informs scope but does not prove its parent's acceptance criteria. Preserve source ID, field and revision for every criterion.
 - A selected Story/Requirement supplies feature context and is not independently QAed. Before Plan Review, the Orchestrator reads all selected Story/Requirement and Task content together, creates a feature summary, source-linked feature-level Acceptance Criterion proposals, and one verification plan for every selected Task. Users accept, edit or reject proposals before they enter the QA Contract. Tasks are not standalone acceptance criteria and Task status is never test evidence.
 - Plan synthesis is a user-initiated model request. Before it runs, disclose the selected saved/tested provider/model and the exact selected ADO IDs, revisions and fields. Saving/retesting a model sends only a fixed minimal plain prompt with no project data and succeeds when the provider returns text; disclose provider charges and Claude plan allowance use before save/retest.

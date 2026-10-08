@@ -26,7 +26,7 @@ describe('desktop keyboard navigation', () => {
     render(<App api={api} initialState={{ ...state, azureCliAvailable: true, accounts: [account], selectedProject: { id: 'project-1', name: 'Portal' } }} />);
 
     const screens = [
-      { nav: 'Work items', heading: 'Find work to verify' },
+      { nav: 'Work Items', heading: 'Work Items' },
       { nav: 'QA Queue', heading: 'Your QA Queue' },
       { nav: 'Runs', heading: 'Run history' },
       { nav: 'Settings', heading: 'Settings' },
@@ -199,9 +199,9 @@ describe('desktop keyboard navigation', () => {
     const project = await screen.findByRole('button', { name: /Portal/ });
     await tabTo(project);
     await user.keyboard('{Enter}');
-    expect(await screen.findByRole('heading', { name: 'Find work to verify' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Work Items' })).toBeTruthy();
 
-    await focusNavigation('Work items');
+    await focusNavigation('Work Items');
     const search = screen.getByRole('textbox', { name: 'Work item ID or title' });
     await tabTo(search);
     await user.keyboard('42{Enter}');

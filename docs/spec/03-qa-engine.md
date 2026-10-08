@@ -75,7 +75,7 @@ Contract validation rejects a criterion with no required layer, no linked scenar
 
 ## Planning rules
 
-1. Read each selected Requirement/Story and its selected child Tasks together. Treat the Story as feature context for the behavior built by those Tasks, not as a work item to test independently. Plan selected standalone Tasks as their own scope.
+1. Every queued Task has its parent Requirement queued. Read each selected Requirement/Story and its selected child Tasks together. Treat the Story as feature context for the behavior built by those Tasks, not as a work item to test independently.
 2. Preserve ADO-sourced acceptance criteria as source context and retain field/revision provenance. The Orchestrator may propose additional feature-level criteria from selected work-item context, but these must be labeled agent-generated and link every source item/field/revision used. Never represent a proposal as ADO text or write it to ADO.
 3. The user must accept or edit a proposal before it becomes a QA Contract criterion. Rejected proposals remain distinguishable. Conflicting source criteria and Task context require an explicit ambiguity note and user resolution.
 4. Map every selected Task to concrete verification intent and the accepted feature criteria it supports. Task state or description alone is never evidence.

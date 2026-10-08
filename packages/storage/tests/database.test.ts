@@ -84,6 +84,38 @@ describe('encrypted QA store', () => {
     await store.close();
   });
 
+  it('applies queue deltas atomically and removes Tasks with their parent Story', async () => {
+    directory = await mkdtemp(path.join(tmpdir(), 'agentic-qa-store-'));
+    const store = await openQaStore({ databasePath: path.join(directory, 'qa.db'), key: () => Buffer.alloc(32, 7) });
+    const taskSnapshot: WorkItemSnapshot = { ...snapshot, id: 42, type: 'Task', kind: 'TASK', title: 'Send reset email', parentId: 40 };
+    await store.applyQueueChanges([snapshot, taskSnapshot], []);
+
+    await expect(store.getQueue()).resolves.toHaveLength(2);
+    await store.removeFromQueue('contoso:p-1:40');
+    await expect(store.getQueue()).resolves.toEqual([]);
+    await expect(store.getSnapshot('contoso:p-1:42')).resolves.toBeUndefined();
+    await store.close();
+  });
+
+  it('rejects queue deltas that would leave a Task without its parent Requirement', async () => {
+    directory = await mkdtemp(path.join(tmpdir(), 'agentic-qa-store-'));
+    const store = await openQaStore({ databasePath: path.join(directory, 'qa.db'), key: () => Buffer.alloc(32, 8) });
+    const taskSnapshot: WorkItemSnapshot = { ...snapshot, id: 42, type: 'Task', kind: 'TASK', title: 'Send reset email', parentId: 40 };
+    await expect(store.applyQueueChanges([taskSnapshot], [])).rejects.toThrow('without its parent Story');
+    await expect(store.getQueue()).resolves.toEqual([]);
+    await store.close();
+  });
+
+  it('clears all queued entries and snapshots in one operation', async () => {
+    directory = await mkdtemp(path.join(tmpdir(), 'agentic-qa-store-'));
+    const store = await openQaStore({ databasePath: path.join(directory, 'qa.db'), key: () => Buffer.alloc(32, 10) });
+    await store.addToQueue(snapshot);
+    await store.clearQueue();
+    await expect(store.getQueue()).resolves.toEqual([]);
+    await expect(store.getSnapshot('contoso:p-1:40')).resolves.toBeUndefined();
+    await store.close();
+  });
+
   it('persists selected account, organization, and project settings in the encrypted database', async () => {
     directory = await mkdtemp(path.join(tmpdir(), 'agentic-qa-store-'));
     const databasePath = path.join(directory, 'qa.db');

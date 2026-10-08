@@ -248,7 +248,21 @@ export function createUiReviewFixture(scenarioName: string): { api: DesktopApi; 
       for (const { workItemId } of items) await api.addQueueItem(workItemId);
       return currentState();
     },
+    applyQueueChanges: async ({ additions, removals }) => {
+      let queue = state.queue.filter(({ entry }) => !removals.includes(entry.key));
+      for (const selection of additions) {
+        const workItemIds = [selection.workItemId, ...(selection.parentId ? [selection.parentId] : [])];
+        for (const workItemId of workItemIds) {
+          const snapshot = workItemId === task.id ? task : requirement;
+          const entry: QueueEntry = { ...queueEntry, key: `${organization.toLowerCase()}:${project.id}:${workItemId}`, workItemId, queuedAt: new Date().toISOString() };
+          if (!queue.some(({ entry: existing }) => existing.key === entry.key)) queue = [...queue, { entry, snapshot }];
+        }
+      }
+      return withState({ queue });
+    },
     removeQueueItem: async (key) => withState({ queue: state.queue.filter(({ entry }) => entry.key !== key) }),
+    clearQueue: async () => withState({ queue: [] }),
+    saveQueuePreferences: async ({ confirmStoryRemoval }) => withState({ confirmStoryRemoval }),
     moveQueueItem: async (key, direction) => {
       const index = state.queue.findIndex(({ entry }) => entry.key === key);
       const targetIndex = direction === 'up' ? index - 1 : index + 1;

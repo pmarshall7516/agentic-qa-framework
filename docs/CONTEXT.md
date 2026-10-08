@@ -8,7 +8,7 @@ This glossary defines the product's core terms. Use these names consistently in 
 
 **Task**: A child work item describing implementation work that may inform QA scope but does not by itself prove a requirement. _Avoid_: Acceptance criterion.
 
-**QA Queue**: The local set of selected requirements or standalone tasks waiting to be configured and run. _Avoid_: Test suite.
+**QA Queue**: The local set of selected Requirements and their selected child Tasks waiting to be configured and run. Every queued Task has its parent Requirement in the queue. Work Items stages additions and removals until the user applies the changes. _Avoid_: Test suite.
 
 **Target**: A repository snapshot, development/staging site, or both, against which a QA run executes. _Avoid_: Environment when referring only to the site.
 

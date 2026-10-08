@@ -44,7 +44,7 @@ The implementation proceeds with Electron because the selected authentication, d
 
 | Module | Responsibility | Public contract |
 |---|---|---|
-| Desktop renderer | ADO-branded onboarding, organization/project picker, Work items, QA Queue, Runs and Settings | Typed commands/events only; no token, filesystem, shell or unrestricted network access |
+| Desktop renderer | ADO-branded onboarding, organization/project picker, Work Items, QA Queue, Runs and Settings | Typed commands/events only; no token, filesystem, shell or unrestricted network access |
 | ADO adapter | Sign-in, discover accessible orgs/projects, query/fetch work items and relations, optional linked PR metadata | Normalized `RequirementSnapshot` and `TaskSnapshot` |
 | Orchestrator Agent | Interpret selected work and target context; create coverage/delegation plan; dispatch typed tool requests | Versioned `DelegationPlan`; agent does not define capabilities or verdict |
 | Provider adapters | Discover compatible models and normalize structured outputs/tool calls; stream bounded response text to the local renderer when supported | `ProviderModel`, `AgentRequest`, `AgentResponse`, reported usage and typed model-response events |
